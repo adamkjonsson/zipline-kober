@@ -121,7 +121,25 @@ Depends on `zpf` `0.2.x`, which implements Zipline Payload Format **v0.16**.
   cases are the one place keys are not strings — JSON can only spell `1` as
   `"1"` while YAML gives an integer, and both mean the same case.
 
+- `kober.cli` — the `kober` console script, with two verbs. `kober check SPEC`
+  validates and types a spec, printing errors to stderr and warnings to stdout,
+  and `--strict` makes warnings fail too. `kober show SPEC` prints the field
+  tree, expanding nested units in place and guarding against recursion. Exit
+  codes are `0` success, `1` the spec is unusable, `2` a bad command line.
+
+  `run` and `try` from `DESIGN.md` §6 are deliberately **not** registered: they
+  need the decoder, and a verb that exists and refuses is a worse answer than
+  one that is honestly absent. `--help` says when they are coming.
+
+- `kober` — the package now re-exports the public API: `Spec` and the rest of
+  the model, `check`, `Finding`, `Severity`, `ExprType`, the loaders, and the
+  exception hierarchy.
+
 ### Documentation
+
+- `README.md` — replaced the "nothing is implemented yet" banner with what
+  actually works today, and added worked `check` and `show` output plus the
+  API equivalent.
 
 - Upstream findings from the pressure test filed against `python-zipline`, all
   three now fixed in `zpf` 0.2.0.dev0:

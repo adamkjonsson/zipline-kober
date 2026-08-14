@@ -8,10 +8,63 @@ into a [Zipline](https://github.com/adamkjonsson/zipline) decode stage — a
 input bytes it came from. It is a CLI backed by a Python API, and everything
 the CLI does is reachable from the API.
 
-> ⚠️ **Nothing is implemented yet.** This is a design in progress. See
-> [DESIGN.md](DESIGN.md) for the intended spec model, decode semantics, and
-> public API, and for which parts have been verified against `zpf` rather than
-> merely reasoned about.
+> ⚠️ **The decoder is not built yet.** What works today is the spec side: the
+> model, the expression language, the loaders, the checker, and the `check` and
+> `show` CLI verbs. Nothing decodes bytes yet — `run` and `try` come with the
+> decoder. See [DESIGN.md](DESIGN.md) for where this is going, and for which
+> parts have been verified against `zpf` rather than merely reasoned about.
+
+## Writing and checking a spec
+
+A spec is YAML (or JSON — the core is stdlib-only, and YAML is the optional
+`yaml` extra). `check` validates it and types every expression in it *before
+any data exists*, which is what lets coverage be proved from the spec alone:
+
+```console
+$ kober check dns.yaml
+dns 1.0: ok
+
+$ kober check broken.yaml
+error: bad.message.body: size: 'length' is declared later in unit 'message';
+  a field may only reference fields decoded before it
+error: bad.message.length: unknown enum 'nope'; declared enums: none
+warning: bad.orphan: unit is never referenced from the entry unit
+bad 1.0: 2 error(s), 1 warning(s)
+```
+
+It reports every fault it can see rather than stopping at the first, so a spec
+gets fixed in one pass. `--strict` makes warnings fail too.
+
+`show` prints the field tree a spec describes, expanding nested units in place:
+
+```console
+$ kober show dns.yaml
+dns 1.0 — input: either, entry: message
+
+enum opcode: 0=query, 1=iquery, 2=status
+
+message
+├── id: u16
+│     Copied into the reply; matches responses to requests.
+├── flags: → flags
+│   ├── qr: u1
+│   ├── opcode: u4 enum opcode
+│   └── (anonymous): u2
+├── qdcount: u16
+└── questions: → question  ×this.qdcount
+    ├── qname: string[until b'\x00'] utf-8
+    └── qtype: u16
+```
+
+Everything the CLI does is reachable from the API:
+
+```python
+from kober import Spec, check
+
+spec = Spec.from_file("dns.yaml")   # or from_dict / from_json / from_yaml
+for finding in check(spec):
+    print(finding)
+```
 
 ## The name
 
