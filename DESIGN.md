@@ -353,6 +353,9 @@ kober try    SPEC --hex 0a0b           # decode one buffer, print tree
 
 ## 7. Example spec
 
+This one loads and checks clean; `tests/test_loader.py` runs it, so it cannot
+drift from the schema.
+
 ```yaml
 name: dns
 version: "1.0"
@@ -381,12 +384,26 @@ units:
       - name: qr
         type: {int: {bits: 1}}
       - name: opcode
-        type: {int: {bits: 4}, enum: opcode}
+        type: {int: {bits: 4, enum: opcode}}
       - {name: null, type: {int: {bits: 2}}}    # reserved
+
+  question:
+    fields:
+      - name: qname
+        type: {string: {size: {terminated: {delimiter: "\0"}}}}
+      - name: qtype
+        type: {int: {bits: 16}}
 ```
 
 The `doc:` entries are the argument for YAML over JSON: annotation is the
 difference between a spec someone can maintain and one they can't.
+
+Two things this example got wrong before the loader existed, both worth naming
+because they are the kind of thing a written-out schema fixes. `enum` belongs
+*inside* `int`, not beside it: a `type:` is a single-key mapping naming the
+kind, and a second key beside it has no meaning. And the earlier version
+referenced a `question` unit it never defined, which `check` now reports as an
+unknown unit — the example was illustrative rather than real, and is now real.
 
 ## 8. YAML
 

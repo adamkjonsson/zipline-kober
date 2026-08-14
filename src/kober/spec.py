@@ -29,6 +29,7 @@ from kober.errors import SpecError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from pathlib import Path
 
     from kober.expr import Expr, ExprType
 
@@ -464,6 +465,85 @@ class Spec:
             raise SpecError(msg)
         object.__setattr__(self, "units", MappingProxyType(dict(self.units)))
         object.__setattr__(self, "enums", MappingProxyType(dict(self.enums)))
+
+    # The loader imports this module, so these import it back lazily. Keeping
+    # the constructors here is worth that: `Spec.from_file` is the API
+    # `DESIGN.md` §6 promises, and a caller should not have to know which
+    # module does the parsing.
+
+    @classmethod
+    def from_dict(cls, document: Mapping[str, object]) -> Spec:
+        """Build a spec from an already-parsed mapping.
+
+        Args:
+            document: The spec document.
+
+        Returns:
+            The spec. It is well formed; run :func:`kober.check.check` to
+            learn whether it is valid.
+
+        Raises:
+            SpecError: If the document is malformed.
+
+        """
+        from kober.loader import from_dict
+
+        return from_dict(document)
+
+    @classmethod
+    def from_json(cls, text: str) -> Spec:
+        """Build a spec from JSON text.
+
+        Args:
+            text: The JSON document.
+
+        Returns:
+            The spec.
+
+        Raises:
+            SpecError: If the text is not JSON, or the document is malformed.
+
+        """
+        from kober.loader import from_json
+
+        return from_json(text)
+
+    @classmethod
+    def from_yaml(cls, text: str) -> Spec:
+        """Build a spec from YAML text, which needs the ``yaml`` extra.
+
+        Args:
+            text: The YAML document.
+
+        Returns:
+            The spec.
+
+        Raises:
+            SpecError: If PyYAML is missing, or the document is malformed.
+
+        """
+        from kober.loader import from_yaml
+
+        return from_yaml(text)
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> Spec:
+        """Build a spec from a file, dispatching on its suffix.
+
+        Args:
+            path: Path to a ``.json``, ``.yaml``, or ``.yml`` file.
+
+        Returns:
+            The spec.
+
+        Raises:
+            SpecError: If the suffix is unrecognized, the file cannot be
+                read, or the document is malformed.
+
+        """
+        from kober.loader import from_file
+
+        return from_file(path)
 
     def unit(self, name: str) -> Unit:
         """Return a unit by name.

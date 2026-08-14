@@ -101,6 +101,26 @@ Depends on `zpf` `0.2.x`, which implements Zipline Payload Format **v0.16**.
   fields are unreferenceable by construction, which is what makes them safe
   for padding and reserved bits.
 
+- `kober.loader` — `from_dict`, `from_json`, `from_yaml`, and `from_file`
+  (dispatching on `.json`/`.yaml`/`.yml`), surfaced as `Spec.from_dict`,
+  `Spec.from_json`, `Spec.from_yaml`, and `Spec.from_file` per `DESIGN.md` §6.
+  The core parses the model, so everything but YAML is stdlib-only; YAML stays
+  the optional `yaml` extra, imported lazily, `safe_load` only, and its absence
+  reports the install command.
+
+  The schema is strict: an unknown key is an error, because a misspelled
+  `conditon:` that loads and does nothing is a decoder that silently does the
+  wrong thing. Errors carry a path (`spec.units.message.fields[0].type`).
+  YAML's implicit typing is guarded by name — `version: 1.10` and an unquoted
+  `yes` are refused with a message saying to quote it, rather than becoming a
+  float and a boolean.
+
+  A type is a single-key tagged mapping (`{int: {bits: 16}}`), as are sizes and
+  repeats, with two shorthands: a bare integer size means `fixed`, and a bare
+  string means a unit reference with no arguments. Enum members and switch
+  cases are the one place keys are not strings — JSON can only spell `1` as
+  `"1"` while YAML gives an integer, and both mean the same case.
+
 ### Documentation
 
 - Upstream findings from the pressure test filed against `python-zipline`, all
