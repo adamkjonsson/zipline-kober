@@ -1,4 +1,4 @@
-# zipline_decoder — Claude guidance
+# zipline-kober — Claude guidance
 
 ## The product
 
