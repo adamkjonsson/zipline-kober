@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zipline-decoder"
+# The single source of truth for the version; `zipline_decoder.__version__`
+# reads it back out of the installed metadata. Pre-release: nothing is
+# implemented yet, and `0.1.0` has not been tagged.
+version = "0.1.0.dev0"
+description = "Decode network protocols from a declarative specification into Zipline decode stages"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Adam Jonsson", email = "akj426@gmail.com" }]
+classifiers = [
+    # Nothing here is implemented yet, and the format underneath is 0.x and
+    # explicitly not production-ready. Do not promise more than DESIGN.md does.
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Networking :: Monitoring",
+    "Typing :: Typed",
+]
+# Pinned to one `zpf` minor on purpose: while that library is in 0.x every
+# minor is a break with no upgrade path promised, so a range spanning two of
+# them would be a promise neither project can keep. The `.dev0` floor is what
+# lets an unreleased local checkout satisfy it (PEP 440 orders 0.2.0.dev0
+# below 0.2.0).
+dependencies = ["zpf>=0.2.0.dev0,<0.3"]
+
+[project.optional-dependencies]
+# YAML is the authoring format for specs, and comments are the reason: a
+# protocol spec wants an RFC citation next to each field, which JSON cannot
+# carry. It stays optional so the core keeps the stdlib-only rule — the spec
+# model is what the decoder consumes, and `Spec.from_dict` / `Spec.from_json`
+# reach it without any third-party parser.
+yaml = ["PyYAML>=6.0"]
+
+[project.scripts]
+zipline-decode = "zipline_decoder.cli:main"
+
+[project.urls]
+Specification = "https://github.com/adamkjonsson/zipline/blob/v0.16/docs/zipline-payload-format.md"
+Changelog = "https://github.com/adamkjonsson/zipline_decoder/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zipline_decoder"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
