@@ -73,6 +73,34 @@ Depends on `zpf` `0.2.x`, which implements Zipline Payload Format **v0.16**.
   `Param.type` is an `ExprType`, which §3 left unspecified — parameters are
   referenced from expressions, so that is the vocabulary they need.
 
+- `kober.check` — whole-spec validation: `check(spec)` returns a tuple of
+  `Finding`, each with a `Severity`, a dotted location, and a message. It
+  **collects rather than raises**, so an author fixes a spec once instead of
+  one fault per run, and an empty result means the spec is valid.
+
+  It resolves and types every expression against Kaitai-style scoping (`this`,
+  `parent`, `root`, bare names, unit parameters) and enforces that a field may
+  reference only fields declared *before* it. `parent` resolves against every
+  site that references the unit and must resolve at all of them, using each
+  site's field position, so a child cannot rely on a parent field that is not
+  decoded yet. `root` deliberately has no ordering rule, since how much of the
+  entry unit has been decoded at arbitrary depth is not statically knowable.
+
+  Also reported: an `entry` that names no unit or takes parameters, unknown
+  unit and enum references, unit-argument count and type mismatches, duplicate
+  parameter names, switch keys that disagree with the type dispatched on, a
+  switch on something other than int or str, references to repeated fields
+  (there is no list type) and to switch fields (no single type), and recursion
+  that cannot consume input and so cannot terminate. Warnings cover units
+  nothing reaches, units with no fields, and a switch with no default — which
+  is legal, and makes an unmatched value an undecodable region.
+
+  Two scoping rules worth naming: an `until` expression sees the field it
+  repeats, meaning *the element just decoded* rather than the list, and that
+  exemption is narrow — any other repeated field is still refused. Anonymous
+  fields are unreferenceable by construction, which is what makes them safe
+  for padding and reserved bits.
+
 ### Documentation
 
 - Upstream findings from the pressure test filed against `python-zipline`, all

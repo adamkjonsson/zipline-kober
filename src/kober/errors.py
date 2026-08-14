@@ -4,11 +4,16 @@ Every error kober raises is a :class:`KoberError`. Below that the split is by
 *when* the fault is detectable, because that is what a caller can act on:
 
 - :class:`SpecError` — the specification is wrong, and it is wrong before any
-  data exists. Raised by loading and by :func:`kober.check`. A spec that
-  loads and checks clean cannot raise this later.
+  data exists. Raised while *building* a spec: by the loader for a malformed
+  document, and by the model for a fault one object can see by itself.
 - :class:`ExprError` — an expression is malformed, out of scope, or wrongly
   typed. A :class:`SpecError`, since expressions live in the spec and are
   resolved against it at load time.
+
+:func:`kober.check.check` deliberately does **not** raise. A validator that
+stops at the first fault makes an author fix a spec one line per run, so it
+returns every :class:`~kober.check.Finding` it can see instead. Raising is for
+faults that stop a spec from being *built* at all.
 
 There is deliberately no decode-time error tier here. A decoder that cannot
 make sense of its input does not raise: it records the region as undecoded
