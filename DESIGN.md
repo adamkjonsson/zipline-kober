@@ -8,6 +8,12 @@ that against the source. Revision 3 added the results of an executable pressure
 test (§10) and treated this project as what it is: **a load test of `zpf`, where
 a gap upstream is a finding rather than a constraint to route around.**
 
+Revision 5 corrects the reasoning in §2, which justified the declarative spec
+model with an argument that contradicted its own opening paragraph. The line
+that matters is **who moves the cursor** (§2.1), not declarative-versus-code.
+That closes §11 question 2 in favour of keeping `Computed` and reframes §3.3's
+minimal expression language as a choice about cost rather than safety.
+
 Revision 4 records what that load test produced. All three findings were filed
 against `python-zipline` and all three are fixed
 ([#55](https://github.com/adamkjonsson/python-zipline/issues/55),
@@ -73,9 +79,45 @@ when this doesn't match":
 - a field landing inside a `Gap` → `reason="gap"`
 - a region the spec deliberately ignores (padding, encrypted body) → `reason="skipped"`
 
-This is why the declarative-only rule matters. If specs could run code, they
-could silently swallow input and break the guarantee. Because they can't,
-**we can prove coverage from the spec alone.**
+### 2.1 The cursor rule
+
+Revisions 1–4 justified the declarative spec model here with: *if specs could
+run code they could silently swallow input, so because they can't, coverage is
+provable from the spec alone.* That argument does not survive contact with the
+paragraph above it, and it is worth correcting rather than quietly dropping,
+because as written it pushes later decisions the wrong way.
+
+Coverage is not made true by the absence of code — `fill_undecoded=True` makes
+it true by construction, whatever the spec looks like. Two weaker and more
+specific things are true instead, and they are what the design actually rests
+on:
+
+1. **Every construct has a total, declared failure behaviour** — the four
+   bullets above. That is a property of the *construct vocabulary*, not of
+   whether an expression can call a function. It is what lets `check` say
+   ahead of time that a spec will account for its input *honestly*:
+   `undecodable` where we tried and failed, `skipped` only where we chose to
+   pass over.
+2. **Nothing author-supplied may move the read cursor.** This is the real
+   invariant. Bytes consumed without being claimed become auto-filled
+   `skipped`, and that is precisely the lie in "silence is a lie by default".
+
+So the line that matters is not *declarative versus code*. It is **who moves
+the cursor**, and it splits cleanly:
+
+| Concern | Rule | Why |
+| --- | --- | --- |
+| Framing and consumption — order, sizes, repeats, switches, conditions | Declarative only | Decides which bytes belong to what; coverage analysis reasons over it |
+| Value computation — what a field's bytes *mean* | Unconstrained in principle | Cannot affect coverage: the bytes are already claimed |
+
+Drawing it here has one immediate consequence: `Computed` (§3.2) is on the safe
+side by construction. It consumes nothing and cannot touch the cursor, so it
+was never the thin end of a wedge — §11 question 2 is closed on that basis.
+
+It also names the invariant the decode loop must enforce when it is built: the
+cursor is the runtime's, advanced only by declarative constructs, and any
+future extension point (§11.5) gets values and returns values, never the
+position.
 
 ## 3. Spec model
 
@@ -206,6 +248,14 @@ type them and scope them against the spec before any data exists.
 
 Scoping follows Kaitai: `this`, `parent`, `root`, plus unit param names. A
 reference to a not-yet-decoded field is a load-time error.
+
+Read "no calls, no loops" as **a choice about taste and cost, not a safety
+requirement.** Per §2.1, an expression cannot move the cursor whatever it
+contains, so no amount of arithmetic here threatens the coverage guarantee.
+The language is small because a small one is cheap to check, cheap to explain,
+and portable to a non-Python reader — not because a bigger one would be
+dangerous. Growing it is §11 question 5, and the parser is built from a
+whitelist precisely so that growing it is a list change.
 
 ## 4. Emission granularity, and the one thing `zpf` cannot express
 
@@ -485,8 +535,13 @@ Q5 a per-field record can carry its name — via `comment=`, with §4.1's caveat
    (length-prefixed DNS over TCP is a real case). Perhaps the spec should
    describe a framing adapter rather than just refusing. Note that stage 2+
    *always* sees datagram shape, so this is not an edge case.
-2. **`Computed` in v1?** Convenient, and the thin end of the wedge toward
-   specs-as-code. I'd cut it until something needs it.
+2. ~~**`Computed` in v1?**~~ **Closed: kept.** The objection was that it is the
+   thin end of the wedge toward specs-as-code. §2.1 draws the line at the
+   cursor instead, and `Computed` consumes nothing and cannot move it, so it
+   is on the safe side by construction. It adds no capability the expression
+   language did not already have — it only lets a derived value be *named*,
+   which is what keeps a wire encoding (lengths in 32-bit words, say) from
+   leaking into every expression that needs bytes.
 3. **`.ksy` importer** — deferred, cheap to add later given the layering, but
    its parsers throw where ours must degrade, so semantics won't map cleanly.
 4. **When do we take the `zpf` 0.3 break?** #58 would replace `comment=` with a
@@ -495,6 +550,35 @@ Q5 a per-field record can carry its name — via `comment=`, with §4.1's caveat
    an API we have barely built; following late means shipping files whose field
    names no consumer may rely on. My inclination is to ship 0.1 on `comment=`,
    keep §4.1's single emit site, and treat 0.3 as the trigger for our own 0.2.
+5. **How far does the spec go before it becomes a program?** §2.1 says value
+   computation cannot break coverage, which removes the *safety* argument for
+   keeping expressions minimal but settles nothing about taste. Three distinct
+   things get called "specs-as-code", and they are worth keeping apart:
+
+   - **Richer expressions** — a fixed, total set of builtins (`min`, `max`,
+     `len`, checksums). Cheap: the parser already works from a whitelist.
+   - **Hooks** — declarative structure, with named points where a *caller*
+     registers Python callables for validation, transformation, or a custom
+     size. The spec file stays data; the decoder is what gets augmented. This
+     is roughly Spicy's split, and it keeps `check` meaningful over the
+     declarative core.
+   - **Specs are Python** — a builder DSL, as in Construct. It costs most of
+     what `check` does today (forward references, expression types,
+     non-terminating recursion, all caught before any data exists), and it
+     locks protocol descriptions to this runtime. Zipline is a *standard* with
+     other implementations in mind, and a YAML spec is an artifact another
+     language can consume; that argues against this one specifically, as does
+     question 3, which it would kill.
+
+   Note that §6 already has an escape hatch: `decode_stream` lets a caller mix
+   spec-driven decoding with hand-written logic in one stage. So code is
+   already permitted, and the live question is only whether the seam belongs at
+   the stage (where it is) or at the field (where hooks would put it).
+
+   My read: hooks are the right extension path and should wait for a concrete
+   case that needs one. Nothing built so far forecloses them — the declarative
+   core is the substrate they attach to, so they are additive. Going straight
+   to a builder DSL is the one move that throws work away.
 
 ## 12. Prior art
 

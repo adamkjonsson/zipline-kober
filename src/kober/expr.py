@@ -17,9 +17,15 @@ has no floating-point type at all:
   mean here, and Kaitai reads it the same way.
 - A float literal is a parse error rather than a silently truncated int.
 
-The language is *total* in the sense that matters for the coverage guarantee
-(§2): it cannot call out, loop, or mutate. It is not total over division by
-zero, which is a decode-time condition a spec cannot be checked free of.
+The language is small: it cannot call out, loop, or mutate. Per ``DESIGN.md``
+§2.1 that is **a choice about cost, not a safety requirement** — an expression
+cannot move the read cursor whatever it contains, so no amount of arithmetic
+here threatens the coverage guarantee. Small keeps it cheap to check, cheap to
+explain, and portable to a non-Python reader. The whitelist above is the thing
+to extend if that trade ever stops paying.
+
+It is not total over division by zero, which is a decode-time condition a spec
+cannot be checked free of.
 """
 
 from __future__ import annotations

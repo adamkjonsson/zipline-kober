@@ -141,6 +141,28 @@ Depends on `zpf` `0.2.x`, which implements Zipline Payload Format **v0.16**.
   actually works today, and added worked `check` and `show` output plus the
   API equivalent.
 
+- `DESIGN.md` revision 5 — corrected the reasoning in §2. It justified the
+  declarative spec model with "if specs could run code they could swallow
+  input, so because they can't, coverage is provable from the spec alone",
+  which contradicts its own opening paragraph: `fill_undecoded=True` makes
+  coverage true by construction whatever the spec looks like. New §2.1 states
+  the two things that are actually true — every construct has a *total,
+  declared failure behaviour*, and **nothing author-supplied may move the read
+  cursor** — and draws the line at the cursor rather than at
+  declarative-versus-code. Framing and consumption stay declarative because
+  coverage analysis reasons over them; value computation cannot affect coverage
+  at all, because the bytes are already claimed.
+
+  Consequences recorded with it: §11 question 2 is **closed, keeping
+  `Computed`**, which consumes nothing and so was never the thin end of a
+  wedge; §3.3's minimal expression language is reframed as a choice about cost
+  and portability rather than a safety requirement; and a new §11 question 5
+  separates the three things called "specs-as-code" (richer expressions, hooks,
+  a builder DSL), noting that §6's `decode_stream` already permits mixing code
+  with spec-driven decoding, so the open question is the seam's granularity
+  rather than whether code is allowed. The module docstrings of `kober.spec`,
+  `kober.check`, and `kober.expr` are corrected to match.
+
 - Upstream findings from the pressure test filed against `python-zipline`, all
   three now fixed in `zpf` 0.2.0.dev0:
   [#55](https://github.com/adamkjonsson/python-zipline/issues/55) (no

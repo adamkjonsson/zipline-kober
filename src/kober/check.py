@@ -1,9 +1,14 @@
 """Whole-spec validation: references, scoping, ordering, and expression types.
 
 :mod:`kober.spec` checks what one object can see by itself. This module checks
-everything else, and it is the reason a spec can be trusted before any data
-exists — which is what ``DESIGN.md`` §2 means by *proving coverage from the
-spec alone*.
+everything else, and it is what lets a spec be trusted before any data exists.
+
+To be precise about the claim, since ``DESIGN.md`` §2 used to overstate it:
+this does not prove coverage — ``fill_undecoded=True`` makes coverage true by
+construction whatever the spec says. What a clean check buys is that the spec
+will account for its input *honestly*, marking ``undecodable`` where it tried
+and failed rather than letting bytes fall through to an auto-filled
+``skipped``. See §2.1.
 
 :func:`check` **collects rather than raises.** A validator that stops at the
 first fault makes an author fix a spec one line per run. It returns every

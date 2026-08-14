@@ -2,8 +2,13 @@
 
 This is ``DESIGN.md`` §3 in code. A :class:`Spec` is data, not behaviour —
 nothing here decodes anything, and nothing here runs author-supplied code.
-That is the property §2 leans on: because a spec cannot express arbitrary
-logic, coverage can be proved from the spec alone.
+
+What that buys is narrower than it looks, and §2.1 is worth reading before
+relying on it. Coverage is made true by ``fill_undecoded=True``, not by the
+absence of code. These constructs matter because each has a *total, declared
+failure behaviour*, which is what lets the checker say ahead of time that a
+spec will account for its input honestly — and because none of them lets an
+author move the read cursor, which is the invariant the decode loop enforces.
 
 **Where validation lives.** These classes check only what a single object can
 see by itself: an integer width in range, a non-negative size, a name that is
@@ -282,10 +287,16 @@ class Computed:
     """A value derived from earlier fields. Decodes nothing.
 
     It consumes no input, so it cites the ranges of the fields its expression
-    reads rather than a range of its own.
+    reads rather than a range of its own. Because it cannot move the read
+    cursor it is safe under §2.1's rule, which is the basis on which
+    ``DESIGN.md`` §11 question 2 was closed in its favour.
+
+    Its value is what lets a wire encoding stop leaking: a length stored in
+    32-bit words is converted once and named, rather than multiplied by four
+    in every expression that wants bytes.
 
     Attributes:
-        expr: The expression giving the value.
+        expr: The expression giving the value. Its type is the field's type.
 
     """
 
