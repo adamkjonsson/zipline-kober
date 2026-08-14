@@ -39,6 +39,22 @@ Depends on `zpf` `0.2.x`, which implements Zipline Payload Format **v0.16**.
   normalization, message timestamps, and per-field record naming. Intended to
   seed the test suite.
 
+- `kober.errors` — the exception hierarchy: `KoberError`, `SpecError`, and
+  `ExprError`, which carries the offending expression text and its location.
+  The split is by *when* a fault is detectable, and there is deliberately no
+  decode-time tier: a decoder that cannot read its input records an undecoded
+  region rather than raising, because an exception would leave the input
+  outside the coverage guarantee (`DESIGN.md` §2).
+
+- `kober.expr` — the expression language of `DESIGN.md` §3.3: a frozen AST,
+  a parser, type inference against a `Scope` protocol, and `unparse`.
+  Parsing borrows `ast.parse` in `eval` mode and accepts a whitelist of node
+  types, so "no calls, no loops" holds by construction rather than by rule.
+  Two departures from Python, both because the language has no float type:
+  `/` is integer division (as is `//`), and a float literal is a parse error.
+  `and`/`or` require boolean operands — there is no truthiness — and chained
+  comparisons are refused with a message saying to use `and`.
+
 ### Documentation
 
 - Upstream findings from the pressure test filed against `python-zipline`, all
