@@ -36,16 +36,28 @@ Depends on `zpf` `0.2.x`, which implements Zipline Payload Format **v0.16**.
   as such.
 - `pressure_test.py` — an executable probe of `zpf` behaviour a spec-driven
   decoder depends on: stage chaining, overlapping spans, `prim:` payload
-  normalization, and message timestamps. Intended to seed the test suite.
+  normalization, message timestamps, and per-field record naming. Intended to
+  seed the test suite.
 
 ### Documentation
 
-- Upstream findings from the pressure test filed against `python-zipline`:
+- Upstream findings from the pressure test filed against `python-zipline`, all
+  three now fixed in `zpf` 0.2.0.dev0:
   [#55](https://github.com/adamkjonsson/python-zipline/issues/55) (no
-  `comment=` on `record()`, which blocks per-field decoded records),
+  `comment=` on `record()`, which blocked per-field decoded records),
   [#56](https://github.com/adamkjonsson/python-zipline/issues/56) (decoded
   inputs are packet-oriented, undocumented), and
   [#57](https://github.com/adamkjonsson/python-zipline/issues/57)
   (`check_coverage` raises an internal `AttributeError` for a `FileReader`).
+
+- `DESIGN.md` revision 4 — `Emit.FIELD` is unblocked: a per-field record now
+  carries its field path in `comment=`, keeping `prim:`'s normative typing,
+  which retires the `dec:dns.header.id` fallback revision 3 proposed. The
+  mechanism is a stopgap by upstream's own description — `comment` is free text
+  no consumer may depend on — so the field-path formatting stays confined to
+  one emit site against
+  [#58](https://github.com/adamkjonsson/python-zipline/issues/58), and nothing
+  parses `comment` back. Whether to follow `zpf` 0.3 (#58, #59) is recorded as
+  an open question rather than settled.
 
 [Unreleased]: https://github.com/adamkjonsson/zipline-kober/commits/main/

@@ -13,12 +13,17 @@ Q1   Can a decode stage read a *decoded* file as input?          yes
 Q2   Are overlapping spans accepted (bitfields sharing bytes)?   yes
 Q3   May a created payload differ from its cited bytes?          yes
 Q4   Does a message spanning segments get the last segment's ts? yes
+Q5   Can a per-field record say which field it is?               yes*
 ===  ==========================================================  ======
 
-The finding that blocks field-granularity decoding is not a question here but
-an omission: :meth:`zpf.DecodeStage.record` accepts no ``comment=`` (nor any
-other label), so the ``prim:`` records below come back anonymous. See
-``DESIGN.md`` §4.1.
+Q5 was the finding that blocked field granularity: the records below carried
+correct values and correct spans with no way to tell one from another. It is
+answered by ``comment=`` on :meth:`zpf.DecodeStage.record`, added upstream in
+`#55 <https://github.com/adamkjonsson/python-zipline/issues/55>`_ — hence the
+asterisk, because ``comment`` is **free text** that no consumer may depend on.
+A checkable name is argued upstream in `#58
+<https://github.com/adamkjonsson/python-zipline/issues/58>`_, on ``zpf`` 0.3.
+See ``DESIGN.md`` §4.1.
 """
 
 from __future__ import annotations
@@ -131,7 +136,7 @@ def stage_chained(source: Path, sink: Path) -> None:
 
 
 def stage_fields(source: Path, sink: Path) -> None:
-    """Q2/Q3: one record per field, with overlapping spans and normalized payloads."""
+    """Q2/Q3/Q5: one record per field, overlapping spans, normalized payloads, names."""
     with zpf.decode_stage(
         source,
         sink,
@@ -143,8 +148,8 @@ def stage_fields(source: Path, sink: Path) -> None:
             data = stream.reassembled()
             ts = max(seg.ts for seg in stream.segments())
             flags = struct.unpack_from(">H", data, 2)[0]
-            # (name, offset, width, value). The name has nowhere to go -- that
-            # is the finding.
+            # (name, offset, width, value). Q5: the name rides in comment=,
+            # which is where a field path can go until zpf grows a checkable one.
             fields: list[tuple[str, int, int, int]] = [
                 ("dns.id", 0, 2, struct.unpack_from(">H", data, 0)[0]),
                 ("dns.flags", 2, 2, flags),
@@ -164,17 +169,20 @@ def stage_fields(source: Path, sink: Path) -> None:
                     ts=ts,
                     content_type=f"prim:u{width * 8}",
                     cites=(off, off + width),
+                    comment=name,
                 )
             # Claim the rest honestly rather than letting auto-fill call it
             # "skipped" on our behalf.
             stage.undecoded(stream, 6, len(data), reason="undecodable")
 
 
-def read_back(path: Path) -> None:
-    """Show what a consumer sees -- correct values, no way to tell them apart."""
+def read_back(path: Path) -> list[str | None]:
+    """Show what a consumer sees, and return each record's name for Q5."""
+    names: list[str | None] = []
     with zpf.open(path) as handle:
         for session in handle.sessions():
             for record in session.records():
+                names.append(record.comment)
                 token = (record.content_type or ":").split(":", 1)[1]
                 value = zpf.decode_prim(record.payload, token)
                 spans = [(sp.off_start, sp.off_end) for sp in record.spans]
@@ -182,6 +190,7 @@ def read_back(path: Path) -> None:
                     f"  ct={record.content_type:10} value={value!r:8} "
                     f"cites={spans} comment={record.comment!r}"
                 )
+    return names
 
 
 def main() -> None:
@@ -208,7 +217,7 @@ def main() -> None:
         print("  Q1: YES -- a decoded file works as decode_stage input")
         report(stage2, source=stage1)
 
-    banner("Q2/Q3: field granularity, overlapping spans, normalized payloads")
+    banner("Q2/Q3/Q5: field granularity, overlapping spans, normalized payloads, names")
     try:
         stage_fields(transport, fields)
     except PROBE_ERRORS:
@@ -217,7 +226,13 @@ def main() -> None:
     else:
         print("  Q2/Q3: accepted at write time")
         report(fields, source=transport)
-        read_back(fields)
+        names = read_back(fields)
+        # Q5 is only answered if every record is *distinguishable*: the two
+        # zero-valued flag records are the pair that used to be identical.
+        if all(names) and len(set(names)) == len(names):
+            print(f"  Q5: YES -- {len(names)} records, each named and distinct")
+        else:
+            print(f"  Q5: NO -- names={names}")
 
 
 if __name__ == "__main__":

@@ -2,11 +2,20 @@
 
 **Status:** draft for discussion. Nothing here is implemented.
 
-Revision 3. Revision 1 was written blind and got the layer wrong — it invented
+Revision 4. Revision 1 was written blind and got the layer wrong — it invented
 reassembly, gaps, and provenance that `zpf` already provides. Revision 2 fixed
-that against the source. Revision 3 adds the results of an executable pressure
-test (§10) and treats this project as what it is: **a load test of `zpf`, where
+that against the source. Revision 3 added the results of an executable pressure
+test (§10) and treated this project as what it is: **a load test of `zpf`, where
 a gap upstream is a finding rather than a constraint to route around.**
+
+Revision 4 records what that load test produced. All three findings were filed
+against `python-zipline` and all three are fixed
+([#55](https://github.com/adamkjonsson/python-zipline/issues/55),
+[#56](https://github.com/adamkjonsson/python-zipline/issues/56),
+[#57](https://github.com/adamkjonsson/python-zipline/issues/57), shipped in
+`zpf` 0.2.0.dev0). **`Emit.FIELD` is no longer blocked** — with the caveat in
+§4.1, which is now about the durability of the mechanism rather than its
+absence. The approach worked, so it stays.
 
 Claims below marked **[verified]** were executed against `zpf` 0.16, not
 reasoned about; the script is in §10.
@@ -228,16 +237,13 @@ work, and both are **[verified]**:
   forbids a range being *both* cited and marked `Undecoded`; it does not forbid
   two records citing the same range. So sub-byte fields work.
 
-### 4.1 The blocker: decoded fields cannot be named
+### 4.1 Naming decoded fields — solved, on a stopgap
 
-A `Record` block has `payload`, `content_type`, `spans`, and `comment`. The
-`comment` field is the only per-record free slot — and **it cannot be
-written**. Neither `SessionWriter.record()` nor `DecodeStage.record()` accepts
-`comment=`, though `Record.comment` exists in the block model and reads back
-fine. `Custom` is a standalone PEN-namespaced *block*, not a record annotation,
-so it cannot label a record without fragile positional correlation.
-
-The consequence, straight from the run **[verified]**:
+A `Record` block has `payload`, `content_type`, `spans`, and `comment`. When
+revision 3 was written, `comment` was the only per-record free slot and **it
+could not be written**: `Record.comment` existed in the block model and read
+back fine, but neither `SessionWriter.record()` nor `DecodeStage.record()`
+accepted `comment=`. Field granularity produced this **[verified]**:
 
 ```
 ct=prim:u16   value=4660     cites=[(0, 2)] comment=None
@@ -247,18 +253,48 @@ ct=prim:u16   value=0        cites=[(2, 4)] comment=None
 ct=prim:u16   value=1        cites=[(4, 6)] comment=None
 ```
 
-Every value is correct, every span is correct, and the output is useless: two
-records read `0` and nothing says one is `qr` and the other `opcode`. **Field
-granularity is unusable without a naming mechanism.** See §9 for the upstream
-options.
+Every value correct, every span correct, and useless: two records read `0` with
+nothing saying one is `qr` and the other `opcode`.
 
-The workaround that needs no upstream change is to put the path in the label —
-`content_type="dec:dns.header.id"` — since `dec:` is "a type private to the
-record's decoder, meaning whatever that decoder documents". We could generate a
-`ContentRegistry` from the spec so readers decode it back. It works, but it
-conflates *type* with *name*: `dec:dns.header.id` and `dec:dns.header.qdcount`
-are two types that happen to both be `u16`, so nothing left in the file says
-they share a type, and `prim:`'s normative typing is gone.
+`comment=` is now accepted on both methods
+([#55](https://github.com/adamkjonsson/python-zipline/issues/55)), and the same
+run gives **[verified]**:
+
+```
+ct=prim:u16   value=4660     cites=[(0, 2)] comment='dns.id'
+ct=prim:u16   value=256      cites=[(2, 4)] comment='dns.flags'
+ct=prim:u16   value=0        cites=[(2, 4)] comment='dns.flags.qr'
+ct=prim:u16   value=0        cites=[(2, 4)] comment='dns.flags.opcode'
+ct=prim:u16   value=1        cites=[(4, 6)] comment='dns.qdcount'
+```
+
+Conformance and coverage stay clean, and `prim:`'s normative typing survives
+intact — which is why this beats the revision 3 fallback of putting the path in
+the label (`content_type="dec:dns.header.id"`). That fallback conflated *type*
+with *name*: `dec:dns.header.id` and `dec:dns.header.qdcount` would be two
+types that happen to both be `u16`, with nothing left in the file saying they
+share one. It is dropped.
+
+**The caveat, and it is the load-bearing one.** `zpf` documents `comment` as
+free text — *nothing parses it and no consumer may depend on its shape*. So a
+field path carried there is honest for a human reading the file and gives a
+*program* no contract. Upstream says as much in the same change that added it,
+and argues the real fix in
+[#58](https://github.com/adamkjonsson/python-zipline/issues/58) (a dedicated,
+checkable `label`/`field_path` on `Record`) against `zpf` 0.3.
+
+Two consequences for us:
+
+- **Confine the field-path formatting to one function**, so switching to a real
+  `label=` is a change at a single emit site rather than a scattered one.
+- **Do not build a reader that parses `comment` back into structure.** The read
+  side stays `decode_bytes` on our own `Node` tree (§6) until #58 lands. A
+  `comment` is for the human looking at the file.
+
+The strategic question — whether per-field records are the right level for a
+*payload* format at all — is genuinely still open, and is now #58's to settle.
+Real files from this project are the evidence it wants, which is an argument
+for building `Emit.FIELD` rather than deferring it.
 
 ## 5. Seams
 
@@ -360,59 +396,70 @@ CLI is the only thing that really wants YAML. `safe_load` only. Guard against
 implicit typing — `on`/`off`/`yes`/`no` become bools and `1.10` becomes a
 float — with strict schema validation immediately after load.
 
-## 9. Upstream asks for `zpf`
+## 9. Upstream findings — all three resolved
 
-Ordered by how much they block this project.
+The pressure test produced three findings, all filed against `python-zipline`
+and all fixed in `zpf` 0.2.0.dev0. Kept here because the reasoning still
+constrains our design, not as an open list.
 
-### 9.1 A per-record name for decoded fields — **blocking `Emit.FIELD`**
+### 9.1 A per-record name for decoded fields — fixed, and still argued
 
-Three options, cheapest first:
+Was **blocking `Emit.FIELD`**. Three options were put upstream, cheapest first:
 
-1. **Plumb `comment=` through `SessionWriter.record()` and
-   `DecodeStage.record()`.** The block field already exists, encodes, and reads
-   back; only the writer API omits it. Smallest possible change, no format
-   change, unblocks experimentation immediately. But `comment` is documented as
-   a free-text note, and a field name is load-bearing semantics — a reader would
-   have to *rely* on free text, which invites exactly the drift the format is
-   otherwise careful to avoid.
-2. **A dedicated optional `label` (or `field_path`) option on `Record`.** A
-   0.17 format change. Says what it means, is checkable, and makes
-   field-granularity decoding a first-class citizen. The honest cost: it adds a
-   field only decoders use, on the format's hottest block.
+1. **Plumb `comment=` through both `record()` methods.** No format change,
+   unblocks immediately — but `comment` is documented free text, and a field
+   name is load-bearing semantics.
+2. **A dedicated optional `label`/`field_path` on `Record`.** A format change.
+   Says what it means and is checkable; costs a field only decoders use on the
+   format's hottest block.
 3. **Declare message granularity the intended level and drop `Emit.FIELD`.**
-   Also a legitimate answer. `.zpf` is a *payload* format — "records are whole
-   application messages" — so per-field records may simply be the wrong level,
-   and the field tree should live in our API and never in the file.
+   `.zpf` is a *payload* format, so per-field records may be the wrong level.
 
-**This is the strategic question the pressure test surfaced,** and it is more
-about what `zpf` is for than about what we need. My read: (1) as an immediate
-unblock so we can build and measure, with the (2)-vs-(3) decision deferred
-until we have a real decoder emitting real files and can see whether
-field-level records are genuinely useful or just noise. I'd rather bring you
-evidence than an opinion here.
+**Upstream took (1)** ([#55](https://github.com/adamkjonsson/python-zipline/issues/55)),
+explicitly as a stopgap, and deferred the (2)-vs-(3) call to
+[#58](https://github.com/adamkjonsson/python-zipline/issues/58) on `zpf` 0.3 —
+which is the outcome revision 3 recommended. The strategic question is
+therefore still live, and it is more about what `zpf` is for than about what we
+need. What changed is that we can now build and measure instead of waiting, and
+bring #58 evidence rather than an opinion. See §4.1 for how we hold the
+mechanism at arm's length so that #58 stays a one-site change.
+
+Worth noting for our own planning: #58 and
+[#59](https://github.com/adamkjonsson/python-zipline/issues/59) (restructuring
+the `record()` signatures rather than suppressing `PLR0913`) are both `zpf` 0.3
+work, and every `zpf` minor is a break. Our pin is `zpf>=0.2.0.dev0,<0.3`, so
+that break is ours to take deliberately, as a minor bump here.
 
 ### 9.2 Smaller findings
 
 - **Decoded files are packet-oriented.** **[verified]** chaining works, but a
   decoded input has `is_stream_oriented=False` (decoded records carry no
-  `seq_start`), so stage 2+ must iterate `datagrams()`, not `segments()`. This
-  is coherent — each decoded record *is* a self-contained unit — but it is not
-  stated in the decoding tutorial, and a decoder that hardcodes `segments()`
-  works at stage 1 and raises at stage 2. Worth a documentation sentence at
-  minimum.
-- **`check_coverage(decoded, raw)` takes paths, not readers**, while most of
-  the API accepts either. Passing an open `FileReader` fails with
-  `AttributeError: 'FileReader' object has no attribute 'seekable'` — an
-  internal leak rather than a clear `TypeError`.
+  `seq_start`), so stage 2+ must iterate `datagrams()`, not `segments()`. Now
+  documented upstream in the decoding tutorial and on `DecodeStage.record`
+  ([#56](https://github.com/adamkjonsson/python-zipline/issues/56)); the fix
+  was documentation, with no new API. **The design consequence is unchanged and
+  still ours:** dispatch on `stream.is_stream_oriented`, never on the spec's
+  declared `InputShape`.
+- **`check_coverage(decoded, raw)` takes paths, not readers.** Passing an open
+  `FileReader` leaked `AttributeError: 'FileReader' object has no attribute
+  'seekable'`; it now raises a `TypeError` naming the mistake, and pointing out
+  that `decode_stage` *does* accept a reader
+  ([#57](https://github.com/adamkjonsson/python-zipline/issues/57)). Error
+  quality only — we pass paths regardless.
 
 ## 10. The pressure test
 
 [`pressure_test.py`](pressure_test.py) builds a transport file (a 29-byte DNS query split
 across two records), runs a message-granularity stage, chains a second stage
-over its output, and runs a field-granularity stage with overlapping spans and
-`prim:` normalization — checking conformance and coverage at each step. It is
-the source of every **[verified]** claim here and should become the seed of the
-test suite.
+over its output, and runs a field-granularity stage with overlapping spans,
+`prim:` normalization, and a field path per record — checking conformance and
+coverage at each step. It is the source of every **[verified]** claim here and
+should become the seed of the test suite.
+
+Its five questions and their answers: Q1 a decoded file works as decode-stage
+input; Q2 overlapping spans are accepted; Q3 a created payload may differ from
+its cited bytes; Q4 a message spanning segments takes the last segment's `ts`;
+Q5 a per-field record can carry its name — via `comment=`, with §4.1's caveat.
 
 ## 11. Open questions (ours, not `zpf`'s)
 
@@ -425,6 +472,12 @@ test suite.
    specs-as-code. I'd cut it until something needs it.
 3. **`.ksy` importer** — deferred, cheap to add later given the layering, but
    its parsers throw where ours must degrade, so semantics won't map cleanly.
+4. **When do we take the `zpf` 0.3 break?** #58 would replace `comment=` with a
+   real per-record name and #59 reshapes `record()`, both on 0.3, and every
+   `zpf` minor is a break with no upgrade path. Following early means churn on
+   an API we have barely built; following late means shipping files whose field
+   names no consumer may rely on. My inclination is to ship 0.1 on `comment=`,
+   keep §4.1's single emit site, and treat 0.3 as the trigger for our own 0.2.
 
 ## 12. Prior art
 
