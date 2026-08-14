@@ -55,6 +55,24 @@ Depends on `zpf` `0.2.x`, which implements Zipline Payload Format **v0.16**.
   `and`/`or` require boolean operands — there is no truthiness — and chained
   comparisons are refused with a message saying to use `and`.
 
+- `kober.spec` — the spec model of `DESIGN.md` §3 as frozen dataclasses:
+  `Spec`, `Unit`, `Field`, `Param`, `EnumDef`; the field types `IntType`,
+  `BytesType`, `StringType`, `UnitRef`, `Switch`, `Computed`; the sizes
+  `Fixed`, `FromExpr`, `Terminated`, `Remaining`; the repeats `Count`,
+  `Until`, `ToEnd`; and the enumerations `InputShape`, `Endian`, `Emit`.
+  Construction validates only what one object can see by itself — an integer
+  width in 1..64, a non-negative size, a non-blank name, no duplicate field
+  names — so a constructed `Spec` is *well formed*, not *valid*; everything
+  needing the whole spec in view belongs to the checker. Sequences normalize
+  to tuples and mappings to read-only views, so a loaded model cannot be
+  mutated behind its owner's back.
+
+  Two additions to what §3 spells out. `Unit` gains an `emit` field, because
+  `Field.emit` is documented as inheriting "from the unit" and the unit had
+  nowhere to hold it; granularity now resolves field → unit → decoder.
+  `Param.type` is an `ExprType`, which §3 left unspecified — parameters are
+  referenced from expressions, so that is the vocabulary they need.
+
 ### Documentation
 
 - Upstream findings from the pressure test filed against `python-zipline`, all
