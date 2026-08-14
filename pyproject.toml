@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "zipline-decoder"
-# The single source of truth for the version; `zipline_decoder.__version__`
+name = "kober"
+# The single source of truth for the version; `kober.__version__`
 # reads it back out of the installed metadata. Pre-release: nothing is
 # implemented yet, and `0.1.0` has not been tagged.
 version = "0.1.0.dev0"
@@ -43,14 +43,14 @@ dependencies = ["zpf>=0.2.0.dev0,<0.3"]
 yaml = ["PyYAML>=6.0"]
 
 [project.scripts]
-zipline-decode = "zipline_decoder.cli:main"
+kober = "kober.cli:main"
 
 [project.urls]
 Specification = "https://github.com/adamkjonsson/zipline/blob/v0.16/docs/zipline-payload-format.md"
-Changelog = "https://github.com/adamkjonsson/zipline_decoder/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/adamkjonsson/zipline-kober/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/zipline_decoder"]
+packages = ["src/kober"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

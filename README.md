@@ -1,8 +1,8 @@
-# zipline_decoder
+# kober
 
 Creates decoders for zipline from a specification.
 
-Given a declarative description of a protocol, this decodes network payloads
+Given a declarative description of a protocol, `kober` decodes network payloads
 into a [Zipline](https://github.com/adamkjonsson/zipline) decode stage — a
 `.zpf` file whose records are application messages (or fields), each citing the
 input bytes it came from. It is a CLI backed by a Python API, and everything
@@ -12,6 +12,19 @@ the CLI does is reachable from the API.
 > [DESIGN.md](DESIGN.md) for the intended spec model, decode semantics, and
 > public API, and for which parts have been verified against `zpf` rather than
 > merely reasoned about.
+
+## The name
+
+[Alice Kober](https://en.wikipedia.org/wiki/Alice_Kober) spent years on the
+structural groundwork that made Linear B readable — cataloguing sign patterns
+on hand-cut index cards, and proving the script's inflection without ever
+guessing at meaning. Michael Ventris made the final leap and got the credit;
+Kober did the part where you work out what the structure *is* before anything
+can be read.
+
+Which is this tool's job exactly: not guessing what bytes mean, but applying a
+specification of their structure and citing the evidence for every claim it
+makes.
 
 ## Development
 

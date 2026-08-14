@@ -89,7 +89,7 @@ def stage_messages(source: Path, sink: Path) -> None:
         source,
         sink,
         decoder=("dns", "1.0"),
-        produced_by="zipline-decoder 0.1",
+        produced_by="kober 0.1",
         produced_at=1_700_000_000,
     ) as stage:
         for stream in stage.streams():
@@ -109,7 +109,7 @@ def stage_chained(source: Path, sink: Path) -> None:
         source,
         sink,
         decoder=("dns-fields", "1.0"),
-        produced_by="zipline-decoder 0.1",
+        produced_by="kober 0.1",
         produced_at=1_700_000_000,
     ) as stage:
         streams = stage.streams()
@@ -136,7 +136,7 @@ def stage_fields(source: Path, sink: Path) -> None:
         source,
         sink,
         decoder=("dns", "1.0"),
-        produced_by="zipline-decoder 0.1",
+        produced_by="kober 0.1",
         produced_at=1_700_000_000,
     ) as stage:
         for stream in stage.streams():

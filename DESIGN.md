@@ -1,4 +1,4 @@
-# zipline_decoder — design draft
+# kober — design draft
 
 **Status:** draft for discussion. Nothing here is implemented.
 
@@ -275,7 +275,7 @@ conformance checker to catch — only the producer knows.
 ## 6. Public API
 
 ```python
-from zipline_decoder import Decoder, Spec
+from kober import Decoder, Spec
 
 spec = Spec.from_file("dns.yaml")       # dispatches on suffix
 spec = Spec.from_json(text)             # stdlib only
@@ -284,7 +284,7 @@ spec = Spec.from_dict(mapping)
 decoder = Decoder(spec, emit=Emit.FIELD)
 
 # The main entry point: one spec, one file in, one file out.
-decoder.run("raw.zpf", "decoded.zpf", produced_by="zipline-decoder 0.1")
+decoder.run("raw.zpf", "decoded.zpf", produced_by="kober 0.1")
 
 # Lower level: drive an existing stage, so callers can mix spec-driven
 # decoding with hand-written logic in one stage.
@@ -309,10 +309,10 @@ alongside `zpf`'s.
 CLI, one verb per API entry point:
 
 ```
-zipline-decode run    SPEC IN.zpf -o OUT.zpf [--emit field|message]
-zipline-decode check  SPEC                      # validate + type expressions
-zipline-decode show   SPEC                      # human-readable field tree
-zipline-decode try    SPEC --hex 0a0b           # decode one buffer, print tree
+kober run    SPEC IN.zpf -o OUT.zpf [--emit field|message]
+kober check  SPEC                      # validate + type expressions
+kober show   SPEC                      # human-readable field tree
+kober try    SPEC --hex 0a0b           # decode one buffer, print tree
 ```
 
 ## 7. Example spec
@@ -354,7 +354,7 @@ difference between a spec someone can maintain and one they can't.
 
 ## 8. YAML
 
-Optional extra (`pip install zipline-decoder[yaml]`), imported lazily. Core
+Optional extra (`pip install kober[yaml]`), imported lazily. Core
 parses the *model*, so `from_dict` and `from_json` work stdlib-only and the
 CLI is the only thing that really wants YAML. `safe_load` only. Guard against
 implicit typing — `on`/`off`/`yes`/`no` become bools and `1.10` becomes a
