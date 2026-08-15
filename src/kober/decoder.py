@@ -50,6 +50,8 @@ from kober.spec import (
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from datetime import datetime
+    from pathlib import Path
 
     from kober.expr import Expr
     from kober.spec import Field, FieldType, Repeat, SizeSpec, Spec, Unit
@@ -223,6 +225,66 @@ class Decoder:
         """
         entry = self.spec.unit(self.spec.entry)
         return self._unit(entry, (), None, cursor, depth=0)
+
+    # The stage driver imports this module, so these import it back lazily —
+    # the same trade as `Spec.from_file`. It keeps every `zpf` import in one
+    # file while leaving the API where `DESIGN.md` §6 puts it.
+
+    def decode_stream(self, stage: object, stream: object) -> None:
+        """Decode one input stream into an already-open decode stage.
+
+        The lower-level entry point of §6, so a caller can mix spec-driven
+        decoding with hand-written logic in the same stage.
+
+        Args:
+            stage: An open :class:`zpf.DecodeStage`.
+            stream: One of that stage's ``streams()``.
+
+        """
+        from kober.stage import decode_stream
+
+        decode_stream(self, stage, stream)
+
+    def run(
+        self,
+        source: str | Path,
+        sink: str | Path,
+        *,
+        produced_by: str,
+        produced_at: int | datetime,
+        comment: str | None = None,
+    ) -> None:
+        """Decode one file into another: the main entry point of §6.
+
+        Args:
+            source: The input ``.zpf`` file.
+            sink: The output ``.zpf`` file.
+            produced_by: What to record as the producer.
+            produced_at: When, as ticks or a datetime.
+            comment: Free-text note for the output's File Header.
+
+        """
+        from kober.stage import run
+
+        run(
+            self,
+            source,
+            sink,
+            produced_by=produced_by,
+            produced_at=produced_at,
+            comment=comment,
+        )
+
+    def content_registry(self) -> object:
+        """Build a registry that reads this spec's own message records back.
+
+        Returns:
+            A :class:`zpf.ContentRegistry` to pass to :func:`zpf.open`.
+
+        """
+        from kober.stage import content_registry
+
+        return content_registry(self)
 
     # --- units -------------------------------------------------------------
 

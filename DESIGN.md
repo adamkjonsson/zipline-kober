@@ -353,10 +353,18 @@ not join. Framing bytes skipped between two messages still join. A `Gap`
 between them does not. So the runtime rule is mechanical:
 
 > when the region between two emitted records intersects a `Gap`, pass
-> `seam=Seam(width=..., reason="stream-gap")`; otherwise omit it.
+> `seam=Seam(reason="stream-gap")`; otherwise omit it.
 
 Worth stating explicitly because it is easy to forget and impossible for the
 conformance checker to catch — only the producer knows.
+
+**The width is left absent, correcting an earlier draft of this section**,
+which wrote `Seam(width=..., ...)`. `zpf` defines `Seam.width` as the break's
+extent in *this stream's* offset space — the **output's** — and says absent
+means unknowable. We know how many input bytes the hole swallowed; we do not
+know how many decoded units they would have become. Reporting the input count
+in a field defined as an output measurement would be misleading rather than
+merely imprecise, so it is omitted, which still says the two do not join.
 
 ## 6. Public API
 
@@ -383,8 +391,16 @@ tree = decoder.decode_bytes(b"\x12\x34...")     # -> Node
 
 # The read side, generated from the same spec.
 registry = decoder.content_registry()
-with zpf.open("decoded.zpf", registry=registry) as f: ...
+with zpf.open("decoded.zpf", content=registry) as f:
+    tree = f.content(record)        # a Node, for a dec: message record
 ```
+
+Two corrections to that last block, found by writing it: the keyword is
+`content=`, not `registry=`, and a `dec:` label resolves through
+`FileReader.content(record)` rather than `Record.content()` — its token is
+namespaced by the producing decoder's *name*, which only the file knows. Field
+records need none of this: they are `prim:`, which `zpf` decodes natively, and
+that was the argument for normalizing into it (§4.1).
 
 `Node` is our own in-memory tree (name, value, `(off_start, off_end)`,
 children, status). It is deliberately *not* written to the file — it is what

@@ -214,7 +214,10 @@ def plan(
     granularity = resolve_emit(tree, spec, emit)
 
     if granularity is Emit.MESSAGE:
-        if tree.width:
+        # Only a *whole* message is a message. Emitting a record for a tree
+        # that truncated or went undecodable would claim we decoded something
+        # we did not, and the bytes are better named with the reason instead.
+        if tree.width and tree.status is NodeStatus.OK:
             start = tree.off_start - base
             emissions.append(
                 Emission(

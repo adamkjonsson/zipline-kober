@@ -232,6 +232,29 @@ installed from a checkout (see the README).
   writes real `.zpf` files at both granularities and puts them past
   `ConformanceChecker` and `check_coverage`, including a truncated input.
 
+- `kober.stage`, and the `Decoder.run` / `Decoder.decode_stream` /
+  `Decoder.content_registry` methods of `DESIGN.md` §6. `run` decodes one file
+  into another; `decode_stream` drives one stream of an already-open stage, so
+  a caller can mix spec-driven decoding with hand-written logic. All `zpf`
+  contact lives in this one module, so what kober needs from the format is
+  auditable in one place.
+
+  The input is read as `chunks()`, and a `Gap` is a **hard message boundary**:
+  bytes either side were never observed adjacent, so no message spans one,
+  the hole is marked `reason="gap"`, and the records either side declare a
+  `Seam(reason="stream-gap")`. The seam's width is left **absent** — `zpf`
+  defines it in the *output's* offset space, and how many decoded units a hole
+  cost is not recoverable from how many bytes it swallowed.
+
+  Shape comes from the stream, never the spec. A `DATAGRAM` spec meeting a
+  byte stream is refused, being the mismatch that would fabricate a field tree
+  over unframed bytes; a `STREAM` spec over datagrams is allowed, since each
+  datagram is one self-contained message and every chained stage needs that.
+
+  `content_registry()` registers the spec against its own `dec:<name>-message`
+  records, so reading a decoded file hands back a `Node` tree. Field records
+  need no registry — they are `prim:`, which `zpf` decodes natively.
+
 - `kober.TruncatedRead` — a read ran past the end of the available bytes. The
   sibling of `EvalError` and the same kind of signal rather than a fault: in
   `STREAM` shape the message may simply continue in a segment we do not hold
@@ -258,6 +281,13 @@ installed from a checkout (see the README).
   real `on` is not also present (both at once is an error). JSON has no such
   coercion and is untouched. Found by the decode engine's own tests, which is
   the first code to write a `switch` in YAML.
+
+- At message granularity, a tree that truncated or went undecodable is no
+  longer written as a record. A half-decoded message is not a message, and
+  emitting one claimed we had decoded something we had not; its bytes are
+  named with the failure's reason instead. Field granularity keeps the
+  asymmetry deliberately — fields decoded *before* the trouble really were
+  decoded, so their records stand.
 
 ### Documentation
 

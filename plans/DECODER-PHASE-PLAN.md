@@ -146,8 +146,9 @@ Walk the tree and call `dec.record(...)` / `dec.undecoded(...)`.
 
 ## Design questions this phase has to settle
 
-Flagged here rather than guessed at in code. Each changes what gets built. Q1,
-Q4, and Q5 are settled; Q2 and Q3 are open.
+Flagged here rather than guessed at in code. Each changes what gets built. **All
+five are now settled**, and each records what it was settled as and why — two
+of them not as this plan predicted.
 
 ### Q1 — What does the decoder read: `reassembled()`, `segments()`, or `chunks()`? — **settled: `chunks()`**
 
@@ -188,7 +189,7 @@ the one that loses information, and it loses exactly the information invariants
 question does not arise there. Which branch runs is invariant 5's dispatch on
 `stream.is_stream_oriented` — never on the spec's declared `InputShape`.
 
-### Q2 — Which timestamp does a record get?
+### Q2 — Which timestamp does a record get? — **settled: the run's, and no map is possible**
 
 **[verified]** (Q4): `Segment.ts` is already the *last* contributing packet's
 time, which is the specification's rule for a reassembled payload. But a
@@ -196,19 +197,29 @@ message spanning two segments has two candidate `ts` values, and the rule wants
 the completion time — the ts of the segment containing the message's **last**
 byte.
 
-So decoding over a multi-segment run needs an offset → ts map, not a single
-`ts`. Now that Q1 is settled the map is cheap — each `Segment` yielded by
-`chunks()` carries its own `ts`, so it is built on the walk we already do. The
-work left here is choosing the lookup, not the data: easy to get wrong by
-grabbing the run's first `ts`, or its maximum, instead of the `ts` of the
-segment holding the message's last byte.
+This assumed a run could span several segments and need an offset → ts map.
+**It cannot.** Read off `zpf.reassembly.chunks`: contiguous records are
+*coalesced into one Segment*, whose `ts` is already `max` over its
+contributors. A run **is** a segment, there is no multi-segment run, and no map
+is constructible.
 
-Note that the pressure test's Q4 case — a 29-byte message split across two
-records at ts 1000 and 2000 — is exactly this, and already **[verified]** to
-present as a single segment with `ts=2000`. So the map only starts to matter
-when a *run* spans records the reassembler did not coalesce.
+So: one `ts` per run, taken from `Segment.ts`. That is also what
+`DecodeStage.record` documents — *"the completion time of the last input
+record the payload came from (a run's Segment.ts)"* — so the API sanctions it
+directly.
 
-### Q3 — Where does message framing come from in `STREAM` shape?
+**One imprecision falls out of that, and it is worth naming rather than
+hiding.** Where a run holds several messages, every one of them gets the run's
+timestamp — the *last* contributing record's — even a message that finished
+inside the first packet. Per-message times are not recoverable from `chunks()`,
+which collapses them by design; recovering them would mean going around the
+reassembly API to the raw records. `zpf`'s own docstring says to use the run's
+value, so this is the sanctioned reading and not a defect, but a decoder
+emitting one record per message *does* have a finer notion of "when" than the
+format's reassembly layer offers it. Worth a question upstream if per-message
+timing ever matters to a consumer.
+
+### Q3 — Where does message framing come from in `STREAM` shape? — **settled as sketched**
 
 In `DATAGRAM` shape a message is a datagram and this question does not arise.
 In `STREAM` shape the decoder decodes the entry unit repeatedly until the run
@@ -218,6 +229,19 @@ is exhausted, and the entry unit's own extent is the frame. Two consequences:
   continue in a segment we do not have (§3.2). Normal outcome.
 - A `Terminated` size with no terminator before the end of the run is the same
   condition and must not be reported as `undecodable`.
+
+Built as sketched, with one thing the sketch missed: **at message granularity a
+failed tree must not be emitted as a record at all.** A half-decoded message is
+not a message, and writing one would claim we decoded something we did not —
+its bytes are named with the failure's reason instead. Field granularity keeps
+the asymmetry on purpose: the fields decoded *before* the trouble really were
+decoded, so their records stand, and only the failed region is marked.
+
+Shape dispatch settled as: refuse only a `DATAGRAM` spec meeting a
+stream-oriented input, which is the mismatch that would fabricate a field tree
+over unframed bytes. A `STREAM` spec over datagrams is allowed, since each
+datagram is one self-contained message — and every chained stage needs that,
+because a decoded input is always packet-oriented.
 
 ### Q4 — Does `Decoder.__init__` run `check()`? — **settled: yes, by default**
 

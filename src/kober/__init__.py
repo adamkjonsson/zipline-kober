@@ -55,6 +55,7 @@ from kober.spec import (
     UnitRef,
     Until,
 )
+from kober.stage import content_registry, decode_stream, run
 
 __all__ = [
     "MAX_INT_BITS",
@@ -97,6 +98,8 @@ __all__ = [
     "Until",
     "__version__",
     "check",
+    "content_registry",
+    "decode_stream",
     "field_path",
     "from_dict",
     "from_file",
@@ -104,4 +107,5 @@ __all__ = [
     "from_yaml",
     "plan",
     "prim_token",
+    "run",
 ]
