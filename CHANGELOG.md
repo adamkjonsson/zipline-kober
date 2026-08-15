@@ -280,6 +280,24 @@ installed from a checkout (see the README).
 
 ### Fixed
 
+- A seam is now declared after **any** hole-class undecoded region, not only
+  after a `Gap`. `zpf` sorts reasons into two recoverability classes and puts
+  both `gap` and `truncated` in `hole` — bytes that never existed — so a
+  truncated message followed by another record needs a `Discontinuity` between
+  them just as a lost segment does. Writing gap-only seams produced
+  nonconformant files whenever a partial message sat between two whole ones.
+  The class is now read from `zpf.blocks.UNDECODED_REASONS` rather than
+  restated, so it cannot drift from what the conformance checker enforces.
+  Found by fuzzing real DNS: it passed every hand-built test and every clean
+  capture first.
+
+- Field paths no longer name a repetition twice. A repeat's container and its
+  elements share a spec field, so both contributed a path segment and real
+  nested repeats came out as `dns.questions.questions[0].qname.labels.labels[0]`
+  instead of `dns.questions[0].qname.labels[0]`. `Node.is_repetition` now
+  distinguishes the container, which nothing else did. Found on the first real
+  capture; no hand-built fixture had nested repeats.
+
 - A `switch` written in YAML with an unquoted `on:` key now loads. `on` is a
   YAML 1.1 boolean, so `on: kind` parses as `{True: "kind"}` — and `on` is the
   schema's own dispatch key, which put the trap on one of the most common
@@ -295,6 +313,14 @@ installed from a checkout (see the README).
   named with the failure's reason instead. Field granularity keeps the
   asymmetry deliberately — fields decoded *before* the trouble really were
   decoded, so their records stand.
+
+- `examples/dns.yaml` — a real DNS spec, checked clean, that decodes the
+  `dns_example.pcapng` capture from `python-zipline-wire`: header, flags as
+  nine bitfields, and the question section with names as repeated
+  length-prefixed labels. The answer, authority, and additional sections are
+  deliberately left `skipped` and say why — their owner names are usually
+  compression pointers, which the spec language cannot follow. The phase plan
+  asked for a committed example and had only test fixtures.
 
 ### Documentation
 

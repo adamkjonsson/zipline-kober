@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import zpf
+from zpf.blocks import UNDECODED_REASONS
 from zpf.reassembly import Gap
 
 from kober.cursor import Cursor
@@ -43,8 +44,37 @@ if TYPE_CHECKING:
 #: Reason recorded for a hole the capture never contained.
 GAP_REASON = NodeStatus.GAP.value
 
-#: Why two output records either side of a hole do not join (``DESIGN.md`` §5).
+#: Why two output records either side of a lost region do not join
+#: (``DESIGN.md`` §5).
 SEAM_REASON = "stream-gap"
+
+
+def _seam_for(reason: str) -> zpf.Seam | None:
+    """Return the seam owed after an undecoded region, if any.
+
+    A seam is owed after a **hole**-class region, not only after a ``Gap``.
+    `zpf` sorts reasons into two recoverability classes and puts both ``gap``
+    and ``truncated`` in ``hole`` — bytes that never existed — while
+    ``undecodable`` and ``skipped`` are ``bytes``, which did exist and simply
+    were not decoded. Content either side of *those* still runs on, so they
+    owe nothing; content either side of a hole does not.
+
+    Read from :data:`zpf.blocks.UNDECODED_REASONS` rather than restated here,
+    so the classification cannot drift from the one the conformance checker
+    enforces.
+
+    Args:
+        reason: The ``reason=`` written for the region.
+
+    Returns:
+        The seam to attach to the next record, or ``None``.
+
+    """
+    if UNDECODED_REASONS.get(reason) != "hole":
+        return None
+    # Width stays absent: zpf defines it in the output's offset space, and how
+    # many decoded units a hole cost is not recoverable from its byte count.
+    return zpf.Seam(reason=SEAM_REASON if reason == GAP_REASON else reason)
 
 
 def decode_stream(decoder: Decoder, stage: zpf.DecodeStage, stream: object) -> None:
@@ -93,11 +123,7 @@ def _drive_stream(decoder: Decoder, stage: zpf.DecodeStage, stream: object) -> N
     for chunk in stream.chunks():
         if isinstance(chunk, Gap):
             stage.undecoded(stream, chunk.off_start, chunk.off_end, reason=GAP_REASON)
-            # The next record this stage writes does not join the previous
-            # one. Width is left absent deliberately: zpf defines it in the
-            # *output's* offset space, and how many decoded units the hole
-            # cost is not recoverable from how many bytes it swallowed.
-            seam = zpf.Seam(reason=SEAM_REASON)
+            seam = _seam_for(GAP_REASON)
             continue
         seam = _decode_run(decoder, stage, stream, chunk.data, chunk.off_start, chunk.ts, seam)
 
@@ -126,8 +152,7 @@ def _decode_run(
         if tree.status is not NodeStatus.OK:
             # The decode stopped here and said why; the rest of the run is
             # the tail the emitter deliberately left to us.
-            _mark_tail(stage, stream, tree.off_end, end, tree.status.value)
-            return seam
+            return _mark_tail(stage, stream, tree.off_end, end, tree.status.value) or seam
         if cursor.tell() == before:
             # A message that consumes nothing would loop forever. It cannot
             # be decoded and neither can what follows it.
@@ -142,15 +167,20 @@ def _drive_datagrams(decoder: Decoder, stage: zpf.DecodeStage, stream: object) -
     Each datagram is self-contained, so there is no framing to find and no
     gap to straddle — the reason chained stages are the simple case.
     """
+    seam: zpf.Seam | None = None
     for datagram in stream.datagrams():
         tree = decoder.decode_bytes(datagram.data, base=datagram.off_start)
-        _write(decoder, stage, stream, tree, datagram.data, datagram.off_start, datagram.ts, None)
+        seam = _write(
+            decoder, stage, stream, tree, datagram.data, datagram.off_start, datagram.ts, seam
+        )
         # Whatever the message did not claim is this datagram's alone; a
         # following message cannot use it, so it is accounted for here.
         reason = (
             NodeStatus.SKIPPED.value if tree.status is NodeStatus.OK else tree.status.value
         )
-        _mark_tail(stage, stream, tree.off_end, datagram.off_end, reason)
+        # A truncated datagram is a hole, so the *next* datagram's records do
+        # not join these — across datagrams just as within a stream.
+        seam = _mark_tail(stage, stream, tree.off_end, datagram.off_end, reason) or seam
 
 
 def _write(
@@ -183,15 +213,23 @@ def _write(
         seam = None
     for region in unclaimed:
         stage.undecoded(stream, region.off_start, region.off_end, reason=region.reason)
+        seam = _seam_for(region.reason) or seam
     return seam
 
 
 def _mark_tail(
     stage: zpf.DecodeStage, stream: object, start: int, end: int, reason: str
-) -> None:
-    """Account for a region no record claimed."""
-    if end > start:
-        stage.undecoded(stream, start, end, reason=reason)
+) -> zpf.Seam | None:
+    """Account for a region no record claimed, and report the seam it owes.
+
+    Returns:
+        The seam the next record must carry, or ``None``.
+
+    """
+    if end <= start:
+        return None
+    stage.undecoded(stream, start, end, reason=reason)
+    return _seam_for(reason)
 
 
 def run(

@@ -352,8 +352,21 @@ A decoder must declare a break where two of its own adjacent output records do
 not join. Framing bytes skipped between two messages still join. A `Gap`
 between them does not. So the runtime rule is mechanical:
 
-> when the region between two emitted records intersects a `Gap`, pass
-> `seam=Seam(reason="stream-gap")`; otherwise omit it.
+> when a **hole-class** undecoded region lies between two emitted records,
+> pass a `Seam`; otherwise omit it.
+
+**"Hole-class", not "`Gap`" — an earlier draft of this rule said `Gap` and was
+too narrow.** `zpf` sorts undecoded reasons into two recoverability classes
+(`zpf.blocks.UNDECODED_REASONS`): `gap` and `truncated` are **`hole`**, meaning
+the bytes never existed, while `undecodable` and `skipped` are **`bytes`**,
+meaning they existed and simply were not decoded. Content either side of a
+`bytes`-class region still runs on, so it owes nothing. Content either side of a
+hole does not, whichever hole it was — and a truncated message is a hole just as
+a lost segment is. Reading the class from `zpf`'s own table rather than
+restating it here is what keeps the two from drifting.
+
+Found by fuzzing, not by reading: gap-only seams passed every hand-built test
+and every clean capture, and failed on the first adversarial corpus.
 
 Worth stating explicitly because it is easy to forget and impossible for the
 conformance checker to catch — only the producer knows.
