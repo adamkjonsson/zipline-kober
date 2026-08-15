@@ -146,23 +146,47 @@ Walk the tree and call `dec.record(...)` / `dec.undecoded(...)`.
 
 ## Design questions this phase has to settle
 
-Flagged here rather than guessed at in code. Each changes what gets built.
+Flagged here rather than guessed at in code. Each changes what gets built. Q1
+is settled; Q2–Q5 are open.
 
-### Q1 — What does the decoder read: `reassembled()`, `segments()`, or `chunks()`?
+### Q1 — What does the decoder read: `reassembled()`, `segments()`, or `chunks()`? — **settled: `chunks()`**
 
 The pressure test used `segments()` for message granularity and
-`reassembled()` for fields, which was fine for a probe and is not a decision.
+`reassembled()` for fields, which was fine for a probe and was never a
+decision. Confirmed as `chunks()`.
 
-- `reassembled()` gives one contiguous buffer, so a message spanning segments
-  decodes naturally — but it **hides gaps**, and a field decoded across a gap
-  would silently claim bytes that were never captured. That breaks invariant 2.
-- `chunks()` yields `Segment | Gap`, which is the only iterator that shows
-  where the holes are.
+The three are not equally safe, and the reason is not the obvious one — an
+earlier draft of this plan had it backwards, so the actual behaviour, read off
+`zpf.reassembly`:
 
-**Leaning:** decode over `chunks()`, treating a `Gap` as a hard boundary — a
-message may not span one — and reassembling contiguous runs of `Segment`
-between gaps. That satisfies invariants 2 and 6 together, at the cost of more
-bookkeeping than `reassembled()`.
+| Iterator | On a gap | Consequence |
+| --- | --- | --- |
+| `reassembled()` | **Raises `ZpfError`** — "a convenience for the common gap-free case" | Safe but brittle: one missing packet and we decode *nothing*, rather than decoding what we do have |
+| `segments()` | **Skips the hole silently** | The real hazard. Two consecutive runs arrive with nothing saying whether they abut or straddle a hole |
+| `chunks()` | Yields it as a `Gap` | The only iterator that shows where the holes are |
+
+So `reassembled()` never produces wrong offsets — it refuses. `segments()` is
+the one that loses information, and it loses exactly the information invariants
+2 and 6 need: without seeing the `Gap` we cannot mark the region
+`reason="gap"`, and we cannot know when two adjacent output records need
+`seam=Seam(reason="stream-gap")` between them.
+
+**What follows:**
+
+- Decode over `chunks()`, treating a `Gap` as a **hard message boundary** — a
+  message may not span one, because the bytes either side were never observed
+  to be adjacent.
+- Reassemble contiguous runs of `Segment` between gaps and decode within a run.
+- The offset → ts map of Q2 falls out of the same walk, since each `Segment`
+  carries its own `ts`.
+- The cost is bookkeeping, not correctness: a run-relative cursor whose offsets
+  must be translated back to stream offsets for every `cites=`.
+
+**Scope.** This governs the **stream-oriented** branch only. `chunks()`,
+`segments()`, and `reassembled()` all raise on a packet-oriented stream;
+`datagrams()` is that path, and each datagram is self-contained, so the gap
+question does not arise there. Which branch runs is invariant 5's dispatch on
+`stream.is_stream_oriented` — never on the spec's declared `InputShape`.
 
 ### Q2 — Which timestamp does a record get?
 
@@ -173,8 +197,16 @@ the completion time — the ts of the segment containing the message's **last**
 byte.
 
 So decoding over a multi-segment run needs an offset → ts map, not a single
-`ts`. Cheap to build while walking `chunks()`; easy to get wrong by grabbing
-the first or the maximum.
+`ts`. Now that Q1 is settled the map is cheap — each `Segment` yielded by
+`chunks()` carries its own `ts`, so it is built on the walk we already do. The
+work left here is choosing the lookup, not the data: easy to get wrong by
+grabbing the run's first `ts`, or its maximum, instead of the `ts` of the
+segment holding the message's last byte.
+
+Note that the pressure test's Q4 case — a 29-byte message split across two
+records at ts 1000 and 2000 — is exactly this, and already **[verified]** to
+present as a single segment with `ts=2000`. So the map only starts to matter
+when a *run* spans records the reassembler did not coalesce.
 
 ### Q3 — Where does message framing come from in `STREAM` shape?
 
