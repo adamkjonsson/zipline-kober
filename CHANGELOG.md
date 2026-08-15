@@ -333,6 +333,31 @@ installed from a checkout (see the README).
 
 ### Documentation
 
+- `tests/test_fuzz.py` — fuzz tests now run with the suite, asserting the
+  promises that cannot be tested by example: a decode never raises, a decode
+  never claims more than it was given, no byte is ever both cited and marked
+  undecoded, and every reason is one `zpf` classifies. Mutations are seeded, so
+  a failure reproduces from the bytes it prints, and an escaping exception is
+  re-raised with a note rather than swallowed, so the traceback survives.
+
+  It depends on nothing outside the standard library: by the time bytes reach
+  the decoder the transport layers are gone, so the mutations that reach it are
+  payload-level ones — truncate, extend, flip, boundary, replace. Verified
+  against the real bug it exists for, by reverting the emitter fix and watching
+  all four parametrisations fail.
+
+  The technique came from `packeteer`, whose `fuzz` verb found a conformance
+  bug the entire hand-built suite had missed. The **deeper pipeline** —
+  `packeteer fuzz` → `zpfwire convert` → `kober run` — is documented in the
+  README, because it is the only thing that reaches the *stage driver*, which
+  needs real stream structure rather than one adversarial buffer.
+
+- `CLAUDE.md` gains a Testing section recording all of that as standing
+  practice: fuzz tests are standard rather than optional, a regression test
+  must be checked against the bug it claims to catch, and the two sibling
+  projects that supply real and adversarial input are named with what each is
+  for.
+
 - `DESIGN.md` revision 6 — records what real captures found, in a new §13, and
   drops the "nothing here is implemented" status line that had been false since
   the spec-model phase. The status now says what is built and points at what is

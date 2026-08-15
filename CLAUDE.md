@@ -80,3 +80,27 @@ python -m venv .venv
 
 - Use `.venv/bin/pytest` to run tests and `ruff` (on PATH) to lint.
 - Docstrings follow Google style with ruff-enforced formatting (see `ruff.toml`). Sections (Args, Returns, Raises, Attributes, Example) need a blank line before the closing `"""`.
+
+## Testing
+
+- **Fuzz tests are standard, not optional.** `tests/test_fuzz.py` runs with the
+  suite and asserts the promises that cannot be tested by example: a decode
+  never raises, a decode never claims more than it was given, no byte is ever
+  both cited and marked undecoded, and every reason is one `zpf` classifies.
+  **A new invariant of that kind gets a fuzz test, not just an example.**
+  Mutations are seeded so failures reproduce.
+- **A regression test must be checked against the bug it claims to catch.**
+  Revert the fix, watch it fail, restore. Several tests written here passed
+  either way on the first attempt and were worthless until corrected.
+- **Example-based tests verify the code against its author's reading.** Real
+  captures and adversarial input verify the *design*. Every bug this project
+  has found in itself came from the second kind:
+  - `../python-zipline-wire` converts real captures to `.zpf`
+    (`zpfwire convert CAPTURE -o OUT.zpf`); its `tests/captures/` holds
+    fourteen, including DNS, HTTP, and packet loss.
+  - `../packeteer` generates synthetic traffic and adversarial variants
+    (`packeteer fuzz`, and `packeteer stream --packet-loss --gap-jitter`).
+    If it lacks a protocol, that is an issue to file on *that* project.
+  - The deeper pipeline is in the README, under Fuzzing. Run it before a
+    release or after touching the stage driver — it is the only thing that
+    reaches the driver, and it is what found the seam bug.
