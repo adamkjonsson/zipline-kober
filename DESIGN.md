@@ -2,26 +2,26 @@
 
 **Status:** draft for discussion. Nothing here is implemented.
 
-Revision 4. Revision 1 was written blind and got the layer wrong — it invented
+Revision 5. Revision 1 was written blind and got the layer wrong — it invented
 reassembly, gaps, and provenance that `zpf` already provides. Revision 2 fixed
 that against the source. Revision 3 added the results of an executable pressure
 test (§10) and treated this project as what it is: **a load test of `zpf`, where
 a gap upstream is a finding rather than a constraint to route around.**
+
+Revision 4 records what that load test produced. All three findings were filed
+against `python-zipline` and all three are fixed
+([#55](https://github.com/adamkjonsson/python-zipline/issues/55),
+[#56](https://github.com/adamkjonsson/python-zipline/issues/56),
+[#57](https://github.com/adamkjonsson/python-zipline/issues/57)), and released
+in `zpf` 0.2.0. **`Emit.FIELD` is no longer blocked** — with the caveat in
+§4.1, which is now about the durability of the mechanism rather than its
+absence. The approach worked, so it stays.
 
 Revision 5 corrects the reasoning in §2, which justified the declarative spec
 model with an argument that contradicted its own opening paragraph. The line
 that matters is **who moves the cursor** (§2.1), not declarative-versus-code.
 That closes §11 question 2 in favour of keeping `Computed` and reframes §3.3's
 minimal expression language as a choice about cost rather than safety.
-
-Revision 4 records what that load test produced. All three findings were filed
-against `python-zipline` and all three are fixed
-([#55](https://github.com/adamkjonsson/python-zipline/issues/55),
-[#56](https://github.com/adamkjonsson/python-zipline/issues/56),
-[#57](https://github.com/adamkjonsson/python-zipline/issues/57), shipped in
-`zpf` 0.2.0.dev0). **`Emit.FIELD` is no longer blocked** — with the caveat in
-§4.1, which is now about the durability of the mechanism rather than its
-absence. The approach worked, so it stays.
 
 Claims below marked **[verified]** were executed against `zpf` 0.16, not
 reasoned about; the script is in §10.
@@ -465,9 +465,9 @@ float — with strict schema validation immediately after load.
 
 ## 9. Upstream findings — all three resolved
 
-The pressure test produced three findings, all filed against `python-zipline`
-and all fixed in `zpf` 0.2.0.dev0. Kept here because the reasoning still
-constrains our design, not as an open list.
+The pressure test produced three findings, all filed against `python-zipline`,
+all fixed, and all released in `zpf` 0.2.0. Kept here because the reasoning
+still constrains our design, not as an open list.
 
 ### 9.1 A per-record name for decoded fields — fixed, and still argued
 
@@ -494,7 +494,7 @@ mechanism at arm's length so that #58 stays a one-site change.
 Worth noting for our own planning: #58 and
 [#59](https://github.com/adamkjonsson/python-zipline/issues/59) (restructuring
 the `record()` signatures rather than suppressing `PLR0913`) are both `zpf` 0.3
-work, and every `zpf` minor is a break. Our pin is `zpf>=0.2.0.dev0,<0.3`, so
+work, and every `zpf` minor is a break. Our pin is `zpf>=0.2.0,<0.3`, so
 that break is ours to take deliberately, as a minor bump here.
 
 ### 9.2 Smaller findings

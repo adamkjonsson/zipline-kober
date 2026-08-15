@@ -26,6 +26,8 @@ Nothing is released yet: `pyproject.toml` declares `0.1.0.dev0` and no version
 has been tagged. The section becomes `## [0.1.0] - <date>` when it ships.
 
 Depends on `zpf` `0.2.x`, which implements Zipline Payload Format **v0.16**.
+`zpf` `0.2.0` is released and tagged; until it reaches PyPI it has to be
+installed from a checkout (see the README).
 
 ### Added
 
@@ -135,6 +137,16 @@ Depends on `zpf` `0.2.x`, which implements Zipline Payload Format **v0.16**.
   the model, `check`, `Finding`, `Severity`, `ExprType`, the loaders, and the
   exception hierarchy.
 
+### Changed
+
+- The `zpf` requirement is now `>=0.2.0,<0.3`, up from `>=0.2.0.dev0,<0.3`.
+  The `.dev0` floor existed only so an unreleased local checkout could satisfy
+  it, and `zpf` `0.2.0` is now released and tagged. Tightening it is also a
+  correctness fix: `comment=` on both `record()` methods landed *in* `0.2.0`,
+  so a dev build predating that change satisfied the old floor while lacking
+  the API this project is built on. Not a breaking change for anyone — no
+  release of this project has shipped.
+
 ### Documentation
 
 - `README.md` — replaced the "nothing is implemented yet" banner with what
@@ -164,7 +176,7 @@ Depends on `zpf` `0.2.x`, which implements Zipline Payload Format **v0.16**.
   `kober.check`, and `kober.expr` are corrected to match.
 
 - Upstream findings from the pressure test filed against `python-zipline`, all
-  three now fixed in `zpf` 0.2.0.dev0:
+  three now fixed and released in `zpf` 0.2.0:
   [#55](https://github.com/adamkjonsson/python-zipline/issues/55) (no
   `comment=` on `record()`, which blocked per-field decoded records),
   [#56](https://github.com/adamkjonsson/python-zipline/issues/56) (decoded

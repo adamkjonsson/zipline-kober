@@ -92,11 +92,14 @@ python3 -m venv .venv
 ```
 
 **Why `zpf` is installed from a checkout.** This project depends on
-`zpf>=0.2.0.dev0,<0.3` — it is built on `zpf.decode_stage`, which is `0.2.0`
-work — but PyPI currently publishes only `zpf` `0.1.0`. Until `0.2.0` is
-released, the dependency has to come from a local (or git) install. The pin
-covers a single `zpf` minor deliberately: that library is in `0.x`, where every
-minor is a break with no upgrade path promised.
+`zpf>=0.2.0,<0.3` — it is built on `zpf.decode_stage`, and on `comment=`,
+which are `0.2.0` work. `zpf` `0.2.0` is released and tagged, but at the time
+of writing PyPI still publishes only `0.1.0`, so the dependency has to come
+from a local (or git) install. Once `0.2.0` reaches PyPI the checkout becomes a
+convenience rather than a requirement, and the first line below can be dropped.
+
+The pin covers a single `zpf` minor deliberately: that library is in `0.x`,
+where every minor is a break with no upgrade path promised.
 
 ```bash
 .venv/bin/pytest                                  # run tests
