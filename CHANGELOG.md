@@ -333,6 +333,19 @@ installed from a checkout (see the README).
 
 ### Documentation
 
+- `DESIGN.md` revision 6 — records what real captures found, in a new §13, and
+  drops the "nothing here is implemented" status line that had been false since
+  the spec-model phase. The status now says what is built and points at what is
+  not. §3.2 gains the `Pointer` construct (decided, not yet built) with the
+  three things it needs that nothing else in the model does: an offset space, a
+  bound against looping chains, and a note that a region reached only through a
+  pointer retires the "leaves tile the input" property. §3.3 records that real
+  HTTP is the first thing to need the expression language grown, and names the
+  three total builtins that would close it. §11 question 5 is updated with the
+  consequence: both real gaps were closable by making the *declarative*
+  language say more, so the case for hooks is weaker than when the question was
+  written, not stronger.
+
 - Two further findings filed upstream from running kober over real captures:
   [#62](https://github.com/adamkjonsson/python-zipline/issues/62) (which
   timestamp a message inside a multi-message run should carry — the rule and
