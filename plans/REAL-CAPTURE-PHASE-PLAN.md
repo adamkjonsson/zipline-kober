@@ -214,8 +214,8 @@ decode stage is meant to prove itself with. Our own tests never hit it because
 every hand-built fixture starts at ``isn + 1`` and has no SYN.
 
 Not a kober bug: the output is conformant, its declared extent (74931) matches
-the data, and the diagnostics are about measuring the *input*. To file
-upstream.
+the data, and the diagnostics are about measuring the *input*. Filed as
+[#63](https://github.com/adamkjonsson/python-zipline/issues/63).
 
 ### Stage 4 — write up
 

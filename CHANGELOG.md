@@ -333,6 +333,15 @@ installed from a checkout (see the README).
 
 ### Documentation
 
+- Two further findings filed upstream from running kober over real captures:
+  [#62](https://github.com/adamkjonsson/python-zipline/issues/62) (which
+  timestamp a message inside a multi-message run should carry — the rule and
+  the recommended implementation disagree) and
+  [#63](https://github.com/adamkjonsson/python-zipline/issues/63)
+  (`check_coverage` measures a real TCP stream as 2³²−1 bytes, because a
+  zero-length SYN record underflows `record_ranges`; `chunks()` skips such
+  records and `record_ranges` does not).
+
 - `README.md` — replaced the "nothing is implemented yet" banner with what
   actually works today, and added worked `check`, `show`, `run`, and `try`
   output plus the API equivalent. The banner now says the project is early and
