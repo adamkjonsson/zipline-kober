@@ -1,6 +1,8 @@
 # Phase plan: the decoder
 
-**State: live.** Written after the spec-model phase landed
+**State: done.** All five stages landed on `decoder_work`; all five design
+questions settled, two of them not as this plan predicted (Q2 and Q5 — see
+each). Written after the spec-model phase landed
 ([`SPEC-MODEL-PHASE.md`](SPEC-MODEL-PHASE.md)) and against `DESIGN.md`
 revision 5, `zpf` 0.2.0.
 

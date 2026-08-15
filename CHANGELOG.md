@@ -123,15 +123,22 @@ installed from a checkout (see the README).
   cases are the one place keys are not strings — JSON can only spell `1` as
   `"1"` while YAML gives an integer, and both mean the same case.
 
-- `kober.cli` — the `kober` console script, with two verbs. `kober check SPEC`
-  validates and types a spec, printing errors to stderr and warnings to stdout,
-  and `--strict` makes warnings fail too. `kober show SPEC` prints the field
-  tree, expanding nested units in place and guarding against recursion. Exit
-  codes are `0` success, `1` the spec is unusable, `2` a bad command line.
+- `kober.cli` — the `kober` console script, with all four verbs of
+  `DESIGN.md` §6. `check SPEC` validates and types a spec, printing errors to
+  stderr and warnings to stdout, with `--strict` to fail on warnings too.
+  `show SPEC` prints the field tree, expanding nested units in place and
+  guarding against recursion. `run SPEC IN.zpf -o OUT.zpf [--emit
+  field|message] [--produced-by WHO]` decodes a file into a decode stage and
+  reports what landed in it, counted by reading the output back rather than by
+  trusting the writer. `try SPEC --hex 0a0b` decodes one buffer and prints the
+  tree, with no file involved.
 
-  `run` and `try` from `DESIGN.md` §6 are deliberately **not** registered: they
-  need the decoder, and a verb that exists and refuses is a worse answer than
-  one that is honestly absent. `--help` says when they are coming.
+  Exit codes are `0` success, `1` the work could not be done, `2` a bad command
+  line. The distinction that decides them: a spec that will not load or check
+  is a failure, but input that will not fully decode is **not** — an
+  undecodable or truncated region is a conformant result, so `run` reports it
+  and exits `0`. `try` is the deliberate exception, since answering whether a
+  spec reads some bytes is the point of it.
 
 - `kober` — the package now re-exports the public API: `Spec` and the rest of
   the model, `check`, `Finding`, `Severity`, `ExprType`, the loaders, and the
@@ -292,8 +299,10 @@ installed from a checkout (see the README).
 ### Documentation
 
 - `README.md` — replaced the "nothing is implemented yet" banner with what
-  actually works today, and added worked `check` and `show` output plus the
-  API equivalent.
+  actually works today, and added worked `check`, `show`, `run`, and `try`
+  output plus the API equivalent. The banner now says the project is early and
+  exercised on small hand-built captures rather than in anger, which is the
+  honest state.
 
 - `plans/` — working documents recording why things were built the way they
   were, following the same convention as `python-zipline`: historical rather

@@ -8,11 +8,12 @@ into a [Zipline](https://github.com/adamkjonsson/zipline) decode stage — a
 input bytes it came from. It is a CLI backed by a Python API, and everything
 the CLI does is reachable from the API.
 
-> ⚠️ **The decoder is not built yet.** What works today is the spec side: the
-> model, the expression language, the loaders, the checker, and the `check` and
-> `show` CLI verbs. Nothing decodes bytes yet — `run` and `try` come with the
-> decoder. See [DESIGN.md](DESIGN.md) for where this is going, and for which
-> parts have been verified against `zpf` rather than merely reasoned about.
+> ⚠️ **Early, and not released.** All four CLI verbs work and a spec decodes
+> real `.zpf` files at message or field granularity, checked against `zpf`'s
+> own conformance and coverage checkers. It has been exercised on small
+> hand-built captures rather than in anger. See [DESIGN.md](DESIGN.md) for the
+> reasoning, and for which claims were verified against `zpf` rather than
+> merely reasoned about.
 
 ## Writing and checking a spec
 
@@ -56,14 +57,57 @@ message
     └── qtype: u16
 ```
 
+## Decoding
+
+`run` turns a transport-layer `.zpf` file into a decode stage — one record per
+protocol message, or one per field:
+
+```console
+$ kober run dns.yaml capture.zpf -o decoded.zpf
+decoded.zpf: 1 record(s), 0 undecoded region(s)
+
+$ kober run dns.yaml capture.zpf -o fields.zpf --emit field
+fields.zpf: 12 record(s), 0 undecoded region(s)
+```
+
+Every record cites the input bytes it came from, and every byte is either cited
+or named as `undecodable`, `truncated`, `gap`, or `skipped` — never both, and
+never silently. An undecodable region is a conformant result rather than a
+failure, so `run` reports it and still succeeds.
+
+`try` decodes one buffer with no file at all, which is the fastest way to see
+what a spec does to some bytes:
+
+```console
+$ kober try dns.yaml --hex 123401000001000000000000076578616d706c6503636f6d0000010001
+message  [0, 29)
+  id = 4660  [0, 2)
+  flags  [2, 4)
+    qr = 0  [2, 3)
+    opcode = 0  [2, 3)
+  qdcount = 1  [4, 6)
+  qname = b'\x07example\x03com'  [12, 25)
+
+29 of 29 byte(s) decoded: ok
+```
+
+Unlike `run`, it fails when the decode did not complete — answering that is the
+point of it.
+
 Everything the CLI does is reachable from the API:
 
 ```python
-from kober import Spec, check
+from kober import Decoder, Spec, check
 
 spec = Spec.from_file("dns.yaml")   # or from_dict / from_json / from_yaml
 for finding in check(spec):
     print(finding)
+
+decoder = Decoder(spec)
+decoder.run("capture.zpf", "decoded.zpf", produced_by="my-tool 1", produced_at=1)
+
+tree = decoder.decode_bytes(payload)   # no file: a Node tree
+print(tree.render())
 ```
 
 ## The name

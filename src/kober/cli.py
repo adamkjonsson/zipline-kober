@@ -1,33 +1,41 @@
 """The ``kober`` command line, one verb per API entry point.
 
-Two verbs exist so far, both of which need only a spec::
+The four verbs of ``DESIGN.md`` §6::
 
-    kober check SPEC    # validate and type-check, reporting every fault
-    kober show  SPEC    # print the field tree a spec describes
+    kober check SPEC                    # validate and type-check
+    kober show  SPEC                    # print the field tree a spec describes
+    kober run   SPEC IN.zpf -o OUT.zpf  # decode a file into a decode stage
+    kober try   SPEC --hex 0a0b         # decode one buffer, print the tree
 
-``run`` and ``try`` from ``DESIGN.md`` §6 need the decoder, which is not built
-yet. They are deliberately *not* registered: a verb that exists and refuses is
-a worse answer than one that is honestly absent.
+Exit codes are the usual three: ``0`` success, ``1`` the work could not be
+done, ``2`` the command line itself was wrong, which argparse reports.
 
-Exit codes are the usual three: ``0`` success, ``1`` the spec is unusable
-(unreadable, malformed, or invalid), ``2`` the command line itself was wrong,
-which argparse reports.
+One distinction worth stating, because it decides two of those exit codes.
+A spec that will not load or check is a **failure** — nothing can be done with
+it. Input that will not fully decode is **not**: an undecodable or truncated
+region is a legitimate, conformant result, and ``run`` reports it and exits
+``0``. ``try`` is the exception, and deliberately so — it exists to answer
+"does this spec read these bytes", so it fails when the answer is no.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from kober import __version__
 from kober.check import Severity, check
+from kober.decoder import Decoder
 from kober.errors import KoberError
 from kober.expr import unparse
+from kober.node import NodeStatus
 from kober.spec import (
     BytesType,
     Computed,
     Count,
+    Emit,
     Fixed,
     FromExpr,
     IntType,
@@ -50,9 +58,17 @@ OK = 0
 FAILED = 1
 
 _EPILOG = (
-    "The 'run' and 'try' verbs are not implemented yet; they need the decoder, "
-    "which lands in a later phase."
+    "An undecodable or truncated region is a conformant result, not an error: "
+    "'run' reports it and still succeeds. 'try' is the exception, since asking "
+    "whether a spec reads some bytes is the whole point of it."
 )
+
+_SPEC_HELP = "path to a .yaml, .yml, or .json spec"
+
+
+def _add_spec(parser: argparse.ArgumentParser) -> None:
+    """Add the SPEC argument every verb takes."""
+    parser.add_argument("spec", metavar="SPEC", help=_SPEC_HELP)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     verbs = parser.add_subparsers(dest="verb", required=True, metavar="VERB")
 
     checker = verbs.add_parser("check", help="validate a spec and type its expressions")
-    checker.add_argument("spec", metavar="SPEC", help="path to a .yaml, .yml, or .json spec")
+    _add_spec(checker)
     checker.add_argument(
         "--strict",
         action="store_true",
@@ -79,7 +95,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     shower = verbs.add_parser("show", help="print the field tree a spec describes")
-    shower.add_argument("spec", metavar="SPEC", help="path to a .yaml, .yml, or .json spec")
+    _add_spec(shower)
+
+    runner = verbs.add_parser("run", help="decode a .zpf file into a decode stage")
+    _add_spec(runner)
+    runner.add_argument("input", metavar="IN.zpf", help="the .zpf file to decode")
+    runner.add_argument(
+        "-o",
+        "--output",
+        metavar="OUT.zpf",
+        required=True,
+        help="where to write the decode stage",
+    )
+    runner.add_argument(
+        "--emit",
+        choices=[Emit.MESSAGE.value, Emit.FIELD.value],
+        default=Emit.MESSAGE.value,
+        help="one record per message (default) or per field",
+    )
+    runner.add_argument(
+        "--produced-by",
+        default=f"kober {__version__}",
+        help="what to record as the producer",
+    )
+
+    prober = verbs.add_parser("try", help="decode one buffer and print the tree")
+    _add_spec(prober)
+    prober.add_argument(
+        "--hex",
+        required=True,
+        metavar="BYTES",
+        help="the buffer as hex, e.g. 0a0b or '0a 0b'",
+    )
     return parser
 
 
@@ -96,12 +143,73 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         spec = Spec.from_file(args.spec)
+        if args.verb == "check":
+            return _check(spec, strict=args.strict)
+        if args.verb == "show":
+            return _show(spec)
+        if args.verb == "run":
+            return _run(spec, args)
+        return _try(spec, args)
     except KoberError as exc:
         print(f"kober: {exc}", file=sys.stderr)
         return FAILED
-    if args.verb == "check":
-        return _check(spec, strict=args.strict)
-    return _show(spec)
+
+
+def _run(spec: Spec, args: argparse.Namespace) -> int:
+    """Decode a file into a decode stage, then report what landed in it."""
+    decoder = Decoder(spec, emit=Emit(args.emit))
+    decoder.run(
+        args.input,
+        args.output,
+        produced_by=args.produced_by,
+        produced_at=datetime.now(tz=UTC),
+    )
+    records, regions = _summarize(args.output)
+    print(f"{args.output}: {records} record(s), {len(regions)} undecoded region(s)")
+    for reason, count in sorted(regions.items()):
+        print(f"  {reason}: {count}")
+    return OK
+
+
+def _summarize(path: str) -> tuple[int, dict[str, int]]:
+    """Count what was written, by reading the output back.
+
+    Reading the file is the honest way to report on it: it counts what a
+    consumer will actually find, not what the writer believed it sent.
+    """
+    import zpf
+
+    records = 0
+    regions: dict[str, int] = {}
+    with zpf.open(path) as handle:
+        for block in handle.blocks():
+            if isinstance(block, zpf.Record):
+                records += 1
+            elif isinstance(block, zpf.Undecoded):
+                reason = block.reason or "unstated"
+                regions[reason] = regions.get(reason, 0) + 1
+    return records, regions
+
+
+def _try(spec: Spec, args: argparse.Namespace) -> int:
+    """Decode one buffer and print the tree.
+
+    Fails when the decode did not complete, which is the question this verb
+    exists to answer — unlike ``run``, where an undecodable region is a
+    conformant result rather than a problem.
+    """
+    try:
+        data = bytes.fromhex(args.hex.replace(":", " ").replace("-", " "))
+    except ValueError as exc:
+        print(f"kober: --hex is not valid hex: {exc}", file=sys.stderr)
+        return FAILED
+    tree = Decoder(spec).decode_bytes(data)
+    print(tree.render())
+    print()
+    print(f"{tree.off_end} of {len(data)} byte(s) decoded: {tree.status.value}")
+    if tree.detail:
+        print(f"  {tree.detail}")
+    return OK if tree.status is NodeStatus.OK and tree.off_end == len(data) else FAILED
 
 
 def _check(spec: Spec, *, strict: bool) -> int:
