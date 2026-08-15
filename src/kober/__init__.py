@@ -4,8 +4,15 @@ Named for Alice Kober, whose structural groundwork made Linear B readable —
 working out what a script's structure *is* before anyone could read it, which
 is this package's job too.
 
-Nothing is implemented yet — see ``DESIGN.md`` for the intended spec model,
-decode semantics, and public API.
+The spec model, its loaders, and its checker are implemented. The decoder is
+not: ``Decoder``, ``Node``, and the ``run``/``try`` CLI verbs from
+``DESIGN.md`` §6 land in a later phase.
+
+Example:
+    >>> spec = Spec.from_file("dns.yaml")
+    >>> for finding in check(spec):
+    ...     print(finding)
+
 """
 
 from __future__ import annotations
@@ -14,4 +21,74 @@ from importlib.metadata import version as _distribution_version
 
 __version__: str = _distribution_version("kober")
 
-__all__ = ["__version__"]
+from kober.check import Finding, Severity, check
+from kober.errors import ExprError, KoberError, SpecError
+from kober.expr import ExprType
+from kober.loader import from_dict, from_file, from_json, from_yaml
+from kober.spec import (
+    MAX_INT_BITS,
+    BytesType,
+    Computed,
+    Count,
+    Emit,
+    Endian,
+    EnumDef,
+    Field,
+    FieldType,
+    Fixed,
+    FromExpr,
+    InputShape,
+    IntType,
+    Param,
+    Remaining,
+    Repeat,
+    SizeSpec,
+    Spec,
+    StringType,
+    Switch,
+    Terminated,
+    ToEnd,
+    Unit,
+    UnitRef,
+    Until,
+)
+
+__all__ = [
+    "MAX_INT_BITS",
+    "BytesType",
+    "Computed",
+    "Count",
+    "Emit",
+    "Endian",
+    "EnumDef",
+    "ExprError",
+    "ExprType",
+    "Field",
+    "FieldType",
+    "Finding",
+    "Fixed",
+    "FromExpr",
+    "InputShape",
+    "IntType",
+    "KoberError",
+    "Param",
+    "Remaining",
+    "Repeat",
+    "Severity",
+    "SizeSpec",
+    "Spec",
+    "SpecError",
+    "StringType",
+    "Switch",
+    "Terminated",
+    "ToEnd",
+    "Unit",
+    "UnitRef",
+    "Until",
+    "__version__",
+    "check",
+    "from_dict",
+    "from_file",
+    "from_json",
+    "from_yaml",
+]

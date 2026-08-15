@@ -29,10 +29,15 @@ classifiers = [
 ]
 # Pinned to one `zpf` minor on purpose: while that library is in 0.x every
 # minor is a break with no upgrade path promised, so a range spanning two of
-# them would be a promise neither project can keep. The `.dev0` floor is what
-# lets an unreleased local checkout satisfy it (PEP 440 orders 0.2.0.dev0
-# below 0.2.0).
-dependencies = ["zpf>=0.2.0.dev0,<0.3"]
+# them would be a promise neither project can keep.
+#
+# The floor is the released 0.2.0, not a `.dev0` prerelease. It was `.dev0`
+# only so an unreleased local checkout could satisfy it (PEP 440 orders
+# 0.2.0.dev0 below 0.2.0), and 0.2.0 is now tagged. Tightening it is also a
+# correctness fix: `comment=` on both `record()` methods landed *in* 0.2.0, so
+# a dev build predating that change satisfied the old floor while lacking the
+# API this project is built on.
+dependencies = ["zpf>=0.2.0,<0.3"]
 
 [project.optional-dependencies]
 # YAML is the authoring format for specs, and comments are the reason: a
