@@ -1,6 +1,6 @@
 # Phase plan: real captures
 
-**State: live.** Written after the decoder phase landed
+**State: done.** All four stages landed on `real_captures`. Written after the decoder phase landed
 ([`DECODER-PHASE-PLAN.md`](DECODER-PHASE-PLAN.md)), against `DESIGN.md`
 revision 5 and `zpf` 0.2.0.
 
@@ -217,7 +217,7 @@ Not a kober bug: the output is conformant, its declared extent (74931) matches
 the data, and the diagnostics are about measuring the *input*. Filed as
 [#63](https://github.com/adamkjonsson/python-zipline/issues/63).
 
-### Stage 4 — write up — **half done**
+### Stage 4 — write up — **done**
 
 `DESIGN.md` is at **revision 6**: a new §13 holds the findings, the status line
 finally says what is built, §3.2 carries `Pointer` as decided-not-built, §3.3
@@ -226,7 +226,7 @@ that both real gaps were closable declaratively. Upstream got
 [#62](https://github.com/adamkjonsson/python-zipline/issues/62) and
 [#63](https://github.com/adamkjonsson/python-zipline/issues/63).
 
-**Still to do: bring #58 its evidence.** It deferred "are per-field records the
+**#58 has its evidence** ([comment](https://github.com/adamkjonsson/python-zipline/issues/58#issuecomment-5304645319)). It deferred "are per-field records the
 right level for a payload format" pending real files from a real decoder. The
 measurement is done and the answer is *it depends on the protocol*, which is
 more useful than a yes or no:
@@ -243,9 +243,16 @@ and pays 1.7×. So "useful or noise" is not a property of the format; it is a
 property of what is being decoded, and a reader of the file cannot tell which
 they are getting without knowing the protocol.
 
-That is worth saying upstream plainly, because it argues against a single
-answer to #58 and for whatever mechanism it settles on being *optional* per
-spec — which `Emit` already is.
+Said upstream plainly, because it argues against a single answer to #58 and for
+whatever mechanism it settles on being *optional* per spec — which `Emit`
+already is.
+
+The comment also carries a second gap the issue had not accounted for. Of the
+176 DNS records, **all 176** are distinguishable only by `comment`, so the
+naming problem is total rather than partial; and `prim:`'s closed vocabulary
+means a field's *width* is lost too — a `u4` is written `prim:u8` and `cites`
+rounds to the containing byte. A `label` option alone would close the first and
+not the second.
 
 ## What counts as what
 
