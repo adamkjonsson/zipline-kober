@@ -186,10 +186,30 @@ installed from a checkout (see the README).
   `align()` reports how many bits it skipped so the caller must account for
   them.
 
+- `kober.Decoder` — the decode engine: `Decoder(spec).decode_bytes(data)`
+  walks the spec over a cursor and returns a `Node` tree. Every field type,
+  size, and repeat form; `condition`, unit parameters, `this`/`parent`/`root`
+  references resolved against the tree being built; and `confirm`/`reject`,
+  where a guess that did not hold becomes an honest `undecodable` region
+  rather than a fabricated field tree.
+
+  **Failure never raises out of a decode.** `TruncatedRead` and `EvalError`
+  are caught and become a node status, because a decoder that raises leaves
+  its input unaccounted for. Where a decode stops it says so: the root's
+  `off_end` is how far it got, and the difference from the input's length is
+  the tail the stage driver will account for. Two loops that crafted input
+  could otherwise turn into hangs are bounded — a repetition whose element
+  consumes nothing is refused as unable to terminate, and unit nesting past
+  `MAX_DEPTH` (64) is abandoned rather than exhausting the interpreter stack.
+
+  `Decoder` validates its spec by default and refuses to build on an error,
+  since every guarantee the engine relies on is one `check` proves;
+  `Decoder(spec, check=False)` skips it.
+
 - `kober.TruncatedRead` — a read ran past the end of the available bytes. The
   sibling of `EvalError` and the same kind of signal rather than a fault: in
   `STREAM` shape the message may simply continue in a segment we do not hold
-  (§3.2), so the decode engine will turn it into a `truncated` region. Like
+  (§3.2), so the decode engine turns it into a `truncated` region. Like
   `EvalError`, letting one escape a decode is a bug.
 
 ### Changed
@@ -201,6 +221,17 @@ installed from a checkout (see the README).
   so a dev build predating that change satisfied the old floor while lacking
   the API this project is built on. Not a breaking change for anyone — no
   release of this project has shipped.
+
+### Fixed
+
+- A `switch` written in YAML with an unquoted `on:` key now loads. `on` is a
+  YAML 1.1 boolean, so `on: kind` parses as `{True: "kind"}` — and `on` is the
+  schema's own dispatch key, which put the trap on one of the most common
+  constructs there is. The loader reads that boolean back as the key it was
+  written as, narrowly: only in a `switch`, only for `True`, and only when a
+  real `on` is not also present (both at once is an error). JSON has no such
+  coercion and is untouched. Found by the decode engine's own tests, which is
+  the first code to write a `switch` in YAML.
 
 ### Documentation
 

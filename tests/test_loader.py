@@ -235,6 +235,74 @@ def test_switch():
     assert kind.default == BytesType(Fixed(1))
 
 
+def test_unquoted_on_survives_yamls_boolean_reading():
+    """`on` is a YAML 1.1 boolean, and it is this schema's dispatch key."""
+    spec = from_yaml("""
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: kind, type: {int: {bits: 8}}}
+      - name: body
+        type:
+          switch:
+            on: "kind"
+            cases: {1: {int: {bits: 8}}}
+            default: {bytes: {size: 1}}
+""")
+    switch = spec.unit("message").fields[1].type
+    assert isinstance(switch, Switch)
+    assert unparse(switch.on) == "kind"
+
+
+def test_quoted_on_works_too():
+    spec = from_yaml("""
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: kind, type: {int: {bits: 8}}}
+      - name: body
+        type:
+          switch:
+            "on": "kind"
+            cases: {1: {int: {bits: 8}}}
+            default: {bytes: {size: 1}}
+""")
+    assert isinstance(spec.unit("message").fields[1].type, Switch)
+
+
+def test_both_spellings_of_on_at_once_is_refused():
+    with pytest.raises(SpecError, match="both 'on' and an unquoted"):
+        from_yaml("""
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - name: body
+        type:
+          switch:
+            on: "a"
+            "on": "b"
+            cases: {1: {int: {bits: 8}}}
+""")
+
+
+def test_json_switch_needs_no_repair():
+    """JSON has no boolean coercion, so its `on` arrives intact."""
+    body = {
+        "name": "a",
+        "type": {"switch": {"on": "kind", "cases": {"1": {"int": {"bits": 8}}}}},
+    }
+    assert isinstance(sole_field(body).type, Switch)
+
+
 def test_json_and_yaml_switch_keys_agree():
     """JSON can only spell a key as a string; both must mean the integer."""
     body = {
