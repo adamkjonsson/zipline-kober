@@ -22,7 +22,7 @@ from importlib.metadata import version as _distribution_version
 __version__: str = _distribution_version("kober")
 
 from kober.check import Finding, Severity, check
-from kober.errors import ExprError, KoberError, SpecError
+from kober.errors import EvalError, ExprError, KoberError, SpecError
 from kober.expr import ExprType
 from kober.loader import from_dict, from_file, from_json, from_yaml
 from kober.spec import (
@@ -61,6 +61,7 @@ __all__ = [
     "Emit",
     "Endian",
     "EnumDef",
+    "EvalError",
     "ExprError",
     "ExprType",
     "Field",

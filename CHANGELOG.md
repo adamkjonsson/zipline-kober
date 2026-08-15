@@ -137,6 +137,31 @@ installed from a checkout (see the README).
   the model, `check`, `Finding`, `Severity`, `ExprType`, the loaders, and the
   exception hierarchy.
 
+- `kober.expr.evaluate(expr, env)` and the `Environment` protocol — the value
+  side of the expression language, mirroring `infer_type` and `Scope`. It
+  assumes the expression type-checked, since `check` proves that before any
+  data exists, but still guards operands so a wrong type is refused rather
+  than improvised (Python would make `"ab" * 3` a string; here it is an
+  error).
+
+  `and` and `or` short-circuit, which is load-bearing rather than an
+  optimization: the language has no conditional expression, so
+  `n != 0 and total / n > 5` is the only way to guard a division and it works
+  only if the right side goes unevaluated. `/` and `//` are one operator and
+  both floor — for the non-negative values that come off a wire, floor and
+  truncation agree; they differ only on a negative operand, and this is the
+  documented answer there.
+
+- `kober.EvalError` — an expression could not produce a value *for this
+  input*. Deliberately not a `SpecError`: a spec that divides by a length
+  field is correct, and a packet carrying zero in it is what makes the
+  expression unanswerable. The decode engine will catch it and mark the region
+  `undecodable`; letting one escape a decode is a bug. Its cases are what a
+  total, side-effect-free language still cannot rule out statically —
+  division or modulo by zero, and a shift count that is negative or absurd.
+  `1 << n` with `n` off the wire is a memory-exhaustion vector, so shift
+  counts above `kober.expr.MAX_SHIFT` (1024) are refused rather than computed.
+
 ### Changed
 
 - The `zpf` requirement is now `>=0.2.0,<0.3`, up from `>=0.2.0.dev0,<0.3`.
