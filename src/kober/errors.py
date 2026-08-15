@@ -9,16 +9,22 @@ Every error kober raises is a :class:`KoberError`. Below that the split is by
 - :class:`ExprError` — an expression is malformed, out of scope, or wrongly
   typed. A :class:`SpecError`, since expressions live in the spec and are
   resolved against it at load time.
+- :class:`EvalError` — an expression could not produce a value *for this
+  input*. Not a spec fault: the spec may be perfectly valid and the wire value
+  simply zero where something divided by it.
 
 :func:`kober.check.check` deliberately does **not** raise. A validator that
 stops at the first fault makes an author fix a spec one line per run, so it
 returns every :class:`~kober.check.Finding` it can see instead. Raising is for
 faults that stop a spec from being *built* at all.
 
-There is deliberately no decode-time error tier here. A decoder that cannot
-make sense of its input does not raise: it records the region as undecoded
-and carries on, because the coverage guarantee is a promise about *output*,
-and an exception would leave the input unaccounted for. See ``DESIGN.md`` §2.
+**No decode-time error escapes a decode.** A decoder that cannot make sense of
+its input does not raise at its caller: it records the region as undecoded and
+carries on, because the coverage guarantee is a promise about *output*, and an
+exception would leave the input unaccounted for (``DESIGN.md`` §2).
+:class:`EvalError` is the one tier that exists *inside* that boundary — it is
+how an expression tells the decode engine "no value", so the engine can mark
+the region and continue. Letting one out of a decode is a bug.
 """
 
 from __future__ import annotations
@@ -59,3 +65,30 @@ class ExprError(SpecError):
         self.where = where
         location = f" at {where}" if where else ""
         super().__init__(f"{message}{location}: {source!r}")
+
+
+class TruncatedRead(KoberError):
+    """A read ran past the end of the available bytes.
+
+    The sibling of :class:`EvalError`, and the same kind of signal: not a
+    fault in anything, just the end of what we have. In ``STREAM`` shape it is
+    an ordinary outcome — the message may simply continue in a segment we do
+    not hold (``DESIGN.md`` §3.2) — so the decode engine turns it into a
+    ``truncated`` region and carries on. It must not escape a decode.
+    """
+
+
+class EvalError(KoberError):
+    """An expression could not produce a value for this input.
+
+    Deliberately **not** a :class:`SpecError`. A spec that divides by a length
+    field is correct; a packet carrying zero in that field is what makes the
+    expression unanswerable, and the same spec answers fine on the next
+    packet. Blaming the spec would send an author looking in the wrong place.
+
+    The decode engine catches this and marks the affected region
+    ``undecodable`` rather than letting it escape — see the module docstring.
+    Its cases are the ones a total, side-effect-free language still cannot
+    rule out statically: division or modulo by zero, and a shift count that is
+    negative or absurd.
+    """

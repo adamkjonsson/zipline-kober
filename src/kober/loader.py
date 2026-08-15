@@ -532,8 +532,8 @@ def _unit_ref(document: object, where: str) -> UnitRef:
 
 
 def _switch(document: object, where: str) -> Switch:
-    """Build a switch."""
-    mapping = _require_mapping(document, where)
+    """Build a switch, working around YAML's reading of the key ``on``."""
+    mapping = _normalize_switch_keys(_require_any_mapping(document, where), where)
     _reject_unknown(mapping, _SWITCH_KEYS, where)
     for required in ("on", "cases"):
         if required not in mapping:
@@ -549,6 +549,29 @@ def _switch(document: object, where: str) -> Switch:
         cases=cases,
         default=None if default is None else _field_type(default, f"{where}.default"),
     )
+
+
+def _normalize_switch_keys(mapping: Mapping[Any, Any], where: str) -> Mapping[str, Any]:
+    """Restore the ``on`` key that YAML turned into ``True``.
+
+    ``on`` is a YAML 1.1 boolean, so ``on: kind`` parses as ``{True: "kind"}``
+    — and ``on`` is this schema's dispatch key, which puts the trap on the
+    second-most-common construct there is. Requiring ``"on"`` in quotes would
+    work and would be a papercut every author hits once, so the boolean is
+    read back as the key it was written as instead.
+
+    The repair is deliberately narrow: only this mapping, only a ``True``
+    key, only when a real ``on`` is not already present. ``False`` is left
+    alone — no spelling of ``off`` was ever meant to be a key here — and JSON,
+    which has no such coercion, is unaffected.
+    """
+    if True not in mapping:
+        return _require_mapping(mapping, where)
+    if "on" in mapping:
+        msg = f"{where}: both 'on' and an unquoted on/yes/true key are present"
+        raise SpecError(msg)
+    repaired = {("on" if key is True else key): value for key, value in mapping.items()}
+    return _require_mapping(repaired, where)
 
 
 def _case_key(key: object) -> int | str:

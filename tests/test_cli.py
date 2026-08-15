@@ -6,6 +6,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
+import zpf
 
 from kober.cli import FAILED, OK, build_parser, main
 
@@ -210,6 +211,156 @@ def test_show_reports_a_missing_entry_unit(
     assert "does not exist" in capsys.readouterr().err
 
 
+# --- run -------------------------------------------------------------------
+
+
+def transport(tmp_path: Path, payload: bytes) -> str:
+    """Write a one-record transport file and return its path."""
+    path = tmp_path / "in.zpf"
+    with zpf.create(path, tick_hz=1_000_000) as writer:
+        writer.add_source("capture", uri="x.pcap")
+        with writer.begin_session(proto="tcp", key="a <-> b") as session:
+            client = session.participant("10.0.0.1:51000", isn=1000)
+            session.record(client, ts=1000, payload=payload, seq_start=1001)
+            session.end(reason="fin")
+    return str(path)
+
+
+RUNNABLE = """
+name: r
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: tag, type: {int: {bits: 16}}}
+      - {name: body, type: {int: {bits: 16}}}
+"""
+
+
+def test_run_writes_a_decode_stage(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    spec = write(tmp_path, RUNNABLE)
+    source = transport(tmp_path, b"\x12\x34\x56\x78")
+    out = tmp_path / "out.zpf"
+    assert main(["run", spec, source, "-o", str(out)]) == OK
+    assert out.exists()
+    assert "1 record(s)" in capsys.readouterr().out
+
+
+def test_run_at_field_granularity(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    spec = write(tmp_path, RUNNABLE)
+    source = transport(tmp_path, b"\x12\x34\x56\x78")
+    out = tmp_path / "out.zpf"
+    assert main(["run", spec, source, "-o", str(out), "--emit", "field"]) == OK
+    assert "2 record(s)" in capsys.readouterr().out
+
+
+def test_run_output_is_conformant(tmp_path: Path):
+    spec = write(tmp_path, RUNNABLE)
+    source = transport(tmp_path, b"\x12\x34\x56\x78")
+    out = tmp_path / "out.zpf"
+    main(["run", spec, source, "-o", str(out)])
+    checker = zpf.ConformanceChecker()
+    with zpf.open(out) as handle:
+        checker.check(handle.blocks())
+    checker.finish()
+    assert zpf.check_coverage(out, source) == []
+
+
+def test_run_records_the_producer(tmp_path: Path):
+    spec = write(tmp_path, RUNNABLE)
+    source = transport(tmp_path, b"\x12\x34\x56\x78")
+    out = tmp_path / "out.zpf"
+    main(["run", spec, source, "-o", str(out), "--produced-by", "my-tool 9"])
+    with zpf.open(out) as handle:
+        header = next(b for b in handle.blocks() if isinstance(b, zpf.FileHeader))
+    assert header.produced_by == "my-tool 9"
+
+
+def test_run_succeeds_despite_undecodable_input(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """An undecodable region is a conformant result, not a failure."""
+    spec = write(tmp_path, RUNNABLE)
+    source = transport(tmp_path, b"\x12\x34\x56\x78\x99")
+    out = tmp_path / "out.zpf"
+    assert main(["run", spec, source, "-o", str(out)]) == OK
+    captured = capsys.readouterr().out
+    assert "undecoded region(s)" in captured
+    assert "truncated" in captured
+
+
+def test_run_reports_a_missing_input(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    spec = write(tmp_path, RUNNABLE)
+    out = tmp_path / "out.zpf"
+    with pytest.raises((OSError, zpf.ZpfError)):
+        main(["run", spec, str(tmp_path / "absent.zpf"), "-o", str(out)])
+
+
+def test_run_refuses_an_invalid_spec(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    """Decoder checks its spec, and a spec that cannot run is a failure."""
+    spec = write(tmp_path, HAS_ERRORS)
+    source = transport(tmp_path, b"\x12\x34")
+    out = tmp_path / "out.zpf"
+    assert main(["run", spec, source, "-o", str(out)]) == FAILED
+    assert "error" in capsys.readouterr().err
+
+
+def test_run_requires_an_output(tmp_path: Path):
+    spec = write(tmp_path, RUNNABLE)
+    source = transport(tmp_path, b"\x12\x34")
+    with pytest.raises(SystemExit) as caught:
+        main(["run", spec, source])
+    assert caught.value.code == 2
+
+
+# --- try -------------------------------------------------------------------
+
+
+def test_try_prints_the_tree(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    spec = write(tmp_path, RUNNABLE)
+    assert main(["try", spec, "--hex", "12345678"]) == OK
+    out = capsys.readouterr().out
+    assert "tag = 4660" in out
+    assert "body = 22136" in out
+    assert "4 of 4 byte(s) decoded: ok" in out
+
+
+def test_try_accepts_spaced_and_separated_hex(tmp_path: Path):
+    spec = write(tmp_path, RUNNABLE)
+    assert main(["try", spec, "--hex", "12 34 56 78"]) == OK
+    assert main(["try", spec, "--hex", "12:34:56:78"]) == OK
+    assert main(["try", spec, "--hex", "12-34-56-78"]) == OK
+
+
+def test_try_fails_on_an_incomplete_decode(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """Answering whether a spec reads these bytes is the point of the verb."""
+    spec = write(tmp_path, RUNNABLE)
+    assert main(["try", spec, "--hex", "1234"]) == FAILED
+    assert "truncated" in capsys.readouterr().out
+
+
+def test_try_fails_when_bytes_are_left_over(tmp_path: Path):
+    """A spec that reads only part of the buffer has not read the buffer."""
+    spec = write(tmp_path, RUNNABLE)
+    assert main(["try", spec, "--hex", "1234567899"]) == FAILED
+
+
+def test_try_reports_bad_hex(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    spec = write(tmp_path, RUNNABLE)
+    assert main(["try", spec, "--hex", "zz"]) == FAILED
+    assert "not valid hex" in capsys.readouterr().err
+
+
+def test_try_requires_hex(tmp_path: Path):
+    spec = write(tmp_path, RUNNABLE)
+    with pytest.raises(SystemExit) as caught:
+        main(["try", spec])
+    assert caught.value.code == 2
+
+
 # --- the parser itself -----------------------------------------------------
 
 
@@ -226,12 +377,12 @@ def test_a_verb_is_required():
     assert caught.value.code == 2
 
 
-def test_unimplemented_verbs_are_absent_rather_than_refusing():
-    """A verb that exists and refuses is worse than one honestly missing."""
-    with pytest.raises(SystemExit) as caught:
-        main(["run", "spec.yaml"])
-    assert caught.value.code == 2
+def test_every_designed_verb_is_registered():
+    """DESIGN.md §6 lists four; all four now exist."""
+    help_text = build_parser().format_help()
+    for verb in ("check", "show", "run", "try"):
+        assert verb in help_text
 
 
-def test_help_mentions_the_verbs_still_to_come():
-    assert "not implemented yet" in build_parser().format_help()
+def test_help_explains_when_a_partial_decode_is_a_failure():
+    assert "conformant result, not an error" in build_parser().format_help()

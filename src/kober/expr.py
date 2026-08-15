@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol
 
-from kober.errors import ExprError
+from kober.errors import EvalError, ExprError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -472,6 +472,178 @@ def _infer_compare(expr: Compare, scope: Scope, source: str, where: str | None) 
         msg = f"cannot compare {left.value} with {right.value} using {expr.op!r}"
         raise ExprError(msg, source, where)
     return ExprType.BOOL
+
+
+#: What an expression evaluates to. The same four kinds :class:`ExprType`
+#: names, since evaluation is the value side of the type side.
+ExprValue = int | str | bytes | bool
+
+#: Largest shift count :func:`evaluate` will perform. A shift amount can come
+#: straight off the wire, and ``1 << 2**32`` is a memory-exhaustion bug rather
+#: than a big number. Well past any real protocol field, and refused loudly.
+MAX_SHIFT = 1024
+
+
+class Environment(Protocol):
+    """What :func:`evaluate` needs in order to read a reference.
+
+    The value-side mirror of :class:`Scope`: where that answers *what type is
+    at this path*, this answers *what value is there now*. Kept to one method
+    for the same reason — the decode engine is what knows about nodes and
+    scopes, not this module.
+    """
+
+    def lookup(self, path: tuple[str, ...]) -> ExprValue:
+        """Return the value named by ``path``, or raise :class:`EvalError`."""
+        ...
+
+
+def evaluate(expr: Expr, env: Environment) -> ExprValue:
+    """Evaluate an expression against ``env``.
+
+    Assumes the expression **type-checked** against a matching
+    :class:`Scope` — :func:`kober.check.check` proves that before any data
+    exists, so evaluation does not re-derive it. Where a type is wrong anyway
+    the operand guards below refuse rather than letting Python improvise
+    (``"ab" * 3`` is a string in Python and nonsense here).
+
+    ``and`` and ``or`` **short-circuit**, and that is load-bearing rather than
+    an optimization: the language has no conditional expression, so
+    ``n != 0 and total / n > 5`` is the only way an author can guard a
+    division, and it only works if the right side goes unevaluated.
+
+    Args:
+        expr: The parsed expression.
+        env: Resolver for reference paths.
+
+    Returns:
+        The value.
+
+    Raises:
+        EvalError: If the expression cannot produce a value for this input —
+            division or modulo by zero, or an unusable shift count.
+
+    Example:
+        >>> evaluate(parse("2 + 3 * 4"), env)
+        14
+
+    """
+    if isinstance(expr, (IntLiteral, StrLiteral, BoolLiteral)):
+        return expr.value
+    if isinstance(expr, Ref):
+        return env.lookup(expr.path)
+    if isinstance(expr, UnaryOp):
+        return _eval_unary(expr, env)
+    if isinstance(expr, BinOp):
+        return _eval_binary(expr, env)
+    if isinstance(expr, BoolOp):
+        return _eval_boolop(expr, env)
+    return _eval_compare(expr, env)
+
+
+def _as_int(value: ExprValue, op: str) -> int:
+    """Return an integer operand, refusing anything else.
+
+    ``bool`` is rejected despite subclassing ``int``: the checker keeps the two
+    apart, so a boolean arriving in arithmetic means the expression never went
+    through it.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        kind = type(value).__name__
+        msg = f"operator {op!r} needs an integer, got {kind}"
+        raise EvalError(msg)
+    return value
+
+
+def _as_bool(value: ExprValue, op: str) -> bool:
+    """Return a boolean operand, refusing anything else."""
+    if not isinstance(value, bool):
+        kind = type(value).__name__
+        msg = f"operator {op!r} needs a boolean, got {kind}"
+        raise EvalError(msg)
+    return value
+
+
+def _eval_unary(expr: UnaryOp, env: Environment) -> ExprValue:
+    """Evaluate a unary operator."""
+    operand = evaluate(expr.operand, env)
+    if expr.op == "not":
+        return not _as_bool(operand, expr.op)
+    value = _as_int(operand, expr.op)
+    if expr.op == "-":
+        return -value
+    if expr.op == "~":
+        return ~value
+    return value
+
+
+def _shift(op: str, left: int, right: int) -> int:
+    """Shift, refusing counts that are negative or absurd."""
+    if right < 0:
+        msg = f"negative shift count {right} in {op!r}"
+        raise EvalError(msg)
+    if right > MAX_SHIFT:
+        msg = f"shift count {right} in {op!r} exceeds the {MAX_SHIFT}-bit limit"
+        raise EvalError(msg)
+    return left << right if op == "<<" else left >> right
+
+
+def _eval_binary(expr: BinOp, env: Environment) -> ExprValue:
+    """Evaluate an arithmetic or bitwise operator over two integers."""
+    left = _as_int(evaluate(expr.left, env), expr.op)
+    right = _as_int(evaluate(expr.right, env), expr.op)
+    if expr.op == "+":
+        return left + right
+    if expr.op == "-":
+        return left - right
+    if expr.op == "*":
+        return left * right
+    if expr.op in ("/", "%"):
+        if right == 0:
+            what = "division" if expr.op == "/" else "modulo"
+            msg = f"{what} by zero"
+            raise EvalError(msg)
+        # Floor, matching the `//` spelling the parser folds into this same
+        # operator. Wire values are non-negative, where floor and
+        # truncation-toward-zero agree; the two differ only on a negative
+        # operand, and this is the documented answer there.
+        return left // right if expr.op == "/" else left % right
+    if expr.op in ("<<", ">>"):
+        return _shift(expr.op, left, right)
+    if expr.op == "&":
+        return left & right
+    if expr.op == "|":
+        return left | right
+    return left ^ right
+
+
+def _eval_boolop(expr: BoolOp, env: Environment) -> bool:
+    """Evaluate ``and``/``or``.
+
+    ``all``/``any`` over a generator stop at the first decisive operand, which
+    is the short-circuit the language depends on — see :func:`evaluate`.
+    """
+    decided = (_as_bool(evaluate(operand, env), expr.op) for operand in expr.operands)
+    return all(decided) if expr.op == "and" else any(decided)
+
+
+def _eval_compare(expr: Compare, env: Environment) -> bool:
+    """Evaluate a comparison."""
+    left = evaluate(expr.left, env)
+    right = evaluate(expr.right, env)
+    if expr.op == "==":
+        return left == right
+    if expr.op == "!=":
+        return left != right
+    first = _as_int(left, expr.op)
+    second = _as_int(right, expr.op)
+    if expr.op == "<":
+        return first < second
+    if expr.op == "<=":
+        return first <= second
+    if expr.op == ">":
+        return first > second
+    return first >= second
 
 
 def references(expr: Expr) -> tuple[Ref, ...]:

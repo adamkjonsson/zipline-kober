@@ -123,19 +123,150 @@ installed from a checkout (see the README).
   cases are the one place keys are not strings — JSON can only spell `1` as
   `"1"` while YAML gives an integer, and both mean the same case.
 
-- `kober.cli` — the `kober` console script, with two verbs. `kober check SPEC`
-  validates and types a spec, printing errors to stderr and warnings to stdout,
-  and `--strict` makes warnings fail too. `kober show SPEC` prints the field
-  tree, expanding nested units in place and guarding against recursion. Exit
-  codes are `0` success, `1` the spec is unusable, `2` a bad command line.
+- `kober.cli` — the `kober` console script, with all four verbs of
+  `DESIGN.md` §6. `check SPEC` validates and types a spec, printing errors to
+  stderr and warnings to stdout, with `--strict` to fail on warnings too.
+  `show SPEC` prints the field tree, expanding nested units in place and
+  guarding against recursion. `run SPEC IN.zpf -o OUT.zpf [--emit
+  field|message] [--produced-by WHO]` decodes a file into a decode stage and
+  reports what landed in it, counted by reading the output back rather than by
+  trusting the writer. `try SPEC --hex 0a0b` decodes one buffer and prints the
+  tree, with no file involved.
 
-  `run` and `try` from `DESIGN.md` §6 are deliberately **not** registered: they
-  need the decoder, and a verb that exists and refuses is a worse answer than
-  one that is honestly absent. `--help` says when they are coming.
+  Exit codes are `0` success, `1` the work could not be done, `2` a bad command
+  line. The distinction that decides them: a spec that will not load or check
+  is a failure, but input that will not fully decode is **not** — an
+  undecodable or truncated region is a conformant result, so `run` reports it
+  and exits `0`. `try` is the deliberate exception, since answering whether a
+  spec reads some bytes is the point of it.
 
 - `kober` — the package now re-exports the public API: `Spec` and the rest of
   the model, `check`, `Finding`, `Severity`, `ExprType`, the loaders, and the
   exception hierarchy.
+
+- `kober.expr.evaluate(expr, env)` and the `Environment` protocol — the value
+  side of the expression language, mirroring `infer_type` and `Scope`. It
+  assumes the expression type-checked, since `check` proves that before any
+  data exists, but still guards operands so a wrong type is refused rather
+  than improvised (Python would make `"ab" * 3` a string; here it is an
+  error).
+
+  `and` and `or` short-circuit, which is load-bearing rather than an
+  optimization: the language has no conditional expression, so
+  `n != 0 and total / n > 5` is the only way to guard a division and it works
+  only if the right side goes unevaluated. `/` and `//` are one operator and
+  both floor — for the non-negative values that come off a wire, floor and
+  truncation agree; they differ only on a negative operand, and this is the
+  documented answer there.
+
+- `kober.EvalError` — an expression could not produce a value *for this
+  input*. Deliberately not a `SpecError`: a spec that divides by a length
+  field is correct, and a packet carrying zero in it is what makes the
+  expression unanswerable. The decode engine will catch it and mark the region
+  `undecodable`; letting one escape a decode is a bug. Its cases are what a
+  total, side-effect-free language still cannot rule out statically —
+  division or modulo by zero, and a shift count that is negative or absurd.
+  `1 << n` with `n` off the wire is a memory-exhaustion vector, so shift
+  counts above `kober.expr.MAX_SHIFT` (1024) are refused rather than computed.
+
+- `kober.node` — the in-memory decode tree: `Node` (name, value, byte range,
+  status, children, and a link back to its spec field) and `NodeStatus`, whose
+  members are exactly `DESIGN.md` §2's vocabulary with values that *are* the
+  `reason=` strings `zpf` expects, so the emitter needs no mapping table.
+  Deliberately not written to any file (§6) — it is what `decode_bytes`
+  returns and what the emitter walks, and then it goes away.
+
+- `kober.cursor` — a bit-level read cursor. It **owns the read position**,
+  which is §2.1's invariant in code: every advance goes through a method, so
+  bytes can only be consumed by being claimed. Positions are tracked in bits
+  since integer widths need not be multiples of eight; citations are bytes,
+  and `Cursor.span()` rounds a bit range *outward* to the containing bytes per
+  §1 — which is what makes a flags word and the bits inside it legitimately
+  overlap. Offsets are absolute: a cursor carries its run's `base`, which is
+  the run-relative-to-stream translation the `chunks()` settlement requires.
+
+  Bits are read most significant first; `Endian` applies only to whole-byte
+  reads from an aligned position, because byte order is not a property a
+  four-bit field has. Reading whole bytes from a half-consumed byte is
+  **refused** rather than auto-aligned, since silently dropping the remaining
+  bits is exactly the unclaimed-input failure §2 exists to prevent, and
+  `align()` reports how many bits it skipped so the caller must account for
+  them.
+
+- `kober.Decoder` — the decode engine: `Decoder(spec).decode_bytes(data)`
+  walks the spec over a cursor and returns a `Node` tree. Every field type,
+  size, and repeat form; `condition`, unit parameters, `this`/`parent`/`root`
+  references resolved against the tree being built; and `confirm`/`reject`,
+  where a guess that did not hold becomes an honest `undecodable` region
+  rather than a fabricated field tree.
+
+  **Failure never raises out of a decode.** `TruncatedRead` and `EvalError`
+  are caught and become a node status, because a decoder that raises leaves
+  its input unaccounted for. Where a decode stops it says so: the root's
+  `off_end` is how far it got, and the difference from the input's length is
+  the tail the stage driver will account for. Two loops that crafted input
+  could otherwise turn into hangs are bounded — a repetition whose element
+  consumes nothing is refused as unable to terminate, and unit nesting past
+  `MAX_DEPTH` (64) is abandoned rather than exhausting the interpreter stack.
+
+  `Decoder` validates its spec by default and refuses to build on an error,
+  since every guarantee the engine relies on is one `check` proves;
+  `Decoder(spec, check=False)` skips it.
+
+- `kober.emit` — turning a decode tree into records. `plan(spec, tree, data)`
+  is **pure**: it returns the `Emission`s to write and the `Unclaimed` regions
+  to mark, so every decision about *what* to write is testable without opening
+  a file. `Emit.MESSAGE` produces one `dec:<spec>-message` record per
+  instance; `Emit.FIELD` one record per leaf, normalized into `prim:`'s
+  little-endian with the field path in `comment=`; `Emit.NONE` claims nothing
+  and says `skipped` out loud rather than leaving it to auto-fill.
+
+  Granularity resolves field → unit → enclosing → decoder, so a field naming
+  its own granularity still wins over the unit holding it. `field_path` is the
+  **single site** that formats a path, which is what makes upstream
+  [#58](https://github.com/adamkjonsson/python-zipline/issues/58) a one-line
+  change; nothing reads a `comment` back.
+
+  Widths outside `prim:`'s closed vocabulary (`u8`…`u64`, `i8`…`i64`) widen to
+  the smallest token that holds them — a `u4` is written `prim:u8`, a `u24` as
+  `prim:u32` — because the payload is created rather than copied, so any
+  reader gets the right number without our registry. Text uses
+  `mime:text/plain; charset=utf-8`, since `prim:` has no text member. A
+  `Computed` field cites the fields its expression read, per `DESIGN.md` §3.2,
+  rather than the empty range it consumed.
+
+  Conformance is asserted rather than assumed: `tests/test_emit_conformance.py`
+  writes real `.zpf` files at both granularities and puts them past
+  `ConformanceChecker` and `check_coverage`, including a truncated input.
+
+- `kober.stage`, and the `Decoder.run` / `Decoder.decode_stream` /
+  `Decoder.content_registry` methods of `DESIGN.md` §6. `run` decodes one file
+  into another; `decode_stream` drives one stream of an already-open stage, so
+  a caller can mix spec-driven decoding with hand-written logic. All `zpf`
+  contact lives in this one module, so what kober needs from the format is
+  auditable in one place.
+
+  The input is read as `chunks()`, and a `Gap` is a **hard message boundary**:
+  bytes either side were never observed adjacent, so no message spans one,
+  the hole is marked `reason="gap"`, and the records either side declare a
+  `Seam(reason="stream-gap")`. The seam's width is left **absent** — `zpf`
+  defines it in the *output's* offset space, and how many decoded units a hole
+  cost is not recoverable from how many bytes it swallowed.
+
+  Shape comes from the stream, never the spec. A `DATAGRAM` spec meeting a
+  byte stream is refused, being the mismatch that would fabricate a field tree
+  over unframed bytes; a `STREAM` spec over datagrams is allowed, since each
+  datagram is one self-contained message and every chained stage needs that.
+
+  `content_registry()` registers the spec against its own `dec:<name>-message`
+  records, so reading a decoded file hands back a `Node` tree. Field records
+  need no registry — they are `prim:`, which `zpf` decodes natively.
+
+- `kober.TruncatedRead` — a read ran past the end of the available bytes. The
+  sibling of `EvalError` and the same kind of signal rather than a fault: in
+  `STREAM` shape the message may simply continue in a segment we do not hold
+  (§3.2), so the decode engine turns it into a `truncated` region. Like
+  `EvalError`, letting one escape a decode is a bug.
 
 ### Changed
 
@@ -147,11 +278,40 @@ installed from a checkout (see the README).
   the API this project is built on. Not a breaking change for anyone — no
   release of this project has shipped.
 
+### Fixed
+
+- A `switch` written in YAML with an unquoted `on:` key now loads. `on` is a
+  YAML 1.1 boolean, so `on: kind` parses as `{True: "kind"}` — and `on` is the
+  schema's own dispatch key, which put the trap on one of the most common
+  constructs there is. The loader reads that boolean back as the key it was
+  written as, narrowly: only in a `switch`, only for `True`, and only when a
+  real `on` is not also present (both at once is an error). JSON has no such
+  coercion and is untouched. Found by the decode engine's own tests, which is
+  the first code to write a `switch` in YAML.
+
+- At message granularity, a tree that truncated or went undecodable is no
+  longer written as a record. A half-decoded message is not a message, and
+  emitting one claimed we had decoded something we had not; its bytes are
+  named with the failure's reason instead. Field granularity keeps the
+  asymmetry deliberately — fields decoded *before* the trouble really were
+  decoded, so their records stand.
+
 ### Documentation
 
 - `README.md` — replaced the "nothing is implemented yet" banner with what
-  actually works today, and added worked `check` and `show` output plus the
-  API equivalent.
+  actually works today, and added worked `check`, `show`, `run`, and `try`
+  output plus the API equivalent. The banner now says the project is early and
+  exercised on small hand-built captures rather than in anger, which is the
+  honest state.
+
+- `plans/` — working documents recording why things were built the way they
+  were, following the same convention as `python-zipline`: historical rather
+  than normative, with `DESIGN.md` and this changelog staying the live records
+  in the project root. Holds `SPEC-MODEL-PHASE.md` (a record of the completed
+  spec-model phase and the decisions the next one inherits) and
+  `DECODER-PHASE-PLAN.md` (the live plan for the decoder — five stages, the six
+  invariants it must enforce, five design questions it has to settle, and its
+  acceptance criteria).
 
 - `DESIGN.md` revision 5 — corrected the reasoning in §2. It justified the
   declarative spec model with "if specs could run code they could swallow
