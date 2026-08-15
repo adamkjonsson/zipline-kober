@@ -162,6 +162,36 @@ installed from a checkout (see the README).
   `1 << n` with `n` off the wire is a memory-exhaustion vector, so shift
   counts above `kober.expr.MAX_SHIFT` (1024) are refused rather than computed.
 
+- `kober.node` — the in-memory decode tree: `Node` (name, value, byte range,
+  status, children, and a link back to its spec field) and `NodeStatus`, whose
+  members are exactly `DESIGN.md` §2's vocabulary with values that *are* the
+  `reason=` strings `zpf` expects, so the emitter needs no mapping table.
+  Deliberately not written to any file (§6) — it is what `decode_bytes`
+  returns and what the emitter walks, and then it goes away.
+
+- `kober.cursor` — a bit-level read cursor. It **owns the read position**,
+  which is §2.1's invariant in code: every advance goes through a method, so
+  bytes can only be consumed by being claimed. Positions are tracked in bits
+  since integer widths need not be multiples of eight; citations are bytes,
+  and `Cursor.span()` rounds a bit range *outward* to the containing bytes per
+  §1 — which is what makes a flags word and the bits inside it legitimately
+  overlap. Offsets are absolute: a cursor carries its run's `base`, which is
+  the run-relative-to-stream translation the `chunks()` settlement requires.
+
+  Bits are read most significant first; `Endian` applies only to whole-byte
+  reads from an aligned position, because byte order is not a property a
+  four-bit field has. Reading whole bytes from a half-consumed byte is
+  **refused** rather than auto-aligned, since silently dropping the remaining
+  bits is exactly the unclaimed-input failure §2 exists to prevent, and
+  `align()` reports how many bits it skipped so the caller must account for
+  them.
+
+- `kober.TruncatedRead` — a read ran past the end of the available bytes. The
+  sibling of `EvalError` and the same kind of signal rather than a fault: in
+  `STREAM` shape the message may simply continue in a segment we do not hold
+  (§3.2), so the decode engine will turn it into a `truncated` region. Like
+  `EvalError`, letting one escape a decode is a bug.
+
 ### Changed
 
 - The `zpf` requirement is now `>=0.2.0,<0.3`, up from `>=0.2.0.dev0,<0.3`.

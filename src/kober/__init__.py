@@ -22,9 +22,10 @@ from importlib.metadata import version as _distribution_version
 __version__: str = _distribution_version("kober")
 
 from kober.check import Finding, Severity, check
-from kober.errors import EvalError, ExprError, KoberError, SpecError
+from kober.errors import EvalError, ExprError, KoberError, SpecError, TruncatedRead
 from kober.expr import ExprType
 from kober.loader import from_dict, from_file, from_json, from_yaml
+from kober.node import Node, NodeStatus
 from kober.spec import (
     MAX_INT_BITS,
     BytesType,
@@ -72,6 +73,8 @@ __all__ = [
     "InputShape",
     "IntType",
     "KoberError",
+    "Node",
+    "NodeStatus",
     "Param",
     "Remaining",
     "Repeat",
@@ -83,6 +86,7 @@ __all__ = [
     "Switch",
     "Terminated",
     "ToEnd",
+    "TruncatedRead",
     "Unit",
     "UnitRef",
     "Until",

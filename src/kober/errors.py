@@ -67,6 +67,17 @@ class ExprError(SpecError):
         super().__init__(f"{message}{location}: {source!r}")
 
 
+class TruncatedRead(KoberError):
+    """A read ran past the end of the available bytes.
+
+    The sibling of :class:`EvalError`, and the same kind of signal: not a
+    fault in anything, just the end of what we have. In ``STREAM`` shape it is
+    an ordinary outcome — the message may simply continue in a segment we do
+    not hold (``DESIGN.md`` §3.2) — so the decode engine turns it into a
+    ``truncated`` region and carries on. It must not escape a decode.
+    """
+
+
 class EvalError(KoberError):
     """An expression could not produce a value for this input.
 
