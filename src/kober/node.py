@@ -61,6 +61,11 @@ class Node:
         detail: Why, for a non-``OK`` status — and for the one case where a
             node is ``OK`` but imperfect, a string whose bytes did not decode
             cleanly in its declared encoding.
+        is_repetition: Whether this node is a repetition's *container*, whose
+            children are its elements. A container and its elements share a
+            :attr:`spec_field`, so nothing else tells them apart — and the
+            emitter has to, since the elements are already named ``field[0]``
+            and counting the container as well would spell every repeat twice.
         spec_field: The spec field this came from, when there is one. Carried
             so the emitter can read ``emit`` and ``doc`` without re-walking
             the spec in parallel with the tree.
@@ -78,6 +83,7 @@ class Node:
     children: tuple[Node, ...] = ()
     unit: str | None = None
     detail: str | None = None
+    is_repetition: bool = False
     spec_field: Field | None = None
     resolved_type: FieldType | None = None
 

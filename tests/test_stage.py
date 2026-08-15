@@ -156,6 +156,47 @@ def test_a_message_does_not_span_a_gap(tmp_path: Path):
     assert spans == [(0, 4), (8, 12)]
 
 
+def datagrams(path: Path, payloads: list[bytes]) -> None:
+    """Write a packet-oriented transport file: no seq_start, so no byte stream."""
+    with zpf.create(path, tick_hz=1_000_000) as writer:
+        writer.add_source("capture", uri="x.pcap")
+        with writer.begin_session(proto="udp", key="a <-> b") as session:
+            client = session.participant("10.0.0.1:5353")
+            for index, payload in enumerate(payloads):
+                session.record(client, ts=1000 + index, payload=payload)
+            session.end(reason="close")
+
+
+def test_a_truncated_message_owes_a_seam_to_the_next_record(tmp_path: Path):
+    """`truncated` is hole-class, so what follows it does not join.
+
+    Found by fuzzing real DNS: the driver seamed gaps only, and zpf sorts both
+    `gap` and `truncated` into the same recoverability class.
+    """
+    source, sink = tmp_path / "in.zpf", tmp_path / "out.zpf"
+    # A record, then a hole, then a record — the shape the rule is about. The
+    # middle datagram is three bytes: `tag` reads and `body` runs out one byte
+    # short, so [x, x+1) is a real truncated region rather than an empty one.
+    # A seam needs a record *before* it; a stream's first record has nothing
+    # to not-join, and zpf drops a seam offered there.
+    datagrams(source, [MESSAGE, MESSAGE[:3], MESSAGE])
+    Decoder(SPEC).run(source, sink, produced_by="t", produced_at=1)
+    assert_conformant(sink, source)
+    breaks = [b for b in read_blocks(sink) if isinstance(b, zpf.Discontinuity)]
+    assert [b.reason for b in breaks] == ["truncated"]
+
+
+def test_bytes_class_regions_owe_no_seam(tmp_path: Path):
+    """`skipped` and `undecodable` bytes existed, so content either side joins."""
+    source, sink = tmp_path / "in.zpf", tmp_path / "out.zpf"
+    # Each datagram carries a whole message plus a spare byte the spec never
+    # claims, which is `skipped` — bytes-class, so no break is owed.
+    datagrams(source, [MESSAGE + b"\x99", MESSAGE + b"\x99"])
+    Decoder(SPEC).run(source, sink, produced_by="t", produced_at=1)
+    assert_conformant(sink, source)
+    assert [b for b in read_blocks(sink) if isinstance(b, zpf.Discontinuity)] == []
+
+
 # --- shape dispatch --------------------------------------------------------
 
 

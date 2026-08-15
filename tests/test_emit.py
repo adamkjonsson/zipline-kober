@@ -114,6 +114,52 @@ def test_anonymous_fields_keep_their_place_in_a_path():
     assert field_path(["dns", None, "x"]) == "dns._.x"
 
 
+def test_a_repetition_contributes_one_path_segment_not_two():
+    """Found on real DNS: `questions.questions[0]` named every repeat twice."""
+    spec = Spec.from_yaml("""
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: items, type: {unit: item}, repeat: {count: "2"}}
+  item:
+    fields:
+      - {name: n, type: {int: {bits: 8}}}
+""")
+    data = b"\x01\x02"
+    tree = Decoder(spec).decode_bytes(data)
+    emissions, _ = plan(spec, tree, data, emit=Emit.FIELD)
+    assert [r.comment for r in emissions] == ["t.items[0].n", "t.items[1].n"]
+
+
+def test_nested_repetitions_stay_indexed():
+    """The real shape: a repeated unit holding a repeated unit."""
+    spec = Spec.from_yaml("""
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: groups, type: {unit: group}, repeat: {count: "1"}}
+  group:
+    fields:
+      - {name: labels, type: {unit: label}, repeat: {until: "labels.n == 0"}}
+  label:
+    fields:
+      - {name: n, type: {int: {bits: 8}}}
+""")
+    data = b"\x01\x00"
+    tree = Decoder(spec).decode_bytes(data)
+    emissions, _ = plan(spec, tree, data, emit=Emit.FIELD)
+    assert [r.comment for r in emissions] == [
+        "t.groups[0].labels[0].n",
+        "t.groups[0].labels[1].n",
+    ]
+
+
 # --- message granularity ---------------------------------------------------
 
 

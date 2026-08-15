@@ -1,8 +1,15 @@
-# kober — design draft
+# kober — design
 
-**Status:** draft for discussion. Nothing here is implemented.
+**Status:** implemented and exercised against real captures, not released.
+The spec model, expression language, checker, decode engine, emitter, stage
+driver, and all four CLI verbs exist. What is *not* built is marked as such:
+the `Pointer` construct (§3.2), and everything in §11 that is still a question.
 
-Revision 5. Revision 1 was written blind and got the layer wrong — it invented
+**Sections marked [verified] were executed, not reasoned about** — against
+`zpf` by [`pressure_test.py`](pressure_test.py), and since revision 6 against
+real captures too.
+
+Revision 6. Revision 1 was written blind and got the layer wrong — it invented
 reassembly, gaps, and provenance that `zpf` already provides. Revision 2 fixed
 that against the source. Revision 3 added the results of an executable pressure
 test (§10) and treated this project as what it is: **a load test of `zpf`, where
@@ -23,8 +30,22 @@ that matters is **who moves the cursor** (§2.1), not declarative-versus-code.
 That closes §11 question 2 in favour of keeping `Computed` and reframes §3.3's
 minimal expression language as a choice about cost rather than safety.
 
-Claims below marked **[verified]** were executed against `zpf` 0.16, not
-reasoned about; the script is in §10.
+Revision 6 records what **real captures** found, which is a different thing
+from what the pressure test found: the pressure test asked whether `zpf` could
+hold what this design wanted to write, and real traffic asks whether the design
+can describe what is actually on a wire. Two boundaries and two upstream bugs,
+all in §13, and one of the boundaries is being closed — the `Pointer`
+construct of §3.2.
+
+The pattern is worth naming, because it decided how much of this document to
+trust. Every hand-built fixture in the test suite was written by whoever wrote
+the code it tests, and each of the four findings was invisible to all of them:
+compression pointers, text-derived framing, a repeat named twice, and a seam
+rule that was too narrow. None needed a clever test. They needed input nobody
+had simplified first.
+
+Claims below marked **[verified]** were executed, not reasoned about: against
+`zpf` 0.16 by the script in §10, and against real captures as recorded in §13.
 
 ## 1. What `zpf` already does, and what is left for us
 
@@ -234,6 +255,41 @@ SizeSpec = Fixed | FromExpr | Terminated | Remaining
 Repeat = Count | Until | ToEnd
 ```
 
+#### `Pointer` — decided, not yet built
+
+```python
+@dataclass(frozen=True)
+class Pointer:
+    at: Expr                            # where to read, not how far to move
+    type: FieldType                     # what is there
+```
+
+A back-reference: *read this type at that offset, and carry on where you
+were.* Added because real DNS demanded it — an answer record's owner name is
+usually two bytes meaning "the name at offset 12" (RFC 1035 §4.1.4), and
+without this the answer section of nearly every real response is undecodable
+(§13.1).
+
+**It does not break §2.1's cursor rule, and that is why it was chosen over a
+hook.** The spec *names* an offset; the runtime does the seeking, with a
+second cursor, so the reading position never moves and coverage stays
+provable. A hook would solve the same problem by handing an author the
+position, which is the one thing §2.1 reserves.
+
+Three things it needs that nothing else in the model does:
+
+- **An offset space.** DNS pointers are message-relative; the cursor holds
+  run-relative positions. The expression means the *message's* space, and the
+  runtime translates.
+- **A bound.** Pointer chains are legal in DNS and can loop, so they need
+  limiting the way `MAX_DEPTH` limits unit nesting — a decoder that follows a
+  cycle forever is the failure §2 exists to prevent, arrived at from a new
+  direction.
+- **A note on coverage.** A region reached *only* through a pointer is cited
+  without ever having been walked. That is legal — overlapping citations are
+  **[verified]** — but it retires the "leaves tile the input" property some
+  tests currently assert.
+
 `Terminated(delimiter, consume, required)` and `Remaining()` both need a
 truncation answer: in `STREAM` shape, a missing terminator at the end of the
 available data means *truncated*, which may simply mean the message continues
@@ -256,6 +312,19 @@ The language is small because a small one is cheap to check, cheap to explain,
 and portable to a non-Python reader — not because a bigger one would be
 dangerous. Growing it is §11 question 5, and the parser is built from a
 whitelist precisely so that growing it is a list change.
+
+**Real HTTP is the first thing that needed it grown** (§13.2). The language
+has no string-to-integer conversion, no substring, no case folding, and no
+search: it compares strings for equality and stops. That is enough for every
+*binary* protocol tried so far and not enough for a text one, because HTTP
+frames its body from a header **value** — `Content-Length` is a decimal
+string, a chunk size is a hexadecimal one, and whether chunked framing applies
+depends on matching a header case-insensitively.
+
+Three total builtins would close it — `to_int(s, base)`, `starts_with(s, p)`,
+`lower(s)` — and none of them can move the cursor, so §2.1 has nothing to say
+about them. This is the "richer expressions" branch of question 5, and it now
+has the concrete case that question asked for.
 
 ## 4. Emission granularity, and the one thing `zpf` cannot express
 
@@ -352,8 +421,21 @@ A decoder must declare a break where two of its own adjacent output records do
 not join. Framing bytes skipped between two messages still join. A `Gap`
 between them does not. So the runtime rule is mechanical:
 
-> when the region between two emitted records intersects a `Gap`, pass
-> `seam=Seam(reason="stream-gap")`; otherwise omit it.
+> when a **hole-class** undecoded region lies between two emitted records,
+> pass a `Seam`; otherwise omit it.
+
+**"Hole-class", not "`Gap`" — an earlier draft of this rule said `Gap` and was
+too narrow.** `zpf` sorts undecoded reasons into two recoverability classes
+(`zpf.blocks.UNDECODED_REASONS`): `gap` and `truncated` are **`hole`**, meaning
+the bytes never existed, while `undecodable` and `skipped` are **`bytes`**,
+meaning they existed and simply were not decoded. Content either side of a
+`bytes`-class region still runs on, so it owes nothing. Content either side of a
+hole does not, whichever hole it was — and a truncated message is a hole just as
+a lost segment is. Reading the class from `zpf`'s own table rather than
+restating it here is what keeps the two from drifting.
+
+Found by fuzzing, not by reading: gap-only seams passed every hand-built test
+and every clean capture, and failed on the first adversarial corpus.
 
 Worth stating explicitly because it is easy to forget and impossible for the
 conformance checker to catch — only the producer knows.
@@ -419,7 +501,13 @@ kober try    SPEC --hex 0a0b           # decode one buffer, print tree
 
 ## 7. Example spec
 
-This one loads and checks clean; `tests/test_loader.py` runs it, so it cannot
+A cut-down illustration of the schema. The **shipped** specs are
+[`examples/dns.yaml`](examples/dns.yaml) and
+[`examples/http.yaml`](examples/http.yaml), which decode real captures and are
+exercised by `tests/test_examples.py`; this one stays here because it is short
+enough to read in one go.
+
+It loads and checks clean too — `tests/test_loader.py` runs it, so it cannot
 drift from the schema.
 
 ```yaml
@@ -479,11 +567,14 @@ CLI is the only thing that really wants YAML. `safe_load` only. Guard against
 implicit typing — `on`/`off`/`yes`/`no` become bools and `1.10` becomes a
 float — with strict schema validation immediately after load.
 
-## 9. Upstream findings — all three resolved
+## 9. Upstream findings from the pressure test — all three resolved
 
 The pressure test produced three findings, all filed against `python-zipline`,
 all fixed, and all released in `zpf` 0.2.0. Kept here because the reasoning
 still constrains our design, not as an open list.
+
+Real captures later produced two more, both **open**, in §13.4 — this section
+is the pressure test's three, not the project's total.
 
 ### 9.1 A per-record name for decoded fields — fixed, and still argued
 
@@ -596,9 +687,106 @@ Q5 a per-field record can carry its name — via `comment=`, with §4.1's caveat
    core is the substrate they attach to, so they are additive. Going straight
    to a builder DSL is the one move that throws work away.
 
+   **Two concrete cases have since arrived, and neither wants hooks** (§13).
+   Real DNS needed a back-reference, answered by the `Pointer` construct of
+   §3.2 — a declarative addition that leaves §2.1 intact, where a hook would
+   have handed an author the cursor. Real HTTP needed arithmetic on text,
+   which wants three total string builtins (§3.3) — the *richer expressions*
+   branch, the cheapest of the three.
+
+   So the case for hooks is weaker than when this question was written, not
+   stronger. Both real gaps were closable by making the declarative language
+   say more, rather than by letting code in beside it, which is evidence that
+   the language was under-built rather than that the approach was wrong.
+   Hooks stay deferred, and now have a reason rather than only a lack of one.
+
 ## 12. Prior art
 
 - **Kaitai Struct** — spec vocabulary, expression scoping, `switch-on`.
 - **Spicy** (Zeek) — confirm/reject; its gaps and sinks are `zpf`'s job here.
 - **Wireshark** — field naming and the value-string idea.
 - **Construct** — Python API ergonomics, deferred field references.
+
+## 13. What real captures found
+
+Captures converted with `zpfwire`, from its own `tests/captures/`. The plan is
+[`plans/REAL-CAPTURE-PHASE-PLAN.md`](plans/REAL-CAPTURE-PHASE-PLAN.md); this is
+the part that constrains the design.
+
+Both boundaries below are about **what the language can say**, and neither is
+about coverage. That distinction is the useful one: the guarantee §2 rests on
+survived contact with real traffic unchanged, while the vocabulary did not.
+
+### 13.1 DNS name compression — a boundary, being closed
+
+`dns_example.pcapng`, first response, last bytes of the answer record:
+
+```
+0030  00 01 c0 0c 00 01 00 01 00 00 00 9f 00 04 22 95
+            ^^^^^  the name at offset 0x0c
+```
+
+Two bytes meaning *the name already at offset 12*. A name is a union of labels
+or a pointer, which `Switch` expresses; the pointed-at bytes may be cited
+twice, which is legal. What could not be said was **read there and return** —
+answered by `Pointer` (§3.2).
+
+`examples/dns.yaml` therefore decodes the header and question section and
+marks the rest `skipped`, saying so in its own `doc:`. **[verified]**
+conformance and coverage clean over all four real query/response pairs, at
+both granularities.
+
+### 13.2 HTTP body framing — a boundary, open
+
+`http_example.pcapng` carries `Transfer-Encoding: chunked` *and* a gzip body,
+so both of HTTP's framing mechanisms appear in one exchange. Both need
+arithmetic on a header **value**: a decimal string, a hexadecimal string, and a
+case-insensitive match. The language has none (§3.3).
+
+`examples/http.yaml` decodes the start line and every header — `Terminated` on
+`\r\n` and `until` on the blank line express HTTP's line framing exactly — and
+claims the body as opaque `remaining` bytes. **[verified]** conformance and
+coverage clean; correct for one message per direction and wrong for two, which
+the spec's `doc:` states rather than leaves to be discovered.
+
+### 13.3 Gaps at scale — the design held
+
+`packet_loss.pcap`: 7 segments, **6 real gaps**, 71 KB, decoded line by line
+into 2386 records. Six `gap` regions, six `stream-gap` seams with widths
+absent, seven `truncated` regions where a hole cut a line in half, no message
+spanning a hole, conformance clean. §5's rule and §2's vocabulary both work at
+a scale no fixture reached. **[verified]**
+
+### 13.4 Two upstream bugs
+
+- **[#62](https://github.com/adamkjonsson/python-zipline/issues/62)** — which
+  timestamp a message inside a multi-message run should carry. `zpf`'s own
+  documentation states the rule two ways ("the last input record *its payload*
+  came from" and "the run's `Segment.ts`") and they diverge exactly when a run
+  holds more than one message, which is kober's normal case.
+- **[#63](https://github.com/adamkjonsson/python-zipline/issues/63)** —
+  `check_coverage` measures a real TCP stream as 2³²−1 bytes. A zero-length SYN
+  record sits one below the `isn + 1` origin, so its offset underflows, and
+  `stream_extent` takes the maximum. `chunks()` skips empty records and
+  `record_ranges` does not. It makes `check_coverage` report false violations
+  on any capture including its handshake — the tool a decode stage proves
+  itself with.
+
+### 13.5 Two of our own, and why no test could have caught them
+
+Both were fixed in place; both were invisible to every hand-built fixture,
+which is the argument for this phase existing.
+
+- **A repetition was named twice in field paths** — `dns.questions.questions[0]`
+  — because a repeat's container and its elements share a spec field. No
+  fixture had nested repeats. Real DNS has questions holding labels.
+- **The seam rule was too narrow.** It fired on `Gap` only, where `zpf` requires
+  a break after any *hole*-class region, `truncated` included. This produced
+  **nonconformant files** whenever a partial message sat between two whole
+  ones. It passed every hand-built test and every clean capture, and failed on
+  the first adversarial corpus — 340 fuzzed DNS records from `packeteer fuzz`.
+  §5 is corrected.
+
+That last one also produced the phase's one reassuring result: across those 340
+adversarial datagrams the decoder **raised nothing**, which is the promise
+`kober.decoder` makes and the first time anything tried to break it.

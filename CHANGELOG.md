@@ -280,6 +280,24 @@ installed from a checkout (see the README).
 
 ### Fixed
 
+- A seam is now declared after **any** hole-class undecoded region, not only
+  after a `Gap`. `zpf` sorts reasons into two recoverability classes and puts
+  both `gap` and `truncated` in `hole` — bytes that never existed — so a
+  truncated message followed by another record needs a `Discontinuity` between
+  them just as a lost segment does. Writing gap-only seams produced
+  nonconformant files whenever a partial message sat between two whole ones.
+  The class is now read from `zpf.blocks.UNDECODED_REASONS` rather than
+  restated, so it cannot drift from what the conformance checker enforces.
+  Found by fuzzing real DNS: it passed every hand-built test and every clean
+  capture first.
+
+- Field paths no longer name a repetition twice. A repeat's container and its
+  elements share a spec field, so both contributed a path segment and real
+  nested repeats came out as `dns.questions.questions[0].qname.labels.labels[0]`
+  instead of `dns.questions[0].qname.labels[0]`. `Node.is_repetition` now
+  distinguishes the container, which nothing else did. Found on the first real
+  capture; no hand-built fixture had nested repeats.
+
 - A `switch` written in YAML with an unquoted `on:` key now loads. `on` is a
   YAML 1.1 boolean, so `on: kind` parses as `{True: "kind"}` — and `on` is the
   schema's own dispatch key, which put the trap on one of the most common
@@ -296,7 +314,71 @@ installed from a checkout (see the README).
   asymmetry deliberately — fields decoded *before* the trouble really were
   decoded, so their records stand.
 
+- `examples/http.yaml` — an HTTP/1.1 spec that decodes the real request and
+  response from `python-zipline-wire`'s `http_example.pcapng`: start line and
+  every header, using `Terminated` on `\r\n` and `until` on the blank line that
+  ends them. The body is claimed as opaque `remaining` bytes rather than
+  framed, and says why: `Content-Length` is a decimal string and a chunk size
+  is a hexadecimal one, and the expression language has no string-to-integer
+  conversion, substring, or case folding. Correct for a capture holding one
+  message per direction, wrong the moment a connection carries two.
+
+- `examples/dns.yaml` — a real DNS spec, checked clean, that decodes the
+  `dns_example.pcapng` capture from `python-zipline-wire`: header, flags as
+  nine bitfields, and the question section with names as repeated
+  length-prefixed labels. The answer, authority, and additional sections are
+  deliberately left `skipped` and say why — their owner names are usually
+  compression pointers, which the spec language cannot follow. The phase plan
+  asked for a committed example and had only test fixtures.
+
 ### Documentation
+
+- `tests/test_fuzz.py` — fuzz tests now run with the suite, asserting the
+  promises that cannot be tested by example: a decode never raises, a decode
+  never claims more than it was given, no byte is ever both cited and marked
+  undecoded, and every reason is one `zpf` classifies. Mutations are seeded, so
+  a failure reproduces from the bytes it prints, and an escaping exception is
+  re-raised with a note rather than swallowed, so the traceback survives.
+
+  It depends on nothing outside the standard library: by the time bytes reach
+  the decoder the transport layers are gone, so the mutations that reach it are
+  payload-level ones — truncate, extend, flip, boundary, replace. Verified
+  against the real bug it exists for, by reverting the emitter fix and watching
+  all four parametrisations fail.
+
+  The technique came from `packeteer`, whose `fuzz` verb found a conformance
+  bug the entire hand-built suite had missed. The **deeper pipeline** —
+  `packeteer fuzz` → `zpfwire convert` → `kober run` — is documented in the
+  README, because it is the only thing that reaches the *stage driver*, which
+  needs real stream structure rather than one adversarial buffer.
+
+- `CLAUDE.md` gains a Testing section recording all of that as standing
+  practice: fuzz tests are standard rather than optional, a regression test
+  must be checked against the bug it claims to catch, and the two sibling
+  projects that supply real and adversarial input are named with what each is
+  for.
+
+- `DESIGN.md` revision 6 — records what real captures found, in a new §13, and
+  drops the "nothing here is implemented" status line that had been false since
+  the spec-model phase. The status now says what is built and points at what is
+  not. §3.2 gains the `Pointer` construct (decided, not yet built) with the
+  three things it needs that nothing else in the model does: an offset space, a
+  bound against looping chains, and a note that a region reached only through a
+  pointer retires the "leaves tile the input" property. §3.3 records that real
+  HTTP is the first thing to need the expression language grown, and names the
+  three total builtins that would close it. §11 question 5 is updated with the
+  consequence: both real gaps were closable by making the *declarative*
+  language say more, so the case for hooks is weaker than when the question was
+  written, not stronger.
+
+- Two further findings filed upstream from running kober over real captures:
+  [#62](https://github.com/adamkjonsson/python-zipline/issues/62) (which
+  timestamp a message inside a multi-message run should carry — the rule and
+  the recommended implementation disagree) and
+  [#63](https://github.com/adamkjonsson/python-zipline/issues/63)
+  (`check_coverage` measures a real TCP stream as 2³²−1 bytes, because a
+  zero-length SYN record underflows `record_ranges`; `chunks()` skips such
+  records and `record_ranges` does not).
 
 - `README.md` — replaced the "nothing is implemented yet" banner with what
   actually works today, and added worked `check`, `show`, `run`, and `try`

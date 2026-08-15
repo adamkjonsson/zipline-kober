@@ -1,0 +1,78 @@
+# DNS over UDP or TCP, RFC 1035.
+#
+# Decodes the header and the question section in full. The answer, authority,
+# and additional sections are deliberately left undecoded: their owner names
+# may be compression pointers (RFC 1035 §4.1.4) — two bytes meaning "the name
+# at offset N" — and the spec language has no way to read at an absolute
+# earlier offset and return. See plans/REAL-CAPTURE-PHASE-PLAN.md.
+name: dns
+version: "1.0"
+entry: message
+input: either
+doc: DNS messages, header and question section.
+
+enums:
+  opcode: {0: query, 1: iquery, 2: status, 4: notify, 5: update}
+  rcode: {0: noerror, 1: formerr, 2: servfail, 3: nxdomain, 4: notimp, 5: refused}
+  rrtype: {1: a, 2: ns, 5: cname, 6: soa, 12: ptr, 15: mx, 16: txt, 28: aaaa, 255: any}
+  rrclass: {1: internet, 3: chaos, 4: hesiod, 255: any}
+
+units:
+  message:
+    doc: One DNS message.
+    fields:
+      - name: id
+        type: {int: {bits: 16}}
+        doc: Copied into the reply; matches responses to requests.
+      - name: flags
+        type: {unit: flags}
+      - name: qdcount
+        type: {int: {bits: 16}}
+        doc: Number of entries in the question section.
+      - name: ancount
+        type: {int: {bits: 16}}
+      - name: nscount
+        type: {int: {bits: 16}}
+      - name: arcount
+        type: {int: {bits: 16}}
+      - name: questions
+        type: {unit: question}
+        repeat: {count: "qdcount"}
+      - name: resource_records
+        type: {bytes: {size: {remaining: true}}}
+        condition: "ancount + nscount + arcount > 0"
+        emit: none
+        doc: >
+          The answer, authority, and additional sections. Left undecoded on
+          purpose: an owner name here is usually a compression pointer, which
+          this language cannot follow. Marked skipped rather than claimed.
+
+  flags:
+    doc: The 16-bit flags word, MSB first.
+    fields:
+      - {name: qr, type: {int: {bits: 1}}, doc: "0 query, 1 response."}
+      - {name: opcode, type: {int: {bits: 4, enum: opcode}}}
+      - {name: aa, type: {int: {bits: 1}}, doc: "Authoritative answer."}
+      - {name: tc, type: {int: {bits: 1}}, doc: "Truncated."}
+      - {name: rd, type: {int: {bits: 1}}, doc: "Recursion desired."}
+      - {name: ra, type: {int: {bits: 1}}, doc: "Recursion available."}
+      - {name: null, type: {int: {bits: 3}}, doc: "Reserved, must be zero."}
+      - {name: rcode, type: {int: {bits: 4, enum: rcode}}}
+
+  question:
+    fields:
+      - {name: qname, type: {unit: name}}
+      - {name: qtype, type: {int: {bits: 16, enum: rrtype}}}
+      - {name: qclass, type: {int: {bits: 16, enum: rrclass}}}
+
+  name:
+    doc: A sequence of length-prefixed labels ending in a zero-length one.
+    fields:
+      - name: labels
+        type: {unit: label}
+        repeat: {until: "labels.length == 0"}
+
+  label:
+    fields:
+      - {name: length, type: {int: {bits: 8}}}
+      - {name: text, type: {string: {size: {expr: "length"}}}}

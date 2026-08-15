@@ -404,6 +404,7 @@ class Decoder:
             status=status,
             children=tuple(_indexed(item.name, elements)),
             detail=detail,
+            is_repetition=True,
             spec_field=item,
         )
 

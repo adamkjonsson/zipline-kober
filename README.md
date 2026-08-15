@@ -160,6 +160,38 @@ timestamps — and prints conformance and coverage results at each step:
 .venv/bin/python pressure_test.py
 ```
 
+### Fuzzing
+
+`tests/test_fuzz.py` runs with the suite and needs nothing external. It asserts
+the promises that cannot be tested by example: a decode never raises, a decode
+never claims more than it was given, and no byte is ever both cited and marked
+undecoded. Mutations are seeded, so a failure reproduces from the bytes it
+prints.
+
+There is a **deeper pipeline** worth running before a release or after touching
+the stage driver, using two sibling checkouts. It is what found the seam bug
+that the entire hand-built suite missed:
+
+```bash
+# Adversarial variants of a real capture, then convert, then decode.
+../packeteer/.venv/bin/packeteer fuzz \
+    ../python-zipline-wire/tests/captures/dns_example.pcapng \
+    --pcap /tmp/fuzz.pcap --seed 1
+../python-zipline-wire/.venv/bin/zpfwire convert /tmp/fuzz.pcap -o /tmp/fuzz.zpf
+.venv/bin/kober run examples/dns.yaml /tmp/fuzz.zpf -o /tmp/out.zpf --emit field
+```
+
+Then check the output with `zpf.ConformanceChecker` and `zpf.check_coverage`.
+The in-suite fuzzing covers the decoder and emitter; only this covers the
+**stage driver**, because reaching it needs real stream structure — gaps,
+truncated messages between whole ones, several records per run — rather than
+one adversarial buffer.
+
+[`packeteer`](https://github.com/adamkjonsson/packeteer) can also generate
+traffic with impairments directly (`packeteer stream --packet-loss
+--gap-jitter …`), which is a better source of gap and reordering cases than
+hand-built fixtures.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

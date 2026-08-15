@@ -317,7 +317,10 @@ def _walk(
 ) -> None:
     """Walk a tree at field granularity, emitting one record per leaf."""
     for child in node.children:
-        path = [*names, child.name]
+        # A repetition contributes no path segment of its own: its elements are
+        # already named `field[0]`, `field[1]`, so counting the container too
+        # would spell every repeat twice — `questions.questions[0]`.
+        path = names if child.is_repetition else [*names, child.name]
         granularity = resolve_emit(child, spec, default)
         if not child.is_leaf:
             # A container's setting becomes the default *inside* it rather
