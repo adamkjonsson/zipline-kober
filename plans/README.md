@@ -28,3 +28,4 @@ The live records stay in the project root:
 | --- | --- | --- |
 | [`SPEC-MODEL-PHASE.md`](SPEC-MODEL-PHASE.md) | The spec model, expression language, loaders, checker, and the `check`/`show` CLI verbs. | **Done** — landed on `spec_model_and_more`. |
 | [`DECODER-PHASE-PLAN.md`](DECODER-PHASE-PLAN.md) | The decoder: expression evaluation, the `Node` tree, emission, the stage driver, and the `run`/`try` CLI verbs. | **Done** — landed on `decoder_work`. |
+| [`REAL-CAPTURE-PHASE-PLAN.md`](REAL-CAPTURE-PHASE-PLAN.md) | Real captures through `zpfwire`: DNS, HTTP, and packet loss, to test the design rather than the code. | **Live** — the current phase. |
