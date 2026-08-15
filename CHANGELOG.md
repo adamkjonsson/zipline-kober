@@ -206,6 +206,32 @@ installed from a checkout (see the README).
   since every guarantee the engine relies on is one `check` proves;
   `Decoder(spec, check=False)` skips it.
 
+- `kober.emit` — turning a decode tree into records. `plan(spec, tree, data)`
+  is **pure**: it returns the `Emission`s to write and the `Unclaimed` regions
+  to mark, so every decision about *what* to write is testable without opening
+  a file. `Emit.MESSAGE` produces one `dec:<spec>-message` record per
+  instance; `Emit.FIELD` one record per leaf, normalized into `prim:`'s
+  little-endian with the field path in `comment=`; `Emit.NONE` claims nothing
+  and says `skipped` out loud rather than leaving it to auto-fill.
+
+  Granularity resolves field → unit → enclosing → decoder, so a field naming
+  its own granularity still wins over the unit holding it. `field_path` is the
+  **single site** that formats a path, which is what makes upstream
+  [#58](https://github.com/adamkjonsson/python-zipline/issues/58) a one-line
+  change; nothing reads a `comment` back.
+
+  Widths outside `prim:`'s closed vocabulary (`u8`…`u64`, `i8`…`i64`) widen to
+  the smallest token that holds them — a `u4` is written `prim:u8`, a `u24` as
+  `prim:u32` — because the payload is created rather than copied, so any
+  reader gets the right number without our registry. Text uses
+  `mime:text/plain; charset=utf-8`, since `prim:` has no text member. A
+  `Computed` field cites the fields its expression read, per `DESIGN.md` §3.2,
+  rather than the empty range it consumed.
+
+  Conformance is asserted rather than assumed: `tests/test_emit_conformance.py`
+  writes real `.zpf` files at both granularities and puts them past
+  `ConformanceChecker` and `check_coverage`, including a truncated input.
+
 - `kober.TruncatedRead` — a read ran past the end of the available bytes. The
   sibling of `EvalError` and the same kind of signal rather than a fault: in
   `STREAM` shape the message may simply continue in a segment we do not hold

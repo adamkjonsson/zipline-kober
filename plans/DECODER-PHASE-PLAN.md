@@ -146,8 +146,8 @@ Walk the tree and call `dec.record(...)` / `dec.undecoded(...)`.
 
 ## Design questions this phase has to settle
 
-Flagged here rather than guessed at in code. Each changes what gets built. Q1
-is settled; Q2–Q5 are open.
+Flagged here rather than guessed at in code. Each changes what gets built. Q1,
+Q4, and Q5 are settled; Q2 and Q3 are open.
 
 ### Q1 — What does the decoder read: `reassembled()`, `segments()`, or `chunks()`? — **settled: `chunks()`**
 
@@ -219,7 +219,7 @@ is exhausted, and the entry unit's own extent is the frame. Two consequences:
 - A `Terminated` size with no terminator before the end of the run is the same
   condition and must not be reported as `undecodable`.
 
-### Q4 — Does `Decoder.__init__` run `check()`?
+### Q4 — Does `Decoder.__init__` run `check()`? — **settled: yes, by default**
 
 Running it is friendlier and makes the decoder's assumptions true by
 construction. Not running it keeps `Decoder` cheap and leaves validation an
@@ -229,15 +229,35 @@ explicit step.
 who already did it — and refuse to construct on an ERROR finding, since every
 guarantee in stage 2 rests on one.
 
-### Q5 — How is a sub-byte field's payload normalized?
+### Q5 — How is a sub-byte field's payload normalized? — **settled: widen**
 
-A `u4` has no `prim:` token: `prim:` stops at whole widths. Options are to
-widen to the containing `prim:u8` (losing the distinction between the field and
-its byte), or to use `dec:` for sub-byte fields only (losing normative typing
-for exactly the fields §4.1 fought to name).
+The question was sized wrong here. `prim:`'s vocabulary is **closed** —
+`zpf.content.PRIM_WIDTHS` is `u8/i8/u16/i16/u32/i32/u64/i64`, plus `bytes` —
+so it is not only sub-byte widths that have no token. A `u24` or a `u12` has
+none either, and the spec model allows any width from 1 to 64.
 
-Unresolved. It only bites `Emit.FIELD`, and it is worth a **new pressure-test
-question** before choosing — the pattern that has worked twice now.
+**Settled: widen to the smallest token that holds the declared width.** A `u4`
+is written `prim:u8`, a `u24` is written `prim:u32`. The alternative, dropping
+to `dec:` for unrepresentable widths, would lose normative typing for exactly
+the fields §4.1 fought to name — a reader without our registry would get opaque
+bytes instead of a number.
+
+Widening is honest because the payload is *created*, not copied: a `u4` holding
+5 really is the integer 5, and any reader gets 5. What is lost is the field's
+exact width, which the format has nowhere to record anyway — and `cites`
+already rounds a sub-byte field out to its containing byte for the same reason,
+so width was never recoverable from the file.
+
+Strings get `mime:text/plain; charset=utf-8` rather than a `prim:` token, since
+that scheme has no text member. Bytes get `prim:bytes`.
+
+**No new pressure-test question was added, against this plan's own suggestion.**
+The empirical parts — that overlapping spans are accepted, that a created
+payload may differ from its cited bytes, that `prim:` normalization reads back
+— were already **[verified]**, and what remained was a judgement about honesty
+that no probe can settle. `tests/test_emit_conformance.py` does the equivalent
+work with more force: it writes real files at both granularities and puts them
+past `ConformanceChecker` and `check_coverage`.
 
 ---
 

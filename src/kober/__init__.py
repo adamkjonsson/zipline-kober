@@ -23,6 +23,7 @@ __version__: str = _distribution_version("kober")
 
 from kober.check import Finding, Severity, check
 from kober.decoder import Decoder
+from kober.emit import Emission, Unclaimed, field_path, plan, prim_token
 from kober.errors import EvalError, ExprError, KoberError, SpecError, TruncatedRead
 from kober.expr import ExprType
 from kober.loader import from_dict, from_file, from_json, from_yaml
@@ -63,6 +64,7 @@ __all__ = [
     "Decoder",
     "Emit",
     "Endian",
+    "Emission",
     "EnumDef",
     "EvalError",
     "ExprError",
@@ -88,14 +90,18 @@ __all__ = [
     "Switch",
     "Terminated",
     "ToEnd",
+    "Unclaimed",
     "TruncatedRead",
     "Unit",
     "UnitRef",
     "Until",
     "__version__",
     "check",
+    "field_path",
     "from_dict",
     "from_file",
     "from_json",
     "from_yaml",
+    "plan",
+    "prim_token",
 ]
