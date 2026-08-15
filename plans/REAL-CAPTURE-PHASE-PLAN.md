@@ -217,10 +217,35 @@ Not a kober bug: the output is conformant, its declared extent (74931) matches
 the data, and the diagnostics are about measuring the *input*. Filed as
 [#63](https://github.com/adamkjonsson/python-zipline/issues/63).
 
-### Stage 4 — write up
+### Stage 4 — write up — **half done**
 
-Findings to `DESIGN.md` and upstream where they belong, and real field-
-granularity files to #58 as the evidence it asked for.
+`DESIGN.md` is at **revision 6**: a new §13 holds the findings, the status line
+finally says what is built, §3.2 carries `Pointer` as decided-not-built, §3.3
+records the expression-language gap, and §11 question 5 gets the conclusion
+that both real gaps were closable declaratively. Upstream got
+[#62](https://github.com/adamkjonsson/python-zipline/issues/62) and
+[#63](https://github.com/adamkjonsson/python-zipline/issues/63).
+
+**Still to do: bring #58 its evidence.** It deferred "are per-field records the
+right level for a payload format" pending real files from a real decoder. The
+measurement is done and the answer is *it depends on the protocol*, which is
+more useful than a yes or no:
+
+| Capture | Input | Message granularity | Field granularity |
+| --- | --- | --- | --- |
+| DNS, 4 query/response pairs | 2116 B (676 B payload) | 8 records, 2608 B | 176 records, 22988 B — **8.8×** |
+| HTTP, one exchange | 4324 B (3138 B payload) | 2 records, 4488 B | 26 records, 7764 B — **1.7×** |
+
+The cost tracks **fields per byte**, not payload size. DNS is bitfield-dense —
+nine flags in two bytes, names as one record per label — and pays 8.8× for it,
+about 3.8 bytes of payload per record. HTTP is a handful of long text fields
+and pays 1.7×. So "useful or noise" is not a property of the format; it is a
+property of what is being decoded, and a reader of the file cannot tell which
+they are getting without knowing the protocol.
+
+That is worth saying upstream plainly, because it argues against a single
+answer to #58 and for whatever mechanism it settles on being *optional* per
+spec — which `Emit` already is.
 
 ## What counts as what
 
