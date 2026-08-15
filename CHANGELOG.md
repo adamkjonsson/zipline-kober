@@ -153,6 +153,15 @@ installed from a checkout (see the README).
   actually works today, and added worked `check` and `show` output plus the
   API equivalent.
 
+- `plans/` — working documents recording why things were built the way they
+  were, following the same convention as `python-zipline`: historical rather
+  than normative, with `DESIGN.md` and this changelog staying the live records
+  in the project root. Holds `SPEC-MODEL-PHASE.md` (a record of the completed
+  spec-model phase and the decisions the next one inherits) and
+  `DECODER-PHASE-PLAN.md` (the live plan for the decoder — five stages, the six
+  invariants it must enforce, five design questions it has to settle, and its
+  acceptance criteria).
+
 - `DESIGN.md` revision 5 — corrected the reasoning in §2. It justified the
   declarative spec model with "if specs could run code they could swallow
   input, so because they can't, coverage is provable from the spec alone",
