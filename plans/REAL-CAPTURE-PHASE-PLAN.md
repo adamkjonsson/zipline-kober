@@ -165,10 +165,57 @@ parser is already a whitelist, so adding calls is a bounded change; worth
 noting too that this is the first case where something real needed it, which is
 the bar §11.5 set.
 
-### Stage 3 — packet loss
+### Stage 3 — packet loss — **done**
 
-`packet_loss.pcap` for real `Gap` handling: gap regions, seams, and messages
-that do not span holes, at 71 KB rather than the hand-built 12 bytes.
+`packet_loss.pcap` gives 7 segments and **6 real gaps** across 71 KB. Decoded
+line by line (the payload is synthetic filler text, so a line-oriented spec is
+what frames it) it produces 2386 records with:
+
+- 6 `reason="gap"` regions, one per hole, at the reassembler's own offsets;
+- 6 `stream-gap` Discontinuities, one per hole, **widths absent**;
+- 7 `truncated` regions — the partial line at the end of each segment, which
+  is what a hole does to a line-oriented stream;
+- `ConformanceChecker` clean at both granularities.
+
+No message spans a hole and every byte is accounted for. This is the seam and
+gap path at scale, and it holds.
+
+#### Finding: `check_coverage` measures a real TCP stream as 2³²−1 bytes
+
+`zpf.check_coverage` reports four violations against this output, and all four
+are false. It measures the input stream as **4294967295** bytes — 2³²−1 — where
+the data ends at 74931, and then reports everything past that as uncovered.
+
+The mechanism, confirmed rather than inferred:
+
+```
+pid=0 isn=4287897474 records=9 zero-length=1
+    zero-length record seq_start=4287897474   (seq_start - isn = 0)
+    record_ranges (first 4): ((4294967295, 4294967295), (0, 1193), (1193, 7422), ...)
+    stream_extent = 4294967295
+```
+
+A TCP SYN consumes a sequence number, so a stream's data starts at ``isn + 1``
+and `record_ranges` computes an offset as ``seq_start - (isn + 1)``. The SYN
+itself sits at ``seq_start == isn``, so its offset is **−1**, which wraps to
+2³²−1 in the modular arithmetic. `stream_extent` takes the maximum end over all
+ranges, so that one empty record sets the extent for the whole stream.
+
+The inconsistency is inside `zpf`, between two functions reading the same
+blocks: :meth:`StreamView.chunks` documents that "zero-length (pure-ACK)
+records contribute no bytes and are skipped", and does skip them.
+`record_ranges` does not. One says the stream is 74931 bytes; the other says it
+is 4294967295.
+
+The consequence is larger than this capture. `zpfwire` writes the handshake as
+zero-length records, so **any realistic TCP capture that includes its SYN makes
+`check_coverage` report false violations** — and `check_coverage` is the tool a
+decode stage is meant to prove itself with. Our own tests never hit it because
+every hand-built fixture starts at ``isn + 1`` and has no SYN.
+
+Not a kober bug: the output is conformant, its declared extent (74931) matches
+the data, and the diagnostics are about measuring the *input*. To file
+upstream.
 
 ### Stage 4 — write up
 
