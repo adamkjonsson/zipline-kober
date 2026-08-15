@@ -1,0 +1,38 @@
+# HTTP/1.1 over TCP, RFC 7230.
+#
+# Decodes the start line and every header. The body is claimed as opaque bytes
+# rather than framed, because framing it needs arithmetic on a *header value*:
+# Content-Length is a decimal string and a chunk size is a hexadecimal one, and
+# the expression language has no string-to-integer conversion, no substring,
+# and no case-insensitive compare. See plans/REAL-CAPTURE-PHASE-PLAN.md.
+name: http
+version: "1.0"
+entry: message
+input: stream
+doc: HTTP/1.1 messages, start line and headers.
+
+units:
+  message:
+    doc: One request or response.
+    fields:
+      - name: start_line
+        type: {string: {size: {terminated: {delimiter: "\r\n"}}}}
+        doc: Request line or status line, whichever direction this is.
+      - name: headers
+        type: {unit: header}
+        repeat: {until: "headers.line == ''"}
+        doc: >
+          Header lines up to and including the blank line that ends them. The
+          blank line is kept as the last element rather than dropped: it is
+          input, and every byte has to be accounted for.
+      - name: body
+        type: {bytes: {size: {remaining: true}}}
+        doc: >
+          Everything after the headers, undecoded. Correct for this capture
+          and wrong in general: with a real Content-Length or chunked framing
+          this would end at the message boundary, not the end of the run.
+
+  header:
+    fields:
+      - name: line
+        type: {string: {size: {terminated: {delimiter: "\r\n"}}}}

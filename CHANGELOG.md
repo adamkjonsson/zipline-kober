@@ -314,6 +314,15 @@ installed from a checkout (see the README).
   asymmetry deliberately — fields decoded *before* the trouble really were
   decoded, so their records stand.
 
+- `examples/http.yaml` — an HTTP/1.1 spec that decodes the real request and
+  response from `python-zipline-wire`'s `http_example.pcapng`: start line and
+  every header, using `Terminated` on `\r\n` and `until` on the blank line that
+  ends them. The body is claimed as opaque `remaining` bytes rather than
+  framed, and says why: `Content-Length` is a decimal string and a chunk size
+  is a hexadecimal one, and the expression language has no string-to-integer
+  conversion, substring, or case folding. Correct for a capture holding one
+  message per direction, wrong the moment a connection carries two.
+
 - `examples/dns.yaml` — a real DNS spec, checked clean, that decodes the
   `dns_example.pcapng` capture from `python-zipline-wire`: header, flags as
   nine bitfields, and the question section with names as repeated

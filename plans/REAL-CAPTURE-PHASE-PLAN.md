@@ -74,8 +74,7 @@ problems:
    language is.
 
 So DNS is decodable up to the answer section and then stops. That is a real
-boundary of the design, found on the first real packet, and it wants a decision
-rather than a workaround. Options, none yet chosen:
+boundary of the design, found on the first real packet. Options were:
 
 - **Accept the boundary.** Decode the header and question, mark the answer
   section `undecodable`. Honest, conformant, and useless for the thing people
@@ -87,12 +86,42 @@ rather than a workaround. Options, none yet chosen:
 - **A hook** (§11.5), which is the escape hatch already sketched and would need
   the hook API this project has deferred.
 
+### Decided: the `Pointer` construct
+
+Chosen. It is the option that keeps §2.1 intact rather than working around it:
+the spec *names* an offset and the runtime does the seeking, so nothing
+author-supplied moves the cursor and coverage stays provable. It also earns its
+keep beyond DNS — back-references are a recurring shape in binary formats, and
+a hook would solve the same problem while giving up the static analysis.
+
+Not yet built. What it will need, so the size is on the record:
+
+- **Model** — a `Pointer` field type carrying the offset expression and the
+  type to read there, and a decision on whose offset space the expression means
+  (message-relative is what DNS wants; the run's is what the cursor holds).
+- **Checker** — the pointed-at type checks like any other; the offset
+  expression must be an integer. Termination is the new hazard: a pointer
+  chain can loop, and DNS pointers legitimately chain, so a bound is needed
+  the way `MAX_DEPTH` bounds unit nesting.
+- **Engine** — read at the offset and return, leaving the cursor where it was.
+  A second `Cursor` over the same buffer is the obvious shape and keeps the
+  invariant literal: the reading cursor never moves.
+- **Emitter** — the pointed-at bytes are cited again, which is already legal
+  (**[verified]** overlapping spans), so nothing changes there.
+- **Coverage** — a subtlety worth naming: if a region is *only* ever reached
+  through a pointer, it is cited without ever having been walked. That is
+  fine, but it means the "leaves tile the input" property the emitter tests
+  rely on stops holding, and the tests that assert it need to say so.
+
+Sequenced after the remaining stages, since HTTP and packet loss are already
+planned and neither needs it.
+
 ## Stages
 
 Sized loosely: this is exploratory, so "what breaks" is the deliverable and
 each stage may end early with a finding instead of a spec.
 
-### Stage 1 — DNS over UDP
+### Stage 1 — DNS over UDP — **done**
 
 Write `examples/dns.yaml` against the real capture, as far as the language
 goes. Confirm the compression boundary precisely, decode at both granularities,
@@ -100,13 +129,41 @@ check conformance and coverage. Extract the fixture DNS spec out of the three
 test files while doing it — the phase plan's acceptance criteria asked for a
 committed example and got one only in tests.
 
-### Stage 2 — HTTP over TCP
+### Stage 2 — HTTP over TCP — **done**
 
-The `STREAM` case with real framing: request line, headers to a blank line,
-body by `Content-Length`. Exercises `Terminated`, `Until`, and the
-message-per-run loop against text rather than fixed layouts. Expected to
-pressure the expression language hardest — HTTP framing is conditional on
-header *values*, which are strings.
+`examples/http.yaml` decodes the real request and response from
+`http_example.pcapng`: start line and every header, conformance and coverage
+clean at both granularities. `Terminated` on `\r\n` and `until` on an empty
+line express HTTP's line framing exactly, and the blank line that ends the
+headers is kept as an element rather than dropped — it is input, and every byte
+has to be accounted for.
+
+**The finding is the one this stage predicted, and it is sharper than
+expected: framing derived from a text value is not expressible.** The capture's
+response is `Transfer-Encoding: chunked` with a gzip body, so both of HTTP's
+body-framing mechanisms appear in one exchange:
+
+- `Content-Length: 1922` — a **decimal string**. Using it as a size needs
+  string-to-integer conversion.
+- `Transfer-Encoding: chunked` — each chunk is a **hexadecimal string** size,
+  and whether that framing applies at all depends on matching a header value
+  case-insensitively.
+
+The expression language has none of that: no string-to-integer, no substring,
+no case folding, no search. It compares strings for equality and that is all.
+So the body is claimed as `remaining` — correct for a capture holding one
+message per direction, wrong the moment a connection carries two.
+
+This is the same shape as the DNS finding one level up. DNS needed the cursor
+to *move*; HTTP needs values to be *computed from text*. Neither is about
+coverage, and neither is expressible today.
+
+It maps straight onto §11.5's three options. A handful of total string
+builtins — `to_int(s, base)`, `starts_with`, `lower` — would close it, and is
+the "richer expressions" option rather than the hook option. Worth noting the
+parser is already a whitelist, so adding calls is a bounded change; worth
+noting too that this is the first case where something real needed it, which is
+the bar §11.5 set.
 
 ### Stage 3 — packet loss
 
