@@ -36,18 +36,42 @@ nitpicky = True
 #   build, and this project cites it constantly;
 # * private names used in otherwise public signatures.
 nitpick_ignore = [
+    # Standard library and typing.
     ("py:class", "ast.AST"),
+    ("py:func", "ast.parse"),
+    ("py:class", "argparse.ArgumentParser"),
     ("py:class", "collections.abc.Iterable"),
     ("py:class", "collections.abc.Iterator"),
     ("py:class", "collections.abc.Mapping"),
     ("py:class", "collections.abc.Sequence"),
+    ("py:class", "datetime"),
     ("py:class", "datetime.datetime"),
+    ("py:class", "enum.Enum"),
     ("py:class", "os.PathLike"),
+    ("py:class", "Path"),
     ("py:class", "pathlib.Path"),
     ("py:class", "random.Random"),
+    ("py:data", "sys.argv"),
+    # Private helpers appearing in otherwise public signatures. Listed one by
+    # one rather than by pattern, so a new one has to be considered.
     ("py:class", "kober.check._Scope"),
     ("py:class", "kober.decoder._Frame"),
     ("py:class", "kober.decoder._Environment"),
+    # Union aliases — `Expr`, `FieldType`, `SizeSpec`, `Repeat`. They are
+    # module-level assignments rather than classes, so there is no object for
+    # a reference to land on, and autodoc renders them unqualified inside
+    # annotations. Documented in prose instead; see api/spec and api/expr.
+    ("py:class", "Expr"),
+    ("py:class", "ExprValue"),
+    ("py:class", "FieldType"),
+    ("py:class", "SizeSpec"),
+    ("py:class", "Repeat"),
+    # Our own exceptions, where an annotation renders them unqualified.
+    ("py:class", "EvalError"),
+    ("py:class", "ExprError"),
+    ("py:class", "KoberError"),
+    ("py:class", "SpecError"),
+    ("py:class", "TruncatedRead"),
 ]
 
 # Annotations Sphinx's type parser splits on the comma and then fails to look
@@ -63,6 +87,12 @@ nitpick_ignore_regex = [
 # than it makes the signature useful.
 autodoc_typehints = "description"
 autodoc_member_order = "bysource"
+
+# Render `Attributes:` sections as `:ivar:` fields on the class rather than as
+# separate attribute entries. Without this every frozen dataclass field is
+# documented twice — once from the docstring section, once by autodoc reading
+# the annotation — and Sphinx reports each as a duplicate object.
+napoleon_use_ivar = True
 autodoc_default_options = {
     "members": True,
     "undoc-members": False,

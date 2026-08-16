@@ -3,6 +3,20 @@
 For working on `kober` itself. It assumes you have read the
 [README](https://github.com/adamkjonsson/zipline-kober) and can run the tests.
 
-Pages are added here as they are written; the section covers the module map and
-the invariants a change must not break, the testing practice, the contributing
-rules, and an index of where past reasoning lives.
+- [Architecture](architecture.md) — the module map, how a decode flows through
+  it, and the **invariants a change must not break**.
+- [Testing](testing.md) — the test map, why fuzzing is standard here, and the
+  deeper pipeline that is the only thing exercising the stage driver.
+- [Contributing](contributing.md) — environment, style, changelog, and the
+  house rules.
+- [Where decisions live](decisions.md) — an index of the reasoning, which is
+  spread across `DESIGN.md`, `plans/`, upstream issues, and the commit log.
+
+```{toctree}
+:hidden:
+
+architecture
+testing
+contributing
+decisions
+```

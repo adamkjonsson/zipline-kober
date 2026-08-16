@@ -333,6 +333,23 @@ installed from a checkout (see the README).
 
 ### Documentation
 
+- `docs/dev/` — the developer guide. `architecture.md` gives the module map,
+  how a decode flows through it, and the **six design invariants** a change
+  must not break, each with what actually goes wrong when it is: the cursor
+  rule, failure never escaping a decode, every byte cited or named, the single
+  field-path site, shape coming from the stream, and the spec not running code.
+  `testing.md` gives the test map and the practice — fuzzing is standard, a
+  regression test is checked against its bug, and the deeper `packeteer` →
+  `zpfwire` → `kober` pipeline is the only thing exercising the stage driver.
+  `contributing.md` covers environment, style, changelog, and git.
+  `decisions.md` indexes where reasoning lives, which was previously findable
+  only by knowing `plans/` exists.
+
+- `docs/api/` — one autodoc page per module, ordered by the pipeline rather
+  than alphabetically. Pulled forward from its planned position because the
+  developer guide cross-references API symbols and those pages are what define
+  them.
+
 - `docs/` — the documentation tree, following `python-zipline`'s style: Sphinx
   with MyST markdown, `furo`, `autodoc` + `napoleon`, and a `dev`/`format`/`api`
   split. Warnings are errors (`nitpicky = True` plus `-W`), so a cross-reference
