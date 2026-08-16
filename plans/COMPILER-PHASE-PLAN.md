@@ -111,8 +111,9 @@ would not compile.
 
 ## Room for other targets later
 
-The stated possibility is Rust or C++ eventually. That does not change what is
-built now, but it changes one seam, cheaply, if it is put in from the start.
+Rust or C++ is a stated intention, not a hypothetical. That does not change
+what is built now, but it changes one seam — cheaply, if it goes in from the
+start.
 
 Split the generator in two:
 
@@ -131,11 +132,25 @@ backend has somewhere to attach.
 rewrite.** But it stays a seam rather than an abstraction: one backend exists,
 and the plan does not pretend otherwise.
 
-```{note}
-Read as "a backend emitting Rust or C++". If what was meant is
-re-implementing the *interpreter* in another language, none of this plan is
-affected — that would be a separate project consuming the same spec format.
-```
+**Confirmed**: this means the compiler *emitting* Rust or C++, not
+re-implementing the interpreter in them. So the seam is a real requirement
+rather than a hedge, and two of the questions above narrow because of it.
+
+**Q4's naming rules belong to the backend, not the neutral plan.** Rust wants
+`snake_case` fields and has its own reserved words; C++ has different ones
+again. If the plan of operations carried Python identifiers, a second backend
+would inherit a mapping made for the wrong language. The neutral layer should
+carry the **spec's own names**, and each backend maps them — including the
+hard failure on collision, since what collides differs by target.
+
+**Q2's span representation is likewise a backend concern.** `__spans__` is a
+Python answer. What the neutral layer owes is *that* a field has a byte range
+and what it is; how a target exposes it — a dunder, a parallel array, a
+`spans()` accessor — is the backend's call.
+
+The pattern generalises: the neutral layer describes **what the format means**,
+and a backend decides **how that language says it**. Anything that reads like a
+Python decision is a sign it is in the wrong layer.
 
 ## Stages
 
@@ -153,8 +168,9 @@ becomes the first test fixture: the generator's output should converge on it.
 ### Stage 2 — the typed model
 
 Spec → dataclasses, one per unit, with `slots`, annotations, optional fields
-for `condition`, lists for `repeat`, and the `__spans__` shape from Q2. Plus
-the identifier and collision rules from Q4.
+for `condition`, lists for `repeat`, and the span representation from Q2. Plus
+the identifier and collision rules from Q4 — which live in the **Python
+backend**, not the neutral layer, per the confirmation above.
 
 Self-contained and testable without decoding anything.
 
