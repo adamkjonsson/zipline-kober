@@ -148,7 +148,7 @@ where every minor is a break with no upgrade path promised.
 ```bash
 .venv/bin/pytest                                  # run tests
 ruff check .                                      # lint
-.venv/bin/sphinx-build docs docs/_build/html      # build docs
+.venv/bin/sphinx-build -W docs docs/_build/html   # build docs (warnings are errors)
 .venv/bin/python -m build                         # build wheel + sdist
 ```
 

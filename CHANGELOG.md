@@ -333,6 +333,53 @@ installed from a checkout (see the README).
 
 ### Documentation
 
+- `docs/format/` — the spec-format reference, which is the product's real
+  surface and previously had no documentation anywhere: `DESIGN.md` describes
+  the Python model, not the YAML an author types. `document.md` covers the top
+  level, units, fields, enums, and emission granularity; `types.md` every field
+  type, size, and repeat, each with **what happens when it does not match**,
+  since that answer is half of what a construct means; `expressions.md` the
+  language, its scoping and ordering rules, and what it deliberately cannot do.
+
+  Both YAML traps that have caught this project are written down: `on` is a
+  boolean and is the switch dispatch key, and a comma inside a flow mapping
+  splits `doc:` into a second key.
+
+- `tests/test_docs.py` — the format reference is checked against the loader's
+  own key sets, so adding a schema key without documenting it fails the suite
+  rather than the reader. It found five undocumented keys on its first run.
+
+- `docs/dev/` — the developer guide. `architecture.md` gives the module map,
+  how a decode flows through it, and the **six design invariants** a change
+  must not break, each with what actually goes wrong when it is: the cursor
+  rule, failure never escaping a decode, every byte cited or named, the single
+  field-path site, shape coming from the stream, and the spec not running code.
+  `testing.md` gives the test map and the practice — fuzzing is standard, a
+  regression test is checked against its bug, and the deeper `packeteer` →
+  `zpfwire` → `kober` pipeline is the only thing exercising the stage driver.
+  `contributing.md` covers environment, style, changelog, and git.
+  `decisions.md` indexes where reasoning lives, which was previously findable
+  only by knowing `plans/` exists.
+
+- `docs/api/` — one autodoc page per module, ordered by the pipeline rather
+  than alphabetically. Pulled forward from its planned position because the
+  developer guide cross-references API symbols and those pages are what define
+  them.
+
+- `docs/` — the documentation tree, following `python-zipline`'s style: Sphinx
+  with MyST markdown, `furo`, `autodoc` + `napoleon`, and a `dev`/`format`/`api`
+  split. Warnings are errors (`nitpicky = True` plus `-W`), so a cross-reference
+  that does not resolve fails the build instead of quietly rendering as plain
+  text. `CLAUDE.md` has documented a docs build since the scaffold and it has
+  never worked; it does now, and both it and the README now name the `-W` form.
+
+  Deliberately *not* copied from `python-zipline`: its `missing-reference` hook
+  bridging `zpf.Foo` onto `zpf.module.Foo`. kober's docstrings already cite the
+  defining module, so the hook would be machinery with nothing to do. Two
+  ambiguous references were fixed instead — `kober.check` is both a module and
+  a function, and `kober.Spec.from_dict` named the re-export rather than the
+  definition.
+
 - `tests/test_fuzz.py` — fuzz tests now run with the suite, asserting the
   promises that cannot be tested by example: a decode never raises, a decode
   never claims more than it was given, no byte is ever both cited and marked
