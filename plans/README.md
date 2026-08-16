@@ -22,6 +22,12 @@ The live records stay in the project root:
   behaviour this project depends on, and the source of every **[verified]**
   claim in the design.
 
+## Analyses
+
+| Document | What it is |
+| --- | --- |
+| [`CODEGEN-ANALYSIS.md`](CODEGEN-ANALYSIS.md) | Measured comparison of interpreting a spec against compiling it, and a sizing of the work. The evidence behind the compiler phase. |
+
 ## Phases
 
 | Document | What it is | State |
@@ -29,4 +35,5 @@ The live records stay in the project root:
 | [`SPEC-MODEL-PHASE.md`](SPEC-MODEL-PHASE.md) | The spec model, expression language, loaders, checker, and the `check`/`show` CLI verbs. | **Done** — landed on `spec_model_and_more`. |
 | [`DECODER-PHASE-PLAN.md`](DECODER-PHASE-PLAN.md) | The decoder: expression evaluation, the `Node` tree, emission, the stage driver, and the `run`/`try` CLI verbs. | **Done** — landed on `decoder_work`. |
 | [`REAL-CAPTURE-PHASE-PLAN.md`](REAL-CAPTURE-PHASE-PLAN.md) | Real captures through `zpfwire`: DNS, HTTP, and packet loss, to test the design rather than the code. | **Done** — landed on `real_captures`. |
-| [`DOCS-PHASE-PLAN.md`](DOCS-PHASE-PLAN.md) | The documentation tree, following `python-zipline`'s style: developer docs first, then the spec-format reference. | **Live** — the current phase. |
+| [`DOCS-PHASE-PLAN.md`](DOCS-PHASE-PLAN.md) | The documentation tree, following `python-zipline`'s style: developer docs first, then the spec-format reference. | **Done** — landed on `docs_phase`. |
+| [`COMPILER-PHASE-PLAN.md`](COMPILER-PHASE-PLAN.md) | A compiler alongside the interpreter: a spec becomes a Python module with a typed API. | **Live** — the current phase. |
