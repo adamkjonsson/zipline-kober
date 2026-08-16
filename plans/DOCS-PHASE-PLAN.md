@@ -1,6 +1,6 @@
 # Phase plan: documentation
 
-**State: live.** Written after the real-capture phase landed
+**State: done** (bar the deferred user docs). Written after the real-capture phase landed
 ([`REAL-CAPTURE-PHASE-PLAN.md`](REAL-CAPTURE-PHASE-PLAN.md)), against
 `DESIGN.md` revision 6.
 
@@ -61,7 +61,7 @@ makes about the format is auditable in one place.
 
 ## Stages
 
-### Stage 1 — scaffolding
+### Stage 1 — scaffolding — **done**
 
 `docs/conf.py`, `docs/Makefile`, `docs/index.md`. Sphinx + MyST + furo +
 autodoc + napoleon, `nitpicky = True` with a documented `nitpick_ignore` for
@@ -69,7 +69,7 @@ the categories that genuinely cannot resolve (standard-library names without
 intersphinx, `tuple[X, ...]` annotations Sphinx splits on the comma). The build
 command in `CLAUDE.md` must work when this stage ends.
 
-### Stage 2 — `docs/dev/`
+### Stage 2 — `docs/dev/` — **done**
 
 The priority. Four pages, mirroring `python-zipline`'s:
 
@@ -92,12 +92,20 @@ The priority. Four pages, mirroring `python-zipline`'s:
   history, upstream issues for what is blocked on the format. Contributors
   currently have to know that `plans/` exists to find any of it.
 
-### Stage 3 — `docs/api/`
+### Stage 3 — `docs/api/` — **done**, pulled forward
+
+The developer guide cross-references API symbols and these pages define them,
+so stage 2 could not build without it. Two config decisions were needed beyond
+`automodule`: `napoleon_use_ivar`, without which every frozen dataclass field is
+documented twice, and ignoring the union aliases, which are module-level
+assignments with no object for a reference to land on.
+
+Original note:
 
 One page per module, `automodule` with members. Expected to surface docstring
 cross-references that do not resolve; fixing those is part of the stage.
 
-### Stage 4 — `docs/format/`
+### Stage 4 — `docs/format/` — **done**
 
 The YAML/JSON spec-format reference, which is the product's real surface.
 

@@ -333,6 +333,22 @@ installed from a checkout (see the README).
 
 ### Documentation
 
+- `docs/format/` — the spec-format reference, which is the product's real
+  surface and previously had no documentation anywhere: `DESIGN.md` describes
+  the Python model, not the YAML an author types. `document.md` covers the top
+  level, units, fields, enums, and emission granularity; `types.md` every field
+  type, size, and repeat, each with **what happens when it does not match**,
+  since that answer is half of what a construct means; `expressions.md` the
+  language, its scoping and ordering rules, and what it deliberately cannot do.
+
+  Both YAML traps that have caught this project are written down: `on` is a
+  boolean and is the switch dispatch key, and a comma inside a flow mapping
+  splits `doc:` into a second key.
+
+- `tests/test_docs.py` — the format reference is checked against the loader's
+  own key sets, so adding a schema key without documenting it fails the suite
+  rather than the reader. It found five undocumented keys on its first run.
+
 - `docs/dev/` — the developer guide. `architecture.md` gives the module map,
   how a decode flows through it, and the **six design invariants** a change
   must not break, each with what actually goes wrong when it is: the cursor
