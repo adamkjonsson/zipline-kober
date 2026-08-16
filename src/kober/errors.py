@@ -37,9 +37,9 @@ class KoberError(Exception):
 class SpecError(KoberError):
     """The specification is invalid, independently of any input data.
 
-    Raised by :meth:`kober.Spec.from_dict` and friends for a structural
+    Raised by :meth:`kober.spec.Spec.from_dict` and friends for a structural
     fault — an unknown key, a wrong value type, a reference to a unit that
-    does not exist — and by :func:`kober.check` for the faults that need the
+    does not exist — and by :func:`kober.check.check` for the faults that need the
     whole spec in view, such as a cycle in the unit graph.
     """
 

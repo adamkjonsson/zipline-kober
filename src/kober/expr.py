@@ -1,7 +1,7 @@
 """The expression language: a small, total, side-effect-free AST.
 
 Expressions are authored as strings in a spec (``size: "header.length * 4"``)
-and parsed here to an AST at load time, so :func:`kober.check` can scope and
+and parsed here to an AST at load time, so :func:`kober.check.check` can scope and
 type them against the spec before any data exists. See ``DESIGN.md`` §3.3.
 
 **Parsing borrows Python's own parser.** :func:`ast.parse` in ``eval`` mode

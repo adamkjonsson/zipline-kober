@@ -73,7 +73,10 @@ python -m venv .venv
 ```
 
 - **Run tests:** `.venv/bin/pytest`
-- **Build docs:** `.venv/bin/sphinx-build docs docs/_build/html`
+- **Build docs:** `.venv/bin/sphinx-build -W docs docs/_build/html` — warnings are
+  errors, so a cross-reference that does not resolve fails rather than quietly
+  rendering as plain text. `cd docs && make html SPHINXBUILD=../.venv/bin/sphinx-build`
+  does the same.
 - **Build wheel:** `.venv/bin/python -m build`
 
 ## Conventions

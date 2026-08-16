@@ -333,6 +333,20 @@ installed from a checkout (see the README).
 
 ### Documentation
 
+- `docs/` — the documentation tree, following `python-zipline`'s style: Sphinx
+  with MyST markdown, `furo`, `autodoc` + `napoleon`, and a `dev`/`format`/`api`
+  split. Warnings are errors (`nitpicky = True` plus `-W`), so a cross-reference
+  that does not resolve fails the build instead of quietly rendering as plain
+  text. `CLAUDE.md` has documented a docs build since the scaffold and it has
+  never worked; it does now, and both it and the README now name the `-W` form.
+
+  Deliberately *not* copied from `python-zipline`: its `missing-reference` hook
+  bridging `zpf.Foo` onto `zpf.module.Foo`. kober's docstrings already cite the
+  defining module, so the hook would be machinery with nothing to do. Two
+  ambiguous references were fixed instead — `kober.check` is both a module and
+  a function, and `kober.Spec.from_dict` named the re-export rather than the
+  definition.
+
 - `tests/test_fuzz.py` — fuzz tests now run with the suite, asserting the
   promises that cannot be tested by example: a decode never raises, a decode
   never claims more than it was given, no byte is ever both cited and marked
