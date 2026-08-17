@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from kober.errors import SpecError
-from kober.ops import Kind, Plan, ValueType
+from kober.ops import Kind, Plan
 from kober.spec import Spec
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
@@ -50,13 +50,15 @@ def test_units_keep_the_order_the_spec_declares_them_in():
 
 def test_a_field_carries_what_the_wire_says_about_it():
     (field,) = [item for item in dns().object("label").fields if item.name == "length"]
-    assert field.types == (ValueType(kind=Kind.INT, bits=8, signed=False, endian="big"),)
+    (value,) = field.types
+    assert (value.kind, value.bits, value.signed, value.endian) == (Kind.INT, 8, False, "big")
 
 
 def test_a_unit_reference_names_the_unit_rather_than_a_class():
     """The spec's own name, unmapped: a Python class name would be the wrong layer."""
     (field,) = [item for item in dns().object("message").fields if item.name == "flags"]
-    assert field.types == (ValueType(kind=Kind.OBJECT, unit="flags"),)
+    (value,) = field.types
+    assert (value.kind, value.unit) == (Kind.OBJECT, "flags")
 
 
 def test_an_enums_name_travels_with_the_value_it_labels():
@@ -139,9 +141,39 @@ def test_a_switch_carries_every_type_it_can_decode_as():
 
 
 def test_a_switch_says_nothing_twice():
-    """Two cases with one type are one alternative, in case order."""
+    """Two cases with one type are one alternative — but every case still selects."""
     (_, body) = Plan.from_spec(Spec.from_yaml(SWITCHED)).object("m").fields
-    assert body.types[0] == ValueType(kind=Kind.INT, bits=16)
+    assert body.types[0].kind is Kind.INT
+    assert body.types[0].bits == 16
+    assert len(body.types) == 3
+    assert [branch.case for branch in body.branches] == [1, 2, 3, None]
+
+
+def test_a_switch_carries_the_value_it_dispatches_on():
+    (_, body) = Plan.from_spec(Spec.from_yaml(SWITCHED)).object("m").fields
+    assert body.selector is not None
+    assert body.exhaustive
+
+
+def test_a_switch_with_no_default_is_not_exhaustive():
+    """§2: no case and no default is "tried and failed", not a guess."""
+    spec = Spec.from_yaml("""
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: kind, type: {int: {bits: 8}}}
+              - name: body
+                type:
+                  switch:
+                    on: kind
+                    cases:
+                      1: {int: {bits: 16}}
+    """)
+    (_, body) = Plan.from_spec(spec).object("m").fields
+    assert not body.exhaustive
 
 
 def test_a_unit_reachable_only_through_a_switch_is_still_planned():
@@ -162,8 +194,9 @@ def test_a_computed_fields_kind_is_inferred_from_its_expression():
               - {name: empty, type: {computed: "words == 0"}}
     """)
     fields = {item.name: item for item in Plan.from_spec(spec).object("m").fields}
-    assert fields["octets"].types == (ValueType(kind=Kind.INT),)
-    assert fields["empty"].types == (ValueType(kind=Kind.BOOL),)
+    assert fields["octets"].types[0].kind is Kind.INT
+    assert fields["empty"].types[0].kind is Kind.BOOL
+    assert fields["octets"].types[0].expr is not None
 
 
 def test_a_computed_integer_has_no_width():

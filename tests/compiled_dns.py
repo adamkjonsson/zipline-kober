@@ -31,11 +31,10 @@ order. One tuple per object, no wrappers, and :func:`span` reads it back by
 name. A repeated field's pair is the whole repetition's extent; each element is
 an object with an extent of its own.
 
-**Q3, dependencies.** :class:`~kober.cursor.Cursor` and
-:class:`~kober.errors.TruncatedRead`, and nothing else from ``kober`` — no
-spec model, no ``Node``, no YAML. The :class:`Sink` and :class:`Spanned`
-protocols and :func:`span` belong with them in the ``kober.runtime`` that stage
-6 factors out; they are written here because the spike ships no public API.
+**Q3, dependencies.** :mod:`kober.runtime` and nothing else from ``kober`` —
+no spec model, no ``Node``, no YAML. That module is where stage 4 put the cursor,
+the failure signals and :func:`~kober.runtime.span`; the :class:`Sink` protocol
+below is the last piece still written here, and stage 5 moves it in.
 
 **Q4, names.** Unit names become classes in ``CamelCase``, field names become
 attributes unchanged, and an anonymous field gets no attribute at all — its
@@ -64,8 +63,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
-from kober.cursor import Cursor
-from kober.errors import TruncatedRead
+from kober.runtime import Cursor, TruncatedRead
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -151,42 +149,6 @@ class Sink(Protocol):
             reason: One of `zpf`'s ``reason=`` strings.
 
         """
-
-
-class Spanned(Protocol):
-    """An object that knows which bytes it and its fields came from.
-
-    Attributes:
-        __spans__: This object's extent, then one ``(start, end)`` pair per
-            attribute in declaration order.
-        __span_index__: Attribute name to its position among the pairs.
-
-    """
-
-    __spans__: tuple[int, ...]
-    __span_index__: ClassVar[Mapping[str, int]]
-
-
-def span(obj: Spanned, name: str | None = None) -> tuple[int, int]:
-    """Return the byte range ``obj`` — or one of its fields — was decoded from.
-
-    Args:
-        obj: Any object a decode produced.
-        name: A field of it, or ``None`` for the object's own extent.
-
-    Returns:
-        ``(off_start, off_end)``, half-open, in stream offsets.
-
-    Raises:
-        KeyError: If ``name`` is not a field of ``obj``.
-
-    Example:
-        >>> span(message, "id")
-        (0, 2)
-
-    """
-    at = 0 if name is None else 2 * obj.__span_index__[name] + 2
-    return obj.__spans__[at], obj.__spans__[at + 1]
 
 
 # --- the typed model -------------------------------------------------------

@@ -358,6 +358,54 @@ installed from a checkout (see the README).
   somewhere a generated module reaches, and it has to be this one or the two
   implementations would disagree about which inputs are decodable.
 
+- `kober.runtime` — what a generated decoder imports, and the only thing it
+  imports from this project. No spec model, no `Node`, no YAML, no checker: a
+  consumer installs `kober` and gets a decoder that reads bytes, and the
+  machinery that turned a specification into it stays behind. Mostly
+  re-exports, deliberately — a generated decoder and the interpreter read
+  through the same cursor, raise the same signals, and bound a shift the same
+  way, which is what makes the two comparable. `read_int_le` is the one wrapper
+  that earns its keep: `Cursor.read_int` takes a `kober.spec.Endian`, and this
+  is where that import happens so generated code never needs it. `span` and
+  `Spanned` moved here from the stage 1 spike.
+
+- `kober.Undecodable` — a generated decoder read its input and could not make
+  sense of it: a `switch` with no case, a negative size or count, a `confirm`
+  that did not hold, a repetition that consumed nothing, nesting past
+  `MAX_DEPTH`. The interpreter needs no equivalent because it records the
+  verdict on a `Node`; generated code has no tree to record it on, so it says so
+  by raising, and the entry point turns it into an `undecodable` region.
+
+- `kober.pygen.render_decoder` and `kober.pygen.render_entry` — the decode
+  functions, one per unit, and the two entry points. `decode(data)` returns the
+  typed object or `None`; `decode_from(cur)` takes the cursor and lets the
+  failure through, which is what a driver decoding several messages from one run
+  needs in order to say where it stopped and why.
+
+  Every field type, size and repeat, `condition`, `confirm`, `reject`, the
+  bounded loops, and the two scope words. `parent.x` and `root.x` are
+  **parameters the caller passes**: the compiler knows which outer values an
+  expression names, so it passes exactly those and needs no frame chain at
+  decode time. `root` inside the entry unit is that unit's own local, and a
+  `root` reference to a field the entry unit has not decoded yet is refused at
+  compile time — the one ordering rule the checker deliberately leaves alone,
+  because only a compiler knows the position an expression is compiled at.
+
+  Four runtime checks are **compiled away where they cannot fire**: a repeat
+  count or size from an unsigned field is never negative, a repetition whose
+  element always reads cannot spin, a codec name validated once cannot fail to
+  exist, and a depth bound is threaded only through specs that can actually
+  recurse. Where any of them can fire, the check is emitted.
+
+- `kober.ops` grew the operations a decoder needs, which is what makes the
+  neutral layer worth having for more than the object model: sizes, repeats,
+  switch `branches`, `confirm`/`reject`, and the *analyses* a backend uses to
+  drop a check — `FieldPlan.consumes`, `ObjectPlan.consumes`,
+  `ObjectPlan.recursive`, and `nonnegative`. Those are facts about the format
+  rather than about Python, so any backend gets them. `needs_parent` and
+  `needs_root` say which outer values a unit depends on, `needs_root` including
+  what the units below it need, since those values are threaded through.
+
 ### Changed
 
 - The `zpf` requirement is now `>=0.2.0,<0.3`, up from `>=0.2.0.dev0,<0.3`.

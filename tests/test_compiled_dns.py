@@ -33,10 +33,11 @@ from typing import TYPE_CHECKING
 import compiled_dns
 import pytest
 import zpf
-from compiled_dns import decode, decode_message, span
+from compiled_dns import decode, decode_message
 
 from kober.decoder import Decoder
 from kober.emit import Emission, Unclaimed, plan
+from kober.runtime import span
 from kober.spec import Emit, Spec
 
 if TYPE_CHECKING:

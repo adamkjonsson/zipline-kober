@@ -38,12 +38,14 @@ from kober.errors import (
     KoberError,
     SpecError,
     TruncatedRead,
+    Undecodable,
 )
 from kober.expr import ExprType, shift_left, shift_right
 from kober.loader import from_dict, from_file, from_json, from_yaml
 from kober.node import Node, NodeStatus
 from kober.ops import FieldPlan, Kind, ObjectPlan, Plan, ValueType
 from kober.pygen import Names, render, render_enums, render_model, render_spec
+from kober.runtime import Spanned, read_int_le, span
 from kober.spec import (
     MAX_INT_BITS,
     BytesType,
@@ -107,6 +109,7 @@ __all__ = [
     "Repeat",
     "Severity",
     "SizeSpec",
+    "Spanned",
     "Spec",
     "SpecError",
     "StringType",
@@ -115,6 +118,7 @@ __all__ = [
     "ToEnd",
     "TruncatedRead",
     "Unclaimed",
+    "Undecodable",
     "Unit",
     "UnitRef",
     "Until",
@@ -129,6 +133,7 @@ __all__ = [
     "from_yaml",
     "plan",
     "prim_token",
+    "read_int_le",
     "render",
     "render_enums",
     "render_model",
@@ -138,5 +143,6 @@ __all__ = [
     "scope_at",
     "shift_left",
     "shift_right",
+    "span",
     "__version__",
 ]

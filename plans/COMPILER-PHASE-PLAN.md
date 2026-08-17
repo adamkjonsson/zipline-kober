@@ -412,7 +412,7 @@ referenced from a spec expression at all**, since Python's parser refuses
 `class_`, so it is reachable from generated code and from a consumer — just not
 from the spec that declared it.
 
-### Stage 4 — the decoder body
+### Stage 4 — the decoder body — **done, reading through the cursor**
 
 The bulk. Every field type, size, and repeat; `condition`, `confirm`, `reject`;
 truncation and the bounded loops. The invariants of `docs/dev/architecture.md`
@@ -428,6 +428,53 @@ repeat count read from an unsigned field is never negative, and a repetition
 whose element always reads at least one bit cannot fail to make progress. Both
 are runtime guards in the interpreter because it cannot see the spec's types
 when it needs them.
+
+Landed as `pygen.render_decoder` / `render_entry`, the operations and analyses
+`ops.py` grew to support them, and `kober/runtime.py` — which stage 6 was
+supposed to introduce, but a decoder that reads needs something to read
+through, and absorbing the one spec-shaped import (`Endian`) is exactly what a
+runtime is for.
+
+**The headline is `tests/test_compiled.py`**: a generated decoder and the
+interpreter must agree, field for field, on every value and every byte range —
+or fail at the same offset for the same reason. Every construct has a case, and
+the sweep is worth more than any of them: **every prefix** of a real DNS query
+and a real HTTP request is decoded both ways, which walks truncation across
+every field boundary and through the middle of a bitfield word. Recursion is in
+it too, at 40 and 200 levels, because refusing the same input matters as much as
+refusing it.
+
+Four checks compile away rather than being emitted — the two above, plus a codec
+name validated once at compile time, and a depth bound threaded only through
+specs that can recurse. Where any of them can fire, it is emitted; `nonnegative`
+answers conservatively, since a wrong "provable" is a crash and a wrong
+"unprovable" is one comparison.
+
+**Q5 is answered in the order the answer can be trusted, not the order the plan
+assumed.** The generated decoder reads through `Cursor`, which measures 13.4 µs
+a message against the interpreter's 91.5 — 6.9× — and against 2.1 for direct
+reads. The note in Q5 said this could not be a later optimisation because
+truncation semantics depend on it. That was right about the risk and wrong about
+the remedy: what makes the read strategy safe to change is a test that pins the
+semantics, and the prefix sweep is that test. Swapping the reads now means
+changing code the differential suite already holds in place, rather than trying
+to get two things right at once.
+
+So the direct-read pass is a separate, measured step, and if it does not land,
+acceptance criterion 4 is met by its own escape clause with the number above and
+the reason beside it.
+
+One thing found while measuring, which **stage 5 has to answer before it emits
+anything**. When a nested unit fails part-way, the interpreter *discards* the
+partial unit: `_unit_ref` re-raises, so the failed unit's node — and every field
+it decoded — never reaches the tree, and `plan()` marks those bytes `truncated`
+instead of citing them. A generated decoder emitting as it goes has already
+emitted them. On a 3-byte DNS query the interpreter writes one record and marks
+`[2, 3)`; direct emission would write six records and mark nothing. Both are
+honest about coverage and they are not the same file, so stage 5 either buffers a
+unit's records until it completes — reintroducing bookkeeping this phase removed
+— or argues that citing what was actually read is better and takes the
+difference to the interpreter instead.
 
 ### Stage 5 — emission
 

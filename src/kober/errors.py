@@ -12,6 +12,9 @@ Every error kober raises is a :class:`KoberError`. Below that the split is by
 - :class:`EvalError` — an expression could not produce a value *for this
   input*. Not a spec fault: the spec may be perfectly valid and the wire value
   simply zero where something divided by it.
+- :class:`Undecodable` — the input was read and made no sense of. A decode-time
+  signal like :class:`EvalError`, and the compiled counterpart of a verdict the
+  interpreter records on a node rather than raising.
 - :class:`CompileError` — a valid spec cannot be expressed in the language
   being generated. Not a spec fault either: what collides differs by target.
 
@@ -67,6 +70,22 @@ class ExprError(SpecError):
         self.where = where
         location = f" at {where}" if where else ""
         super().__init__(f"{message}{location}: {source!r}")
+
+
+class Undecodable(KoberError):
+    """A generated decoder read its input and could not make sense of it.
+
+    A ``switch`` with no matching case and no default, a size or count that came
+    off the wire negative, a ``confirm`` that did not hold, a repetition that
+    consumed nothing, unit nesting past :data:`kober.decoder.MAX_DEPTH`. In
+    every one of them the bytes exist and were read; what failed is the reading.
+
+    The interpreter has no equivalent because it needs none: it records the
+    verdict on a :class:`~kober.node.Node` and unwinds internally. Generated
+    code has no tree to record it on, so it says so by raising, and the entry
+    point of a generated module turns it into an ``undecodable`` region. Like
+    :class:`EvalError`, letting one escape a decode is a bug.
+    """
 
 
 class CompileError(KoberError):

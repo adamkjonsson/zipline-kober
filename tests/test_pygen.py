@@ -40,6 +40,7 @@ from kober.pygen import (
     render_model,
     render_spec,
 )
+from kober.runtime import span
 from kober.spec import Spec
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -315,8 +316,8 @@ def test_a_generated_object_carries_its_spans(tmp_path: Path):
     """Q2, reached through generated code rather than the hand-written copy."""
     module = imported(render_spec(load("dns.yaml")), tmp_path, "dns_spans")
     label = module.Label(3, "com", (20, 24, 20, 21, 21, 24))
-    assert compiled_dns.span(label) == (20, 24)
-    assert compiled_dns.span(label, "text") == (21, 24)
+    assert span(label) == (20, 24)
+    assert span(label, "text") == (21, 24)
 
 
 def test_a_generated_class_has_slots_and_no_dict(tmp_path: Path):
