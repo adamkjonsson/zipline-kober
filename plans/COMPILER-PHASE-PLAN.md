@@ -309,7 +309,7 @@ and it is the fallback the fast path needs anyway; none of the Q1–Q4
 settlements depend on it, because the direct-read version was measured
 producing byte-identical objects and spans.
 
-### Stage 2 — the typed model
+### Stage 2 — the typed model — **done**
 
 Spec → dataclasses, one per unit, with `slots`, annotations, optional fields
 for `condition`, lists for `repeat`, and the span representation from Q2. Plus
@@ -317,6 +317,47 @@ the identifier and collision rules from Q4 — which live in the **Python
 backend**, not the neutral layer, per the confirmation above.
 
 Self-contained and testable without decoding anything.
+
+Landed as `kober/ops.py` — the neutral plan, and the seam a second backend
+attaches to — and `kober/pygen.py`, the Python backend, with `tests/test_ops.py`
+and `tests/test_pygen.py`. The spike's `enums` and `the typed model` blocks are
+**now generated text**, compared character for character, which is what makes
+"the generator's output converges on the fixture" a test rather than an
+intention.
+
+What it settled beyond the sketch:
+
+**Q4 was missing a rule.** A field becomes a *local* in a decode function as
+well as an attribute, so the backend has to reserve the names those functions
+take as parameters — `cur`, `sink`, `path` — not only the underscore namespace.
+Checked now, though it cannot bite until stage 4.
+
+**A name that is not an identifier is refused, not mangled.** `content-length`
+does not compile; the message says to rename it. Mapping `-` to `_` is exactly
+the silent rename Q4 exists to refuse, and the collision rule could not save it
+either — `a-b` and `a_b` would both arrive at `a_b`.
+
+**The neutral layer needed one thing from the checker, not a copy of it.** A
+`computed:` field's type is the only type a spec does not state, and inferring
+it needs the scoping rules. `check.scope_at` exposes the scope the checker
+already builds, so there is one implementation of what a name means rather than
+two that drift.
+
+**Q2's repeated-scalar limitation resolves the boring way.** `__spans__` carries
+the repetition's extent; per-element ranges of a repeated *scalar* live in the
+records and nowhere else. A parallel array cannot hold a variable number of
+pairs without stopping being parallel, and the alternative — a wrapper per
+element — is the allocation the phase exists to remove.
+
+**Prose and code want different widths.** Generated modules pass `ruff` with
+this project's own config, which is the acceptance criterion, but 100-column
+docstrings read badly; the backend wraps prose at 79 and code at 100.
+
+One thing stage 3 inherits: `expr.unparse` is fully parenthesized on purpose,
+for error messages where being unambiguous beats being pretty. In a docstring it
+renders `((ancount + nscount) + arcount) > 0`, and in *generated code* it would
+be worse. Stage 3 owes a precedence-aware Python renderer, and the docstrings
+should use it once it exists.
 
 ### Stage 3 — expressions to source
 

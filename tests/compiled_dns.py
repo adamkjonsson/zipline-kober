@@ -1,4 +1,4 @@
-"""What ``kober compile examples/dns.yaml -o dns.py`` should produce, by hand.
+"""What ``kober compile examples/dns.yaml -o dns.py`` should produce.
 
 Stage 1 of the compiler phase is a spike, and this is it: the target, written
 out before any generator exists, so that an answer to Q1–Q4 that does not work
@@ -7,6 +7,13 @@ is found now rather than after a generator has been built around it. It is
 generator's output is expected to converge on, and the shape of every decision
 in it is meant to be read as a rule about generated code rather than a choice
 made for this protocol.
+
+**Two of its blocks are no longer hand-written.** The ``enums`` and ``the typed
+model`` sections are exactly what :mod:`kober.pygen` renders, and
+``test_pygen.py`` compares them character for character. That is what
+convergence means in practice: as each stage lands, the block it generates
+replaces the hand-written one, until the file is the generator's output and the
+comparison covers all of it.
 
 What it demonstrates, question by question:
 
@@ -73,30 +80,33 @@ MESSAGE_CONTENT_TYPE = "dec:dns-message"
 #: How a text field's payload is labelled. ``prim:`` has no text token.
 TEXT_CONTENT_TYPE = "mime:text/plain; charset=utf-8"
 
-# The spec's ``enums:``, as mappings rather than :class:`enum.IntEnum`
-# subclasses. A value with no label is normal on the wire — DNS opcode 3 has
-# none — and a generated decoder may not raise, so the labels stay a lookup a
-# caller can make and the field itself stays an ``int``.
 
-#: Labels for ``message.flags.opcode``.
+# --- enums -----------------------------------------------------------------
+
+# A spec's enums are mappings, not enum.IntEnum subclasses: a value with no
+# label is normal on the wire, and a decoder may not raise. A labelled field
+# stays an int, and the labels are a lookup beside it.
+
+#: Labels declared as ``opcode``.
 OPCODE: Mapping[int, str] = MappingProxyType(
     {0: "query", 1: "iquery", 2: "status", 4: "notify", 5: "update"}
 )
 
-#: Labels for ``message.flags.rcode``.
+#: Labels declared as ``rcode``.
 RCODE: Mapping[int, str] = MappingProxyType(
     {0: "noerror", 1: "formerr", 2: "servfail", 3: "nxdomain", 4: "notimp", 5: "refused"}
 )
 
-#: Labels for ``question.qtype``.
+#: Labels declared as ``rrtype``.
 RRTYPE: Mapping[int, str] = MappingProxyType(
     {1: "a", 2: "ns", 5: "cname", 6: "soa", 12: "ptr", 15: "mx", 16: "txt", 28: "aaaa", 255: "any"}
 )
 
-#: Labels for ``question.qclass``.
-RRCLASS: Mapping[int, str] = MappingProxyType(
-    {1: "internet", 3: "chaos", 4: "hesiod", 255: "any"}
-)
+#: Labels declared as ``rrclass``.
+RRCLASS: Mapping[int, str] = MappingProxyType({1: "internet", 3: "chaos", 4: "hesiod", 255: "any"})
+
+
+# --- the runtime -----------------------------------------------------------
 
 
 class Sink(Protocol):
@@ -188,15 +198,19 @@ class Message:
 
     Attributes:
         id: Copied into the reply; matches responses to requests.
-        flags: The 16-bit flags word.
+        flags: One :class:`Flags`.
         qdcount: Number of entries in the question section.
-        ancount: Number of answer records.
-        nscount: Number of authority records.
-        arcount: Number of additional records.
-        questions: The question section, ``qdcount`` entries long.
-        resource_records: The answer, authority, and additional sections, left
-            undecoded on purpose. ``None`` when the message has none.
-        __spans__: Byte ranges; read them with :func:`span`.
+        ancount: A 16-bit unsigned integer.
+        nscount: A 16-bit unsigned integer.
+        arcount: A 16-bit unsigned integer.
+        questions: Each element is one :class:`Question`.
+        resource_records: The answer, authority, and additional sections. Left
+            undecoded on purpose: an owner name here is usually a compression
+            pointer, which this language cannot follow. Marked skipped rather
+            than claimed. Present only when ``((ancount + nscount) + arcount) >
+            0``.
+        __spans__: Byte ranges: this object's own extent first, then one pair
+            per attribute above, in order.
 
     """
 
@@ -228,19 +242,20 @@ class Message:
 class Flags:
     """The 16-bit flags word, MSB first.
 
-    The unit's 3-bit reserved field is anonymous in the spec. It is read, and
-    cited as ``dns.flags._``, but it has no attribute here: a field with no
-    name is not something a caller can ask for.
+    The spec's field at position 7 is anonymous: read and cited, but with no
+    attribute here — a field with no name is not something a caller can ask
+    for.
 
     Attributes:
         qr: 0 query, 1 response.
-        opcode: The query kind; see :data:`OPCODE`.
+        opcode: A 4-bit unsigned integer. Labelled by :data:`OPCODE`.
         aa: Authoritative answer.
         tc: Truncated.
         rd: Recursion desired.
         ra: Recursion available.
-        rcode: The response code; see :data:`RCODE`.
-        __spans__: Byte ranges; read them with :func:`span`.
+        rcode: A 4-bit unsigned integer. Labelled by :data:`RCODE`.
+        __spans__: Byte ranges: this object's own extent first, then one pair
+            per attribute above, in order.
 
     """
 
@@ -260,13 +275,14 @@ class Flags:
 
 @dataclass(slots=True)
 class Question:
-    """One entry of the question section.
+    """One decoded ``question``.
 
     Attributes:
-        qname: The name being asked about.
-        qtype: The record type; see :data:`RRTYPE`.
-        qclass: The class; see :data:`RRCLASS`.
-        __spans__: Byte ranges; read them with :func:`span`.
+        qname: One :class:`Name`.
+        qtype: A 16-bit unsigned integer. Labelled by :data:`RRTYPE`.
+        qclass: A 16-bit unsigned integer. Labelled by :data:`RRCLASS`.
+        __spans__: Byte ranges: this object's own extent first, then one pair
+            per attribute above, in order.
 
     """
 
@@ -285,8 +301,9 @@ class Name:
     """A sequence of length-prefixed labels ending in a zero-length one.
 
     Attributes:
-        labels: The labels, the last of which is empty.
-        __spans__: Byte ranges; read them with :func:`span`.
+        labels: Each element is one :class:`Label`.
+        __spans__: Byte ranges: this object's own extent first, then one pair
+            per attribute above, in order.
 
     """
 
@@ -298,12 +315,13 @@ class Name:
 
 @dataclass(slots=True)
 class Label:
-    """One label of a name.
+    """One decoded ``label``.
 
     Attributes:
-        length: How many bytes of text follow.
-        text: The text.
-        __spans__: Byte ranges; read them with :func:`span`.
+        length: An 8-bit unsigned integer.
+        text: Text, decoded as ``utf-8``.
+        __spans__: Byte ranges: this object's own extent first, then one pair
+            per attribute above, in order.
 
     """
 

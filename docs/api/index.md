@@ -19,6 +19,8 @@ cursor
 decoder
 emit
 stage
+ops
+pygen
 errors
 cli
 ```

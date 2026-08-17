@@ -12,6 +12,8 @@ Every error kober raises is a :class:`KoberError`. Below that the split is by
 - :class:`EvalError` — an expression could not produce a value *for this
   input*. Not a spec fault: the spec may be perfectly valid and the wire value
   simply zero where something divided by it.
+- :class:`CompileError` — a valid spec cannot be expressed in the language
+  being generated. Not a spec fault either: what collides differs by target.
 
 :func:`kober.check.check` deliberately does **not** raise. A validator that
 stops at the first fault makes an author fix a spec one line per run, so it
@@ -65,6 +67,21 @@ class ExprError(SpecError):
         self.where = where
         location = f" at {where}" if where else ""
         super().__init__(f"{message}{location}: {source!r}")
+
+
+class CompileError(KoberError):
+    """A valid spec cannot be expressed in the language being generated.
+
+    Deliberately **not** a :class:`SpecError`. The spec may be perfectly valid
+    and run under the interpreter; what is wrong is that two of its names
+    collide in the target language, or that one of them is not an identifier
+    there. Rust reserves different words than Python and mangles different
+    characters, so this is a fact about a *compilation*, not about the spec —
+    which is why it is raised by a backend and never by the checker.
+
+    Silence is the alternative this exists to refuse: a decoder whose field
+    quietly changed name is worse than one that would not compile.
+    """
 
 
 class TruncatedRead(KoberError):

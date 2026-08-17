@@ -268,6 +268,56 @@ installed from a checkout (see the README).
   (§3.2), so the decode engine turns it into a `truncated` region. Like
   `EvalError`, letting one escape a decode is a bug.
 
+- `kober.ops` — the language-neutral half of the compiler. `Plan.from_spec`
+  reduces a spec to `ObjectPlan`/`FieldPlan`/`ValueType`: which units exist,
+  what each field can hold, whether it repeats, and when it is present at all.
+  It carries **the spec's own names**, unmapped, and no target's decisions:
+  identifiers, keywords, and how a byte range is exposed all belong to a
+  backend, because what collides and what reads well differ by language. A
+  future Rust or C++ backend attaches here. Deliberately not an intermediate
+  representation.
+
+  Units unreachable from `entry` are left out — dead code in any target — and
+  a `switch` becomes the list of types it can decode as, since that is what a
+  target has to be able to hold. A `computed:` field's kind is the one thing a
+  spec does not state, so it is inferred through `check.scope_at`.
+
+- `kober.pygen` — the Python backend: a plan rendered as source. This stage
+  renders the **typed model** — one `slots` dataclass per unit, with the
+  annotations a consumer completes against, `list[...]` for a repeat, `| None`
+  for a `condition`, and the `__spans__` tuple that carries byte ranges — plus
+  a spec's `enums:` as module constants.
+
+  Enums are **mappings, not `IntEnum` subclasses**: a value with no label is
+  normal on the wire (DNS opcode 3 has none) and a decoder may not raise, so a
+  labelled field stays an `int` and the labels are a lookup beside it.
+
+  Names follow one rule with no exceptions: a unit becomes a `CamelCase`
+  class, a field keeps its spec name, a Python keyword gets a trailing
+  underscore, and **anything else is refused rather than renamed**. Names
+  colliding, names that are not identifiers, and names inside the namespace the
+  backend reserves for itself all raise `CompileError`, all of them reported at
+  once. An anonymous field gets no attribute at all: it is read and cited, but
+  a field with no name is not something a caller can ask for.
+
+  Author-supplied text — names, labels, `doc:` strings — never reaches source
+  by interpolation. Identifiers are validated against a whitelist and
+  everything else becomes an escaped literal or an escaped docstring, and
+  `render` parses its own output before returning it. "A spec cannot run code"
+  is partly a security property, and this is where it would be lost.
+
+- `kober.CompileError` — a valid spec cannot be expressed in the language being
+  generated. Deliberately not a `SpecError`: the spec may be perfectly valid
+  and run under the interpreter, and what collides differs by target, so this
+  is a fact about a compilation rather than about the spec.
+
+- `kober.check.require_valid` and `kober.check.scope_at`. The first refuses a
+  spec with errors, listing all of them — what `Decoder.__init__` did inline,
+  now shared with the compiler, which relies on the same guarantees. The second
+  returns the scope an expression at one field's position resolves against, so
+  the compiler asks the checker what a name means instead of implementing
+  scoping a second time and drifting from it.
+
 ### Changed
 
 - The `zpf` requirement is now `>=0.2.0,<0.3`, up from `>=0.2.0.dev0,<0.3`.

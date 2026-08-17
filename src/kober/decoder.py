@@ -25,10 +25,9 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING
 
-from kober.check import Severity
-from kober.check import check as check_spec
+from kober.check import require_valid
 from kober.cursor import Cursor
-from kober.errors import EvalError, SpecError, TruncatedRead
+from kober.errors import EvalError, TruncatedRead
 from kober.expr import ExprValue, evaluate
 from kober.node import Node, NodeStatus
 from kober.spec import (
@@ -186,11 +185,7 @@ class Decoder:
 
     def __init__(self, spec: Spec, *, emit: Emit = Emit.MESSAGE, check: bool = True) -> None:
         if check:
-            errors = [f for f in check_spec(spec) if f.severity is Severity.ERROR]
-            if errors:
-                listed = "\n  ".join(str(finding) for finding in errors)
-                msg = f"spec {spec.name!r} has {len(errors)} error(s):\n  {listed}"
-                raise SpecError(msg)
+            require_valid(spec)
         self.spec = spec
         self.emit = emit
 
