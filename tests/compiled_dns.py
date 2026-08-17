@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar
 
-from kober.runtime import Cursor, EvalError, Sink, TruncatedRead, Undecodable
+from kober.runtime import Cursor, Sink, Stopped, TruncatedRead
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -197,85 +197,115 @@ class Label:
 # --- the decoder -----------------------------------------------------------
 
 
-def _decode_message(cur: Cursor, sink: Sink | None, path: str) -> Message:
+def _decode_message(
+    _data: bytes,
+    _size: int,
+    _at: int,
+    _base: int,
+    _sink: Sink | None,
+    _path: str,
+) -> tuple[Message, int]:
     """Decode one ``message``.
 
     Args:
-        cur: The cursor to read from.
-        sink: Where records go, or ``None`` to decode without
+        _data: The run being decoded.
+        _size: Its length, passed rather than measured again here.
+        _at: Where in it to start, as a byte offset.
+        _base: Stream offset of ``_data[0]``, so byte ranges are absolute.
+        _sink: Where records go, or ``None`` to decode without
             emitting anything.
-        path: This instance's field path, which its records carry.
+        _path: This instance's field path, which its records carry.
 
     Returns:
-        The decoded ``message``.
+        The decoded ``message``, and the byte offset
+        after it.
 
     Raises:
         TruncatedRead: If the input ends inside it.
 
     """
-    _extent = cur.tell()
+    _b = _base + _at
+    _extent = _b
 
-    _mark = cur.tell()
-    id = cur.read_int(16)
-    _s_id, _e_id = cur.span(_mark)
-    if sink is not None:
-        sink.record(id.to_bytes(2, "little"), "prim:u16", _s_id, _e_id, path + ".id")
+    _s_id = _b
+    if _size - _at < 2:
+        raise TruncatedRead("truncated", _at)
+    id = int.from_bytes(_data[_at:_at + 2], "big")
+    _e_id = _b + 2
+    if _sink is not None:
+        _sink.record(id.to_bytes(2, "little"), "prim:u16", _s_id, _e_id, _path + ".id")
 
-    _mark = cur.tell()
-    flags = _decode_flags(cur, sink, path + ".flags")
-    _s_flags, _e_flags = cur.span(_mark)
+    _s_flags = _b + 2
+    flags, _at = _decode_flags(_data, _size, _at + 2, _base, _sink, _path + ".flags")
+    _b = _base + _at
+    _e_flags = _b
 
-    _mark = cur.tell()
-    qdcount = cur.read_int(16)
-    _s_qdcount, _e_qdcount = cur.span(_mark)
-    if sink is not None:
-        sink.record(
-            qdcount.to_bytes(2, "little"), "prim:u16", _s_qdcount, _e_qdcount, path + ".qdcount"
+    _s_qdcount = _b
+    if _size - _at < 2:
+        raise TruncatedRead("truncated", _at)
+    qdcount = int.from_bytes(_data[_at:_at + 2], "big")
+    _e_qdcount = _b + 2
+    if _sink is not None:
+        _sink.record(
+            qdcount.to_bytes(2, "little"), "prim:u16", _s_qdcount, _e_qdcount, _path + ".qdcount"
         )
 
-    _mark = cur.tell()
-    ancount = cur.read_int(16)
-    _s_ancount, _e_ancount = cur.span(_mark)
-    if sink is not None:
-        sink.record(
-            ancount.to_bytes(2, "little"), "prim:u16", _s_ancount, _e_ancount, path + ".ancount"
+    _s_ancount = _b + 2
+    if _size - _at < 4:
+        raise TruncatedRead("truncated", _at + 2)
+    ancount = int.from_bytes(_data[_at + 2:_at + 4], "big")
+    _e_ancount = _b + 4
+    if _sink is not None:
+        _sink.record(
+            ancount.to_bytes(2, "little"), "prim:u16", _s_ancount, _e_ancount, _path + ".ancount"
         )
 
-    _mark = cur.tell()
-    nscount = cur.read_int(16)
-    _s_nscount, _e_nscount = cur.span(_mark)
-    if sink is not None:
-        sink.record(
-            nscount.to_bytes(2, "little"), "prim:u16", _s_nscount, _e_nscount, path + ".nscount"
+    _s_nscount = _b + 4
+    if _size - _at < 6:
+        raise TruncatedRead("truncated", _at + 4)
+    nscount = int.from_bytes(_data[_at + 4:_at + 6], "big")
+    _e_nscount = _b + 6
+    if _sink is not None:
+        _sink.record(
+            nscount.to_bytes(2, "little"), "prim:u16", _s_nscount, _e_nscount, _path + ".nscount"
         )
 
-    _mark = cur.tell()
-    arcount = cur.read_int(16)
-    _s_arcount, _e_arcount = cur.span(_mark)
-    if sink is not None:
-        sink.record(
-            arcount.to_bytes(2, "little"), "prim:u16", _s_arcount, _e_arcount, path + ".arcount"
+    _s_arcount = _b + 6
+    if _size - _at < 8:
+        raise TruncatedRead("truncated", _at + 6)
+    arcount = int.from_bytes(_data[_at + 6:_at + 8], "big")
+    _e_arcount = _b + 8
+    if _sink is not None:
+        _sink.record(
+            arcount.to_bytes(2, "little"), "prim:u16", _s_arcount, _e_arcount, _path + ".arcount"
         )
 
-    _mark = cur.tell()
+    _s_questions = _b + 8
+    _at = _at + 8
+    _b = _base + _at
     questions: list[Question] = []
     for _index in range(qdcount):
-        _element = _decode_question(cur, sink, f"{path}.questions[{_index}]")
+        _element, _at = _decode_question(
+            _data, _size, _at, _base, _sink, f"{_path}.questions[{_index}]"
+        )
+        _b = _base + _at
         questions.append(_element)
-    _s_questions, _e_questions = cur.span(_mark)
+    _e_questions = _b
 
     if ancount + nscount + arcount > 0:
-        _mark = cur.tell()
-        resource_records = cur.read_remaining()
-        _s_resource_records, _e_resource_records = cur.span(_mark)
-        if sink is not None and _e_resource_records > _s_resource_records:
-            sink.undecoded(_s_resource_records, _e_resource_records, "skipped")
+        _s_resource_records = _b
+        resource_records = _data[_at:]
+        _at = _size
+        _b = _base + _at
+        _e_resource_records = _b
+        if _sink is not None and _e_resource_records > _s_resource_records:
+            _sink.undecoded(_s_resource_records, _e_resource_records, "skipped")
     else:
         # Absent, not empty: it read nothing, so it cites nothing.
         resource_records = None
-        _s_resource_records = _e_resource_records = cur.byte_offset()
+        _s_resource_records = _e_resource_records = _b
 
-    _s, _e = cur.span(_extent)
+    _s, _e = _extent, _b
     return Message(
         id,
         flags,
@@ -305,76 +335,106 @@ def _decode_message(cur: Cursor, sink: Sink | None, path: str) -> Message:
             _s_resource_records,
             _e_resource_records,
         ),
-    )
+    ), _at
 
 
-def _decode_flags(cur: Cursor, sink: Sink | None, path: str) -> Flags:
+def _decode_flags(
+    _data: bytes,
+    _size: int,
+    _at: int,
+    _base: int,
+    _sink: Sink | None,
+    _path: str,
+) -> tuple[Flags, int]:
     """Decode one ``flags``.
 
     Args:
-        cur: The cursor to read from.
-        sink: Where records go, or ``None`` to decode without
+        _data: The run being decoded.
+        _size: Its length, passed rather than measured again here.
+        _at: Where in it to start, as a byte offset.
+        _base: Stream offset of ``_data[0]``, so byte ranges are absolute.
+        _sink: Where records go, or ``None`` to decode without
             emitting anything.
-        path: This instance's field path, which its records carry.
+        _path: This instance's field path, which its records carry.
 
     Returns:
-        The decoded ``flags``.
+        The decoded ``flags``, and the byte offset
+        after it.
 
     Raises:
         TruncatedRead: If the input ends inside it.
 
     """
-    _extent = cur.tell()
+    _b = _base + _at
+    _extent = _b
 
-    _mark = cur.tell()
-    qr = cur.read_int(1)
-    _s_qr, _e_qr = cur.span(_mark)
-    if sink is not None:
-        sink.record(qr.to_bytes(1, "little"), "prim:u8", _s_qr, _e_qr, path + ".qr")
+    _s_qr = _b
+    if _size - _at < 1:
+        raise TruncatedRead("truncated", _at)
+    qr = (_data[_at] >> 7) & 1
+    _e_qr = _b + 1
+    if _sink is not None:
+        _sink.record(qr.to_bytes(1, "little"), "prim:u8", _s_qr, _e_qr, _path + ".qr")
 
-    _mark = cur.tell()
-    opcode = cur.read_int(4)
-    _s_opcode, _e_opcode = cur.span(_mark)
-    if sink is not None:
-        sink.record(opcode.to_bytes(1, "little"), "prim:u8", _s_opcode, _e_opcode, path + ".opcode")
+    _s_opcode = _b
+    if _size - _at < 1:
+        raise TruncatedRead("truncated", _at + 1)
+    opcode = (_data[_at] >> 3) & 15
+    _e_opcode = _b + 1
+    if _sink is not None:
+        _sink.record(
+            opcode.to_bytes(1, "little"), "prim:u8", _s_opcode, _e_opcode, _path + ".opcode"
+        )
 
-    _mark = cur.tell()
-    aa = cur.read_int(1)
-    _s_aa, _e_aa = cur.span(_mark)
-    if sink is not None:
-        sink.record(aa.to_bytes(1, "little"), "prim:u8", _s_aa, _e_aa, path + ".aa")
+    _s_aa = _b
+    if _size - _at < 1:
+        raise TruncatedRead("truncated", _at + 1)
+    aa = (_data[_at] >> 2) & 1
+    _e_aa = _b + 1
+    if _sink is not None:
+        _sink.record(aa.to_bytes(1, "little"), "prim:u8", _s_aa, _e_aa, _path + ".aa")
 
-    _mark = cur.tell()
-    tc = cur.read_int(1)
-    _s_tc, _e_tc = cur.span(_mark)
-    if sink is not None:
-        sink.record(tc.to_bytes(1, "little"), "prim:u8", _s_tc, _e_tc, path + ".tc")
+    _s_tc = _b
+    if _size - _at < 1:
+        raise TruncatedRead("truncated", _at + 1)
+    tc = (_data[_at] >> 1) & 1
+    _e_tc = _b + 1
+    if _sink is not None:
+        _sink.record(tc.to_bytes(1, "little"), "prim:u8", _s_tc, _e_tc, _path + ".tc")
 
-    _mark = cur.tell()
-    rd = cur.read_int(1)
-    _s_rd, _e_rd = cur.span(_mark)
-    if sink is not None:
-        sink.record(rd.to_bytes(1, "little"), "prim:u8", _s_rd, _e_rd, path + ".rd")
+    _s_rd = _b
+    if _size - _at < 1:
+        raise TruncatedRead("truncated", _at + 1)
+    rd = _data[_at] & 1
+    _e_rd = _b + 1
+    if _sink is not None:
+        _sink.record(rd.to_bytes(1, "little"), "prim:u8", _s_rd, _e_rd, _path + ".rd")
 
-    _mark = cur.tell()
-    ra = cur.read_int(1)
-    _s_ra, _e_ra = cur.span(_mark)
-    if sink is not None:
-        sink.record(ra.to_bytes(1, "little"), "prim:u8", _s_ra, _e_ra, path + ".ra")
+    _s_ra = _b + 1
+    if _size - _at < 2:
+        raise TruncatedRead("truncated", _at + 1)
+    ra = (_data[_at + 1] >> 7) & 1
+    _e_ra = _b + 2
+    if _sink is not None:
+        _sink.record(ra.to_bytes(1, "little"), "prim:u8", _s_ra, _e_ra, _path + ".ra")
 
-    _mark = cur.tell()
-    _anon6 = cur.read_int(3)
-    _s__anon6, _e__anon6 = cur.span(_mark)
-    if sink is not None:
-        sink.record(_anon6.to_bytes(1, "little"), "prim:u8", _s__anon6, _e__anon6, path + "._")
+    _s__anon6 = _b + 1
+    if _size - _at < 2:
+        raise TruncatedRead("truncated", _at + 2)
+    _anon6 = (_data[_at + 1] >> 4) & 7
+    _e__anon6 = _b + 2
+    if _sink is not None:
+        _sink.record(_anon6.to_bytes(1, "little"), "prim:u8", _s__anon6, _e__anon6, _path + "._")
 
-    _mark = cur.tell()
-    rcode = cur.read_int(4)
-    _s_rcode, _e_rcode = cur.span(_mark)
-    if sink is not None:
-        sink.record(rcode.to_bytes(1, "little"), "prim:u8", _s_rcode, _e_rcode, path + ".rcode")
+    _s_rcode = _b + 1
+    if _size - _at < 2:
+        raise TruncatedRead("truncated", _at + 2)
+    rcode = _data[_at + 1] & 15
+    _e_rcode = _b + 2
+    if _sink is not None:
+        _sink.record(rcode.to_bytes(1, "little"), "prim:u8", _s_rcode, _e_rcode, _path + ".rcode")
 
-    _s, _e = cur.span(_extent)
+    _s, _e = _extent, _b + 2
     return Flags(
         qr,
         opcode,
@@ -401,113 +461,164 @@ def _decode_flags(cur: Cursor, sink: Sink | None, path: str) -> Flags:
             _s_rcode,
             _e_rcode,
         ),
-    )
+    ), _at + 2
 
 
-def _decode_question(cur: Cursor, sink: Sink | None, path: str) -> Question:
+def _decode_question(
+    _data: bytes,
+    _size: int,
+    _at: int,
+    _base: int,
+    _sink: Sink | None,
+    _path: str,
+) -> tuple[Question, int]:
     """Decode one ``question``.
 
     Args:
-        cur: The cursor to read from.
-        sink: Where records go, or ``None`` to decode without
+        _data: The run being decoded.
+        _size: Its length, passed rather than measured again here.
+        _at: Where in it to start, as a byte offset.
+        _base: Stream offset of ``_data[0]``, so byte ranges are absolute.
+        _sink: Where records go, or ``None`` to decode without
             emitting anything.
-        path: This instance's field path, which its records carry.
+        _path: This instance's field path, which its records carry.
 
     Returns:
-        The decoded ``question``.
+        The decoded ``question``, and the byte offset
+        after it.
 
     Raises:
         TruncatedRead: If the input ends inside it.
 
     """
-    _extent = cur.tell()
+    _b = _base + _at
+    _extent = _b
 
-    _mark = cur.tell()
-    qname = _decode_name(cur, sink, path + ".qname")
-    _s_qname, _e_qname = cur.span(_mark)
+    _s_qname = _b
+    qname, _at = _decode_name(_data, _size, _at, _base, _sink, _path + ".qname")
+    _b = _base + _at
+    _e_qname = _b
 
-    _mark = cur.tell()
-    qtype = cur.read_int(16)
-    _s_qtype, _e_qtype = cur.span(_mark)
-    if sink is not None:
-        sink.record(qtype.to_bytes(2, "little"), "prim:u16", _s_qtype, _e_qtype, path + ".qtype")
+    _s_qtype = _b
+    if _size - _at < 2:
+        raise TruncatedRead("truncated", _at)
+    qtype = int.from_bytes(_data[_at:_at + 2], "big")
+    _e_qtype = _b + 2
+    if _sink is not None:
+        _sink.record(qtype.to_bytes(2, "little"), "prim:u16", _s_qtype, _e_qtype, _path + ".qtype")
 
-    _mark = cur.tell()
-    qclass = cur.read_int(16)
-    _s_qclass, _e_qclass = cur.span(_mark)
-    if sink is not None:
-        sink.record(
-            qclass.to_bytes(2, "little"), "prim:u16", _s_qclass, _e_qclass, path + ".qclass"
+    _s_qclass = _b + 2
+    if _size - _at < 4:
+        raise TruncatedRead("truncated", _at + 2)
+    qclass = int.from_bytes(_data[_at + 2:_at + 4], "big")
+    _e_qclass = _b + 4
+    if _sink is not None:
+        _sink.record(
+            qclass.to_bytes(2, "little"), "prim:u16", _s_qclass, _e_qclass, _path + ".qclass"
         )
 
-    _s, _e = cur.span(_extent)
+    _s, _e = _extent, _b + 4
     return Question(
         qname,
         qtype,
         qclass,
         (_s, _e, _s_qname, _e_qname, _s_qtype, _e_qtype, _s_qclass, _e_qclass),
-    )
+    ), _at + 4
 
 
-def _decode_name(cur: Cursor, sink: Sink | None, path: str) -> Name:
+def _decode_name(
+    _data: bytes,
+    _size: int,
+    _at: int,
+    _base: int,
+    _sink: Sink | None,
+    _path: str,
+) -> tuple[Name, int]:
     """Decode one ``name``.
 
     Args:
-        cur: The cursor to read from.
-        sink: Where records go, or ``None`` to decode without
+        _data: The run being decoded.
+        _size: Its length, passed rather than measured again here.
+        _at: Where in it to start, as a byte offset.
+        _base: Stream offset of ``_data[0]``, so byte ranges are absolute.
+        _sink: Where records go, or ``None`` to decode without
             emitting anything.
-        path: This instance's field path, which its records carry.
+        _path: This instance's field path, which its records carry.
 
     Returns:
-        The decoded ``name``.
+        The decoded ``name``, and the byte offset
+        after it.
 
     Raises:
         TruncatedRead: If the input ends inside it.
 
     """
-    _extent = cur.tell()
+    _b = _base + _at
+    _extent = _b
 
-    _mark = cur.tell()
+    _s_labels = _b
     labels: list[Label] = []
     _index = 0
     while True:
-        _element = _decode_label(cur, sink, f"{path}.labels[{_index}]")
+        _element, _at = _decode_label(_data, _size, _at, _base, _sink, f"{_path}.labels[{_index}]")
+        _b = _base + _at
         labels.append(_element)
         if _element.length == 0:
             break
         _index += 1
-    _s_labels, _e_labels = cur.span(_mark)
+    _e_labels = _b
 
-    _s, _e = cur.span(_extent)
-    return Name(labels, (_s, _e, _s_labels, _e_labels))
+    _s, _e = _extent, _b
+    return Name(labels, (_s, _e, _s_labels, _e_labels)), _at
 
 
-def _decode_label(cur: Cursor, sink: Sink | None, path: str) -> Label:
+def _decode_label(
+    _data: bytes,
+    _size: int,
+    _at: int,
+    _base: int,
+    _sink: Sink | None,
+    _path: str,
+) -> tuple[Label, int]:
     """Decode one ``label``.
 
     Args:
-        cur: The cursor to read from.
-        sink: Where records go, or ``None`` to decode without
+        _data: The run being decoded.
+        _size: Its length, passed rather than measured again here.
+        _at: Where in it to start, as a byte offset.
+        _base: Stream offset of ``_data[0]``, so byte ranges are absolute.
+        _sink: Where records go, or ``None`` to decode without
             emitting anything.
-        path: This instance's field path, which its records carry.
+        _path: This instance's field path, which its records carry.
 
     Returns:
-        The decoded ``label``.
+        The decoded ``label``, and the byte offset
+        after it.
 
     Raises:
         TruncatedRead: If the input ends inside it.
 
     """
-    _extent = cur.tell()
+    _b = _base + _at
+    _extent = _b
 
-    _mark = cur.tell()
-    length = cur.read_int(8)
-    _s_length, _e_length = cur.span(_mark)
-    if sink is not None:
-        sink.record(length.to_bytes(1, "little"), "prim:u8", _s_length, _e_length, path + ".length")
+    _s_length = _b
+    if _size - _at < 1:
+        raise TruncatedRead("truncated", _at)
+    length = _data[_at]
+    _e_length = _b + 1
+    if _sink is not None:
+        _sink.record(
+            length.to_bytes(1, "little"), "prim:u8", _s_length, _e_length, _path + ".length"
+        )
 
-    _mark = cur.tell()
-    _raw = cur.read_bytes(length)
+    _s_text = _b + 1
+    _want = length
+    if _size - (_at + 1) < _want:
+        raise TruncatedRead("truncated", _at + 1)
+    _raw = _data[_at + 1:_at + 1 + _want]
+    _at = _at + 1 + _want
+    _b = _base + _at
     try:
         text = _raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -515,18 +626,18 @@ def _decode_label(cur: Cursor, sink: Sink | None, path: str) -> Label:
         # failure of the decoder: §3.2. The bytes are accounted
         # for either way, so the region stays decoded.
         text = _raw.decode("utf-8", errors="replace")
-    _s_text, _e_text = cur.span(_mark)
-    if sink is not None:
-        sink.record(
+    _e_text = _b
+    if _sink is not None:
+        _sink.record(
             text.encode("utf-8", errors="replace"),
             "mime:text/plain; charset=utf-8",
             _s_text,
             _e_text,
-            path + ".text",
+            _path + ".text",
         )
 
-    _s, _e = cur.span(_extent)
-    return Label(length, text, (_s, _e, _s_length, _e_length, _s_text, _e_text))
+    _s, _e = _extent, _b
+    return Label(length, text, (_s, _e, _s_length, _e_length, _s_text, _e_text)), _at
 
 
 # --- entry points ----------------------------------------------------------
@@ -552,7 +663,22 @@ def decode_from(cur: Cursor, sink: Sink | None = None) -> Message:
         Undecodable: If it is not what the specification describes.
 
     """
-    return _decode_message(cur, sink, NAME)
+    _data = cur.data
+    _size = len(_data)
+    # The cursor owns the position between messages; inside one, the generated
+    # code below owns it, because a byte offset in a local is what makes every
+    # read an index rather than a call. It is handed back at every exit,
+    # including the failures.
+    _start = cur.tell() >> 3
+    _at = _start
+    try:
+        _message, _at = _decode_message(_data, _size, _at, cur.base, sink, NAME)
+    except Stopped as _exc:
+        _at = _start if _exc.at is None else _exc.at
+        cur.seek(_at << 3)
+        raise
+    cur.seek(_at << 3)
+    return _message
 
 
 def decode(data: bytes, *, base: int = 0, sink: Sink | None = None) -> Message | None:
@@ -583,7 +709,7 @@ def decode(data: bytes, *, base: int = 0, sink: Sink | None = None) -> Message |
     _end = base + len(data)
     try:
         _message = decode_from(cur, sink)
-    except (EvalError, TruncatedRead, Undecodable, ZeroDivisionError) as _exc:
+    except Stopped as _exc:
         if sink is not None:
             # From where the cursor stopped. Whatever this message could
             # account for it has already said; what is left is what was never

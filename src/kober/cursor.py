@@ -61,6 +61,19 @@ class Cursor:
         return self._base
 
     @property
+    def data(self) -> bytes:
+        """The run this cursor reads.
+
+        Generated code reads the buffer itself — it is the difference between a
+        method call per field and an index — so it has to be able to ask for it.
+        That is a real weakening of §2.1's rule that nothing outside this class
+        moves the read position, and the answer is that the rule becomes a
+        property of the *generator*: it emits patterns that claim what they read,
+        and hands the position back through :meth:`seek` when it is done.
+        """
+        return self._data
+
+    @property
     def size(self) -> int:
         """The run's length in bytes."""
         return len(self._data)

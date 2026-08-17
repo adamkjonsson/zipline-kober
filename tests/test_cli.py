@@ -41,7 +41,7 @@ units:
         type: {int: {bits: 1}}
       - name: opcode
         type: {int: {bits: 4, enum: opcode}}
-      - {name: null, type: {int: {bits: 2}}}
+      - {name: null, type: {int: {bits: 3}}}
 """
 
 WARNS_ONLY = """
@@ -163,7 +163,7 @@ def test_show_renders_the_field_tree(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert "flags: → flags" in out
     assert "qr: u1" in out
     assert "opcode: u4 enum opcode" in out
-    assert "(anonymous): u2" in out
+    assert "(anonymous): u3" in out
 
 
 def test_show_renders_sizes_repeats_and_conditions(

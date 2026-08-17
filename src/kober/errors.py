@@ -14,7 +14,9 @@ Every error kober raises is a :class:`KoberError`. Below that the split is by
   simply zero where something divided by it.
 - :class:`Undecodable` — the input was read and made no sense of. A decode-time
   signal like :class:`EvalError`, and the compiled counterpart of a verdict the
-  interpreter records on a node rather than raising.
+  interpreter records on a node rather than raising. With
+  :class:`TruncatedRead` it shares :class:`Stopped`, which carries *where* a
+  decode stopped for generated code that keeps its position in a local.
 - :class:`CompileError` — a valid spec cannot be expressed in the language
   being generated. Not a spec fault either: what collides differs by target.
 
@@ -72,7 +74,27 @@ class ExprError(SpecError):
         super().__init__(f"{message}{location}: {source!r}")
 
 
-class Undecodable(KoberError):
+class Stopped(KoberError):
+    """A decode-time failure that knows where it stopped.
+
+    Generated code keeps the read position in a local, so nothing else can be
+    asked afterwards where a decode got to — the exception has to carry it. The
+    offset is in **bytes** and absolute, and it is the first byte no record
+    claims: whoever catches this marks from there.
+
+    Attributes:
+        at: Where the decode stopped, or ``None`` when it was raised by
+            something that does not track a position — the cursor, which is
+            asked instead.
+
+    """
+
+    def __init__(self, message: str = "", at: int | None = None) -> None:
+        super().__init__(message)
+        self.at = at
+
+
+class Undecodable(Stopped):
     """A generated decoder read its input and could not make sense of it.
 
     A ``switch`` with no matching case and no default, a size or count that came
@@ -103,7 +125,7 @@ class CompileError(KoberError):
     """
 
 
-class TruncatedRead(KoberError):
+class TruncatedRead(Stopped):
     """A read ran past the end of the available bytes.
 
     The sibling of :class:`EvalError`, and the same kind of signal: not a

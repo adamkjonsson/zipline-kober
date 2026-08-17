@@ -194,7 +194,7 @@ Names, labels, and `doc:` strings reach the source text as **docstrings and
 literals only**. Nothing author-supplied is ever interpolated into an
 identifier without going through the rules above.
 
-### Q5 — How does generated code read bytes? — **not settled; the measurement says it must not be `Cursor`**
+### Q5 — How does generated code read bytes? — **settled: directly, at offsets the compiler worked out**
 
 Not one of the questions this plan set out with, and the one the spike changed
 its mind about. On the same 29-byte query, all three producing byte-identical
@@ -235,6 +235,54 @@ This is also the concrete form of what `DESIGN.md` §2.1 has to be restated as.
 Generated code holding a byte offset in a local *is* author-adjacent code
 moving the read position, and the argument has to be that the generator only
 emits patterns that claim what they read.
+
+#### What the rewrite found, and what it measured
+
+**The stage 1 estimate attributed the win to the wrong thing.** "Direct reads
+instead of the cursor" is worth 2×, not 6.6×. Four measurements on the same
+query, all producing byte-identical values, ranges and records:
+
+| | µs/message |
+| --- | --- |
+| Through `Cursor`, as stage 4 emitted it | 13.8 |
+| Direct reads, position tracked in bits | 6.9 |
+| Direct reads, **byte offsets and baked deltas** | 2.9 |
+| The analysis's ceiling, no checks or ranges | 1.7 |
+
+The lever is not how a byte is fetched, it is **knowing where it is**. A cursor
+has to be told the position and asked for it back, and code that tracks bits has
+to shift and round at every field; a compiler already knows the offset of every
+field from the one before it, so a read is an index and a byte range is an
+addition. So the answer to Q5 is not "read directly" but *"read at offsets
+resolved when the spec was compiled"*, and reading directly is what that allows.
+
+**Exact truncation came free, and needs no fallback.** The plan expected a fast
+path guarded by a merged bounds check with a careful slow path behind it. Not
+needed: a per-field check against a baked offset measures the same as no check
+at all (2.87 against 2.9), so every field keeps its own and the boundary is
+exactly the interpreter's. The two-path design would have doubled the generated
+code for nothing.
+
+**The cost is one refusal.** The byte model cannot express a unit that starts or
+ends part-way through a byte, so the backend refuses one with a message saying
+which unit and how far into a byte it got. Such a spec is nearly always a fault
+anyway — the interpreter carries on mid-byte and then raises `ValueError` out of
+the decode at the next `bytes` field — but it is a real narrowing, and it is the
+Python backend's alone rather than the language's.
+
+**Measured after the rewrite**, on the same query:
+
+| | µs/message | throughput | against the interpreter |
+| --- | --- | --- | --- |
+| Field granularity, records and all | 6.2 | 4.7 MB/s | 20.6× |
+| Message granularity | 3.3 | 8.8 MB/s | 27.6× |
+| Typed objects, nothing emitted | 3.8 | 7.6 MB/s | — |
+
+Acceptance criterion 4 asked for reach of 16.8 MB/s, which was measured with no
+bounds checks, no byte ranges and no field paths. What is left between 3.3 µs
+and that 1.7 is exactly those three, and each is something the phase promised
+rather than overhead: a decode that cannot run past its input, provenance for
+every field, and a path on every record.
 
 ## Room for other targets later
 

@@ -230,18 +230,29 @@ def test_a_name_in_the_backends_own_namespace_is_refused():
         Names(plan_of(source))
 
 
-def test_a_field_named_like_a_generated_parameter_is_refused():
-    """`sink` becomes a local in the function that already has a `sink`."""
-    source = """
-        name: t
-        version: "1"
-        entry: m
-        units:
-          m:
-            fields: [{name: sink, type: {int: {bits: 8}}}]
+def test_a_field_may_be_named_like_anything_the_backend_uses():
+    """Nothing a generated function introduces has a plain name to collide with.
+
+    Every local, parameter and helper the backend emits begins with an
+    underscore, which is the namespace it reserves anyway. That is one refusal
+    fewer, and it matters: `size`, `data` and `path` are ordinary names for a
+    protocol field.
     """
-    with pytest.raises(CompileError, match="already takes as a parameter"):
-        Names(plan_of(source))
+    names = Names(
+        plan_of("""
+            name: t
+            version: "1"
+            entry: m
+            units:
+              m:
+                fields:
+                  - {name: data, type: {int: {bits: 8}}}
+                  - {name: size, type: {int: {bits: 8}}}
+                  - {name: path, type: {int: {bits: 8}}}
+                  - {name: sink, type: {int: {bits: 8}}}
+        """)
+    )
+    assert names.attribute_of("m", "size") == "size"
 
 
 def test_an_enum_named_like_a_module_constant_is_refused():
@@ -270,7 +281,7 @@ def test_every_naming_problem_is_reported_at_once():
             fields:
               - {name: content-length, type: {int: {bits: 8}}}
               - {name: _mark, type: {int: {bits: 8}}}
-              - {name: sink, type: {int: {bits: 8}}}
+              - {name: another-bad-one, type: {int: {bits: 8}}}
     """
     with pytest.raises(CompileError) as caught:
         Names(plan_of(source))
@@ -551,20 +562,21 @@ def test_a_parameter_sharing_a_fields_name_is_refused():
         Names(plan_of(source))
 
 
-def test_a_parameter_named_like_a_generated_parameter_is_refused():
-    source = """
-        name: t
-        version: "1"
-        entry: m
-        units:
-          m:
-            fields: [{name: h, type: {unit: {name: body, args: [4]}}}]
-          body:
-            params: [{name: cur, type: int}]
-            fields: [{name: raw, type: {int: {bits: 8}}}]
-    """
-    with pytest.raises(CompileError, match="already takes as a parameter"):
-        Names(plan_of(source))
+def test_a_parameter_may_be_named_like_anything_the_backend_uses():
+    names = Names(
+        plan_of("""
+            name: t
+            version: "1"
+            entry: m
+            units:
+              m:
+                fields: [{name: h, type: {unit: {name: body, args: [4]}}}]
+              body:
+                params: [{name: size, type: int}]
+                fields: [{name: raw, type: {bytes: {size: {expr: "size"}}}}]
+        """)
+    )
+    assert names.param_of("body", "size") == "size"
 
 
 def test_division_is_integer_division():

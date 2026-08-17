@@ -20,7 +20,9 @@ that comparison is the strongest test this project has.
 What generated code raises, and what each becomes in an output file:
 
 - :class:`~kober.errors.TruncatedRead` — the input ended inside a field, and the
-  region is ``truncated``.
+  region is ``truncated``. With :class:`~kober.errors.Undecodable` it carries
+  *where* the decode stopped, because generated code keeps its read position in
+  a local and nothing else can be asked afterwards.
 - :class:`~kober.errors.Undecodable` — it was read and made no sense: a
   ``switch`` with no case, a negative size, a ``confirm`` that did not hold.
   The region is ``undecodable``.
@@ -38,7 +40,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from kober.cursor import Cursor
-from kober.errors import EvalError, TruncatedRead, Undecodable
+from kober.errors import EvalError, Stopped, TruncatedRead, Undecodable
 from kober.expr import shift_left, shift_right
 from kober.spec import Endian
 
@@ -52,6 +54,7 @@ __all__ = [
     "EvalError",
     "Sink",
     "Spanned",
+    "Stopped",
     "TruncatedRead",
     "Undecodable",
     "cited",

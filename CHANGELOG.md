@@ -463,6 +463,37 @@ installed from a checkout (see the README).
   and the interpreter produce **byte-identical decoded files** for the same
   input, which is what `tests/test_compiled.py` asserts.
 
+- Generated decoders **read the buffer at offsets the compiler resolved**,
+  rather than through a cursor. A read is an index, a bounds check is a
+  comparison against a number known when the spec was compiled, and a byte range
+  is an addition — because the compiler tracks where every field sits relative to
+  the last position only the running decode could know.
+
+  Measured on a real DNS query: **6.2 µs a message at field granularity against
+  16.6**, and 3.3 µs at message granularity against 13.8. Against the
+  interpreter that is 20.6× and 27.6×.
+
+  The win is in knowing the offsets, not in the reads: tracking the position in
+  bits and computing each range measures 6.9 µs, against 2.9 for the same reads
+  at baked offsets. And exact truncation came free — a per-field bounds check
+  against a known offset costs nothing measurable, so every field keeps its own
+  and a decode stops exactly where the interpreter stops.
+
+  One narrowing, and it belongs to the Python backend rather than the language:
+  a unit whose fields do not add up to a whole number of bytes is refused, with
+  a message saying which unit and how far into a byte it reached. The
+  interpreter carries on mid-byte and then raises out of the decode at the next
+  `bytes` field, so such a spec is nearly always a fault already.
+
+- `kober.errors.Stopped` — the base of `TruncatedRead` and `Undecodable`,
+  carrying **where** a decode stopped. Generated code keeps its position in a
+  local, so nothing else can be asked afterwards; the entry point reads it off
+  the exception and hands it back to the cursor.
+
+- `kober.cursor.Cursor.data` — the run a cursor reads. Generated code reads the
+  buffer itself, which is the difference between a method call per field and an
+  index, so it has to be able to ask for it.
+
 ### Changed
 
 - The `zpf` requirement is now `>=0.2.0,<0.3`, up from `>=0.2.0.dev0,<0.3`.
@@ -488,6 +519,12 @@ installed from a checkout (see the README).
   that a *generated* decoder normalizes its payloads the same way and may not
   import `kober.emit` — it would pull in the tree and the spec model — and two
   answers to "what is a `u4` written as" would be one too many.
+
+- The Python backend no longer reserves the plain names `cur`, `sink` and
+  `path`. Everything a generated function introduces now begins with an
+  underscore, which the backend reserved anyway, so `size`, `data` and `path`
+  are usable field names again — and they are ordinary names for a protocol
+  field.
 
 ### Fixed
 

@@ -37,6 +37,7 @@ from kober.errors import (
     ExprError,
     KoberError,
     SpecError,
+    Stopped,
     TruncatedRead,
     Undecodable,
 )
@@ -153,6 +154,7 @@ __all__ = [
     "Spanned",
     "Spec",
     "SpecError",
+    "Stopped",
     "Step",
     "StringType",
     "Switch",
