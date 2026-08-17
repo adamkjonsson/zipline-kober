@@ -28,9 +28,18 @@ from types import ModuleType
 import compiled_dns
 import pytest
 
-from kober.errors import CompileError
+from kober.errors import CompileError, EvalError
+from kober.expr import ExprValue, evaluate, parse, shift_left, shift_right
 from kober.ops import Plan
-from kober.pygen import Names, render, render_enums, render_model, render_spec
+from kober.pygen import (
+    Binding,
+    Names,
+    render,
+    render_enums,
+    render_expr,
+    render_model,
+    render_spec,
+)
 from kober.spec import Spec
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -436,3 +445,242 @@ def test_a_spec_name_that_is_not_an_identifier_still_renders(tmp_path: Path):
     """)
     module = imported(render_spec(spec), tmp_path, "odd_name")
     assert module.NAME == "my-protocol/2"
+
+# --- expressions -----------------------------------------------------------
+
+ARITHMETIC = """
+name: t
+version: "1"
+entry: m
+units:
+  m:
+    fields:
+      - {name: a, type: {int: {bits: 16, signed: true}}}
+      - {name: b, type: {int: {bits: 16, signed: true}}}
+      - {name: c, type: {int: {bits: 16, signed: true}}}
+      - {name: p, type: {computed: "a > 0"}}
+      - {name: q, type: {computed: "b > 0"}}
+"""
+
+
+class Values:
+    """An interpreter environment over a flat mapping of names."""
+
+    def __init__(self, values: dict[str, ExprValue]) -> None:
+        self.values = values
+
+    def lookup(self, path: tuple[str, ...]) -> ExprValue:
+        """Resolve a bare name, which is all these expressions use."""
+        return self.values[path[-1]]
+
+
+def binding_for(source: str, unit: str = "m", **kwargs: object) -> Binding:
+    """Build a binding for a spec written inline."""
+    plan = plan_of(source)
+    return Binding(plan, Names(plan), unit, **kwargs)  # type: ignore[arg-type]
+
+
+def rendered(source: str, unit: str = "m", **kwargs: object) -> str:
+    """Render one expression against ``ARITHMETIC``'s unit."""
+    return render_expr(parse(source), binding_for(ARITHMETIC, unit, **kwargs))
+
+
+def test_a_field_of_this_unit_is_a_local():
+    """It has been decoded already: the ordering rule guarantees a variable holds it."""
+    assert rendered("a + b") == "a + b"
+    assert rendered("this.a + b") == "a + b"
+
+
+def test_a_dotted_path_is_attribute_access():
+    plan = Plan.from_spec(load("dns.yaml"))
+    binding = Binding(plan, Names(plan), "question")
+    assert render_expr(parse("qname.labels"), binding) == "qname.labels"
+
+
+def test_a_parent_reference_is_a_parameter_the_caller_passes():
+    """There is no parent object to ask: its fields are locals of a running function."""
+    plan = Plan.from_spec(load("dns.yaml"))
+    binding = Binding(plan, Names(plan), "name", parent="question")
+    assert render_expr(parse("parent.qtype"), binding) == "_parent_qtype"
+
+
+def test_a_root_reference_is_a_parameter_too():
+    plan = Plan.from_spec(load("dns.yaml"))
+    binding = Binding(plan, Names(plan), "label")
+    assert render_expr(parse("root.qdcount"), binding) == "_root_qdcount"
+
+
+def test_a_parent_reference_where_nothing_is_bound_is_refused():
+    """Better than rendering it against a guess."""
+    with pytest.raises(CompileError, match="names 'parent'"):
+        rendered("parent.a")
+
+
+def test_an_until_clause_names_the_element_it_just_decoded():
+    plan = Plan.from_spec(load("dns.yaml"))
+    binding = Binding(plan, Names(plan), "name", element_of="labels")
+    assert render_expr(parse("labels.length"), binding) == "_element.length"
+
+
+def test_a_parameter_is_a_local():
+    source = """
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields: [{name: h, type: {unit: {name: body, args: [4]}}}]
+          body:
+            params: [{name: size, type: int}]
+            fields: [{name: raw, type: {bytes: {size: {expr: "size"}}}}]
+    """
+    binding = binding_for(source, "body")
+    assert render_expr(parse("size"), binding) == "size"
+
+
+def test_a_parameter_sharing_a_fields_name_is_refused():
+    """Both are locals of the same function, so one would shadow the other."""
+    source = """
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields: [{name: h, type: {unit: {name: body, args: [4]}}}]
+          body:
+            params: [{name: raw, type: int}]
+            fields: [{name: raw, type: {int: {bits: 8}}}]
+    """
+    with pytest.raises(CompileError, match="already"):
+        Names(plan_of(source))
+
+
+def test_a_parameter_named_like_a_generated_parameter_is_refused():
+    source = """
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields: [{name: h, type: {unit: {name: body, args: [4]}}}]
+          body:
+            params: [{name: cur, type: int}]
+            fields: [{name: raw, type: {int: {bits: 8}}}]
+    """
+    with pytest.raises(CompileError, match="already takes as a parameter"):
+        Names(plan_of(source))
+
+
+def test_division_is_integer_division():
+    """The one operator a spec spells like Python and does not mean like Python."""
+    assert rendered("a / b") == "a // b"
+    assert rendered("a / b / c") == "a // b // c"
+
+
+def test_grouping_is_kept_where_it_is_needed_and_dropped_where_it_is_not():
+    assert rendered("a + b * c") == "a + b * c"
+    assert rendered("(a + b) * c") == "(a + b) * c"
+    assert rendered("a - (b - c)") == "a - (b - c)"
+    assert rendered("a - b - c") == "a - b - c"
+    assert rendered("(a | b) & c") == "(a | b) & c"
+
+
+def test_a_nested_comparison_is_parenthesized_rather_than_chained():
+    """`a == b == c` in Python is a chain, and would mean something else."""
+    assert rendered("(a == b) == p") == "(a == b) == p"
+
+
+def test_a_shift_by_a_literal_is_the_operator():
+    assert rendered("a << 3") == "a << 3"
+
+
+def test_a_shift_by_a_wire_value_goes_through_the_bounded_helper():
+    """`1 << n` with n off the wire allocates until the process dies."""
+    assert rendered("a << b") == "shift_left(a, b)"
+    assert rendered("a >> b") == "shift_right(a, b)"
+    assert rendered("a << 99999") == "shift_left(a, 99999)"
+
+
+def test_a_boolean_literal_is_spelled_pythons_way():
+    assert rendered("p and true") == "p and True"
+
+
+def test_a_string_literal_keeps_its_value():
+    plan = Plan.from_spec(load("http.yaml"))
+    binding = Binding(plan, Names(plan), "header")
+    assert render_expr(parse("line == 'x'"), binding) == 'line == "x"'
+
+
+# --- the same answers as the interpreter -----------------------------------
+
+EXPRESSIONS = [
+    "a + b * c",
+    "(a + b) * c",
+    "a - b - c",
+    "a - (b - c)",
+    "a / b",
+    "a / b / c",
+    "a % b",
+    "a / b + c",
+    "a * b % c",
+    "-a / b",
+    "a & b | c",
+    "a ^ b & c",
+    "~a + b",
+    "a << 3",
+    "a >> 1",
+    "a << b",
+    "a >> b",
+    "a > b",
+    "a >= b and b >= c",
+    "p or q",
+    "not p",
+    "p and not q",
+    "a == b",
+    "a != b or p",
+    "b != 0 and a / b > 1",
+    "a > 0 or a / 0 > 1",
+    "(a > b) == p",
+]
+
+CASES = [
+    {"a": 7, "b": 3, "c": 2},
+    {"a": 0, "b": 0, "c": 1},
+    {"a": -9, "b": 4, "c": -2},
+    {"a": 5, "b": 0, "c": 0},
+    {"a": 1, "b": 70000, "c": 3},
+    {"a": -1, "b": -1, "c": -1},
+]
+
+
+@pytest.mark.parametrize("source", EXPRESSIONS)
+@pytest.mark.parametrize("values", CASES, ids=[str(case["a"]) for case in CASES])
+def test_rendered_python_answers_what_the_interpreter_answers(
+    source: str, values: dict[str, int]
+):
+    """The differential test, at the level of one expression.
+
+    Rendering is only correct if it *means* the same thing, and precedence,
+    integer division, short-circuiting and the shift bound are all places where
+    it could mean something else while looking right. So both sides are run: the
+    interpreter over its own AST, and Python over the source this backend
+    produced. Either they agree, or they fail — and failing the same way counts,
+    because `a / 0` is a decode-time outcome rather than a wrong answer.
+    """
+    expr = parse(source)
+    env = Values({**values, "p": values["a"] > 0, "q": values["b"] > 0})
+    rendering = render_expr(expr, binding_for(ARITHMETIC))
+
+    try:
+        expected = evaluate(expr, env)
+    except EvalError:
+        expected = None
+    try:
+        actual = eval(  # noqa: S307 - the source under test is what is being checked
+            rendering,
+            {"shift_left": shift_left, "shift_right": shift_right},
+            dict(env.values),
+        )
+    except (EvalError, ZeroDivisionError):
+        actual = None
+    assert actual == expected, f"{source!r} rendered as {rendering!r}"

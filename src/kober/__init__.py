@@ -39,7 +39,7 @@ from kober.errors import (
     SpecError,
     TruncatedRead,
 )
-from kober.expr import ExprType
+from kober.expr import ExprType, shift_left, shift_right
 from kober.loader import from_dict, from_file, from_json, from_yaml
 from kober.node import Node, NodeStatus
 from kober.ops import FieldPlan, Kind, ObjectPlan, Plan, ValueType
@@ -136,5 +136,7 @@ __all__ = [
     "require_valid",
     "run",
     "scope_at",
+    "shift_left",
+    "shift_right",
     "__version__",
 ]

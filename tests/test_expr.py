@@ -53,6 +53,31 @@ def test_literals():
     assert parse("False") == BoolLiteral(False)
 
 
+def test_a_field_named_like_a_python_keyword_cannot_be_referenced():
+    """A consequence of borrowing `ast.parse`, and worth knowing rather than finding.
+
+    The spec model accepts a field called `class`; an expression cannot name it,
+    because the text never reaches this module's whitelist — Python's parser
+    refuses it first. The compiler maps such a field to `class_`, so it is
+    reachable from generated code and from a consumer, just not from a spec.
+    """
+    with pytest.raises(ExprError, match="cannot parse"):
+        parse("header.class")
+
+
+def test_the_documented_boolean_literals_are_literals():
+    """The literals the format reference documents, which used to be references.
+
+    `docs/format/expressions.md` lists `true` and `false` among the literals.
+    Borrowing Python's parser made them names, so a spec writing them got a
+    field lookup and a confusing error.
+    """
+    assert parse("true") == BoolLiteral(True)
+    assert parse("false") == BoolLiteral(False)
+    assert parse("True") == BoolLiteral(True)
+    assert parse("a.true") == Ref(("a", "true"))
+
+
 def test_reference_paths():
     assert parse("length") == Ref(("length",))
     assert parse("this.header.length") == Ref(("this", "header", "length"))
@@ -61,9 +86,9 @@ def test_reference_paths():
 
 
 def test_precedence_follows_python():
-    assert unparse(parse("a + b * 2")) == "(a + (b * 2))"
-    assert unparse(parse("(a + b) * 2")) == "((a + b) * 2)"
-    assert unparse(parse("a < b and c > d")) == "((a < b) and (c > d))"
+    assert unparse(parse("a + b * 2")) == "a + b * 2"
+    assert unparse(parse("(a + b) * 2")) == "(a + b) * 2"
+    assert unparse(parse("a < b and c > d")) == "a < b and c > d"
 
 
 def test_operators_translate():
@@ -183,8 +208,54 @@ def test_references_of_a_literal_is_empty():
     assert references(parse("42")) == ()
 
 
-def test_unparse_is_fully_parenthesized():
-    assert unparse(parse("a + b + c")) == "((a + b) + c)"
-    assert unparse(parse("not a")) == "(not a)"
+def test_unparse_groups_only_what_needs_grouping():
+    assert unparse(parse("a + b + c")) == "a + b + c"
+    assert unparse(parse("a - (b - c)")) == "a - (b - c)"
+    assert unparse(parse("not a")) == "not a"
     assert unparse(parse("True")) == "true"
     assert unparse(parse("'x'")) == "'x'"
+
+
+def test_a_nested_comparison_keeps_its_parentheses():
+    """Dropping them would come back as a chain, which the parser refuses."""
+    assert unparse(parse("(a == b) == c")) == "(a == b) == c"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "a + b * 2",
+        "(a + b) * 2",
+        "a - b - c",
+        "a - (b - c)",
+        "a / b % c",
+        "a / (b % c)",
+        "a << b + c",
+        "(a << b) + c",
+        "a | b & c",
+        "(a | b) & c",
+        "a ^ b | c",
+        "not a == b",
+        "(not a) == b",
+        "a and b or not c",
+        "a and (b or c)",
+        "-a * ~b",
+        "-(a * b)",
+        "x.y.z > 3",
+        "true",
+        "false and a > 1",
+        "(a == b) == c",
+        "a % b * c",
+        "a * (b % c)",
+        "1 + 2 * 3 - 4 / 5 % 6",
+        "(a > 1 or b > 2) and not c",
+    ],
+)
+def test_what_unparse_writes_parses_back_to_the_same_tree(source: str):
+    """The property the parentheses exist for, over every shape that has them.
+
+    Minimal grouping is only safe if it is *sufficient*, and the way to know
+    that is to read the text back rather than to reason about the table.
+    """
+    tree = parse(source)
+    assert parse(unparse(tree)) == tree

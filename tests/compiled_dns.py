@@ -207,7 +207,7 @@ class Message:
         resource_records: The answer, authority, and additional sections. Left
             undecoded on purpose: an owner name here is usually a compression
             pointer, which this language cannot follow. Marked skipped rather
-            than claimed. Present only when ``((ancount + nscount) + arcount) >
+            than claimed. Present only when ``ancount + nscount + arcount >
             0``.
         __spans__: Byte ranges: this object's own extent first, then one pair
             per attribute above, in order.

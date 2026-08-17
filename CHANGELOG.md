@@ -318,6 +318,46 @@ installed from a checkout (see the README).
   the compiler asks the checker what a name means instead of implementing
   scoping a second time and drifting from it.
 
+- `kober.pygen.render_expr`, and `kober.pygen.Binding`, which is where scope
+  binding lives — the new work in compiling an expression. A field of the unit
+  being decoded is a local; so is a parameter; a dotted path is attribute
+  access; and `parent.x` / `root.x` are **parameters the caller passes**, since
+  the parent's fields are locals in a function that has not finished running.
+  The compiler knows which of them an expression names, so it can pass exactly
+  those and skip the frame chain the interpreter needs at decode time. Inside an
+  `until` clause the repeated field's own name means the element just decoded,
+  which is what that clause is for.
+
+  Three semantics survive compilation rather than being hoped about. `/` is
+  integer division in a spec, so it becomes `//`. `and` and `or` short-circuit,
+  which Python's do identically — and a spec relies on it to guard a division,
+  so it is tested rather than assumed. A shift count this backend cannot see to
+  be in range becomes a call to a bounded helper, because `1 << n` with `n` off
+  the wire allocates until the process dies.
+
+  What does *not* survive is the interpreter's type checking: `_as_int` and
+  `_as_bool` exist because it learns types at decode time, and the checker has
+  already proved them. Division by zero survives as `ZeroDivisionError`, for a
+  generated decoder's entry point to turn into an `undecodable` region.
+
+- `kober.ops.ParamPlan` and `ObjectPlan.params` — a unit's parameters. Not
+  fields: they decode nothing and appear in no decoded instance, but they are in
+  scope for its expressions and a target has to name them somewhere.
+  `ObjectPlan.field` and `ObjectPlan.param` look either up by the name the spec
+  gives it.
+
+- `kober.ops.walk_path` and `kober.ops.Step` — resolving a reference path to the
+  fields it traverses, so a backend knows which unit each name belongs to and
+  can map it the way that language maps names. The scope word is the caller's to
+  strip, because which unit a path starts in is the only part of scoping a
+  target has an opinion about.
+
+- `kober.shift_left` and `kober.shift_right` — the language's shift bound, as
+  functions **generated code can call**. A compiler can see that `x << 3` is in
+  range and emit the operator, but not that `x << n` is; the bound has to live
+  somewhere a generated module reaches, and it has to be this one or the two
+  implementations would disagree about which inputs are decodable.
+
 ### Changed
 
 - The `zpf` requirement is now `>=0.2.0,<0.3`, up from `>=0.2.0.dev0,<0.3`.
@@ -328,7 +368,24 @@ installed from a checkout (see the README).
   the API this project is built on. Not a breaking change for anyone — no
   release of this project has shipped.
 
+- `kober.expr.unparse` now emits **only the parentheses the grouping needs**.
+  It used to parenthesize everything, on the grounds that being unambiguous
+  beat being pretty; minimal grouping is unambiguous too — it is read off the
+  new `kober.expr.PRECEDENCE` table — and `((ancount + nscount) + arcount) > 0`
+  is harder to check against what you wrote than `ancount + nscount + arcount >
+  0`. Visible in `kober show`, in checker messages, and in the docstrings the
+  compiler generates. What comes out parses back to the same tree, which is now
+  a test rather than a hope.
+
 ### Fixed
+
+- `true` and `false` now parse as **boolean literals**, which is what
+  `docs/format/expressions.md` has always said they are. Borrowing `ast.parse`
+  made them plain names, so a spec writing `condition: "true"` got a reference
+  to a field of that name and an error about it not being decoded — and
+  `unparse` rendered a `BoolLiteral` as `true`, text that meant something else
+  when read back. Python's own `True` and `False` are still accepted. A spec
+  with a field actually named `true` or `false` can no longer reference it.
 
 - A seam is now declared after **any** hole-class undecoded region, not only
   after a `Gap`. `zpf` sorts reasons into two recoverability classes and puts

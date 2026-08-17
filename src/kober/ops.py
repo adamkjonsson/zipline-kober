@@ -35,11 +35,12 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from kober.check import require_valid, scope_at
+from kober.errors import SpecError
 from kober.expr import ExprType, infer_type, unparse
 from kober.spec import BytesType, Computed, IntType, StringType, Switch, UnitRef
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from kober.expr import Expr
     from kober.spec import EnumDef, Field, FieldType, Spec
@@ -134,19 +135,70 @@ class FieldPlan:
 
 
 @dataclass(frozen=True)
+class ParamPlan:
+    """A value whoever references a unit must supply.
+
+    Not a field: it decodes nothing and appears in no decoded instance. It is
+    here because it is *in scope* for the unit's expressions, and because a
+    target has to name it somewhere — a parameter of a function, most likely.
+
+    Attributes:
+        name: The parameter's name as the spec spells it.
+        kind: What kind of value the caller must pass.
+
+    """
+
+    name: str
+    kind: Kind
+
+
+@dataclass(frozen=True)
 class ObjectPlan:
     """One unit's shape: what a decoded instance of it holds.
 
     Attributes:
         unit: The unit's name as the spec spells it.
         fields: Its fields, in decode order, anonymous ones included.
+        params: Values its callers supply, in declaration order.
         doc: The spec's own description, verbatim.
 
     """
 
     unit: str
     fields: tuple[FieldPlan, ...]
+    params: tuple[ParamPlan, ...] = ()
     doc: str | None = None
+
+    def field(self, name: str) -> FieldPlan | None:
+        """Return one field by the name the spec gives it, or ``None``.
+
+        Args:
+            name: The field's name as the spec spells it.
+
+        Returns:
+            The field, or ``None`` if the unit has no such field. An anonymous
+            field is never found: it has no name to look up.
+
+        """
+        for item in self.fields:
+            if item.name == name:
+                return item
+        return None
+
+    def param(self, name: str) -> ParamPlan | None:
+        """Return one parameter by name, or ``None``.
+
+        Args:
+            name: The parameter's name as the spec spells it.
+
+        Returns:
+            The parameter, or ``None``.
+
+        """
+        for item in self.params:
+            if item.name == name:
+                return item
+        return None
 
 
 @dataclass(frozen=True)
@@ -276,10 +328,9 @@ def _types(kind: FieldType) -> tuple[FieldType, ...]:
 def _object(spec: Spec, unit: str) -> ObjectPlan:
     """Reduce one unit to its shape."""
     target = spec.unit(unit)
-    fields = tuple(
-        _field(spec, unit, index, item) for index, item in enumerate(target.fields)
-    )
-    return ObjectPlan(unit=unit, fields=fields, doc=target.doc)
+    fields = tuple(_field(spec, unit, index, item) for index, item in enumerate(target.fields))
+    params = tuple(ParamPlan(name=param.name, kind=KINDS[param.type]) for param in target.params)
+    return ObjectPlan(unit=unit, fields=fields, params=params, doc=target.doc)
 
 
 def _field(spec: Spec, unit: str, index: int, item: Field) -> FieldPlan:
@@ -323,3 +374,91 @@ def _value(spec: Spec, unit: str, index: int, kind: FieldType) -> ValueType:
         return ValueType(kind=KINDS[inferred])
     msg = f"unsupported field type {type(kind).__name__} in unit {unit!r}"
     raise TypeError(msg)
+
+
+# --- resolving a reference -------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Step:
+    """One hop of a resolved reference path.
+
+    Attributes:
+        unit: The unit the name was looked up in, as the spec spells it.
+        name: The field or parameter's name, as the spec spells it.
+        param: Whether it names one of the unit's parameters rather than a
+            field. A parameter is always the last hop: it holds a scalar, so
+            there is nothing to descend into.
+
+    """
+
+    unit: str
+    name: str
+    param: bool = False
+
+
+def walk_path(plan: Plan, unit: str, parts: Sequence[str]) -> tuple[Step, ...]:
+    """Resolve a reference path to the fields it traverses.
+
+    What a backend needs in order to *reach* a value: which unit each name
+    belongs to, so the name can be mapped the way that language maps it. The
+    scope word — ``this``, ``parent``, ``root`` — is the caller's to strip,
+    because which unit a path starts in is the only part of scoping a target
+    has an opinion about (a ``parent`` may be a caller's argument in one
+    language and a back-pointer in another).
+
+    Args:
+        plan: The plan the units belong to.
+        unit: The unit the first name is looked up in.
+        parts: The path's components, scope word already removed.
+
+    Returns:
+        One :class:`Step` per component, outermost first.
+
+    Raises:
+        SpecError: If the path does not resolve. :func:`kober.check.check`
+            refuses every such path already, so reaching this means a plan was
+            built from a spec that was never checked.
+
+    Example:
+        >>> walk_path(plan, "question", ("qname", "labels"))
+        (Step(unit='question', name='qname'), Step(unit='name', name='labels'))
+
+    """
+    if not parts:
+        msg = f"a reference in unit {unit!r} must name a field"
+        raise SpecError(msg)
+    steps: list[Step] = []
+    current = unit
+    remaining = list(parts)
+    while remaining:
+        name = remaining.pop(0)
+        obj = plan.object(current)
+        param = obj.param(name)
+        if param is not None:
+            if remaining:
+                msg = f"parameter {name!r} of unit {current!r} has no fields to reference"
+                raise SpecError(msg)
+            steps.append(Step(unit=current, name=name, param=True))
+            return tuple(steps)
+        item = obj.field(name)
+        if item is None:
+            known = ", ".join(
+                field.name for field in obj.fields if field.name is not None
+            ) or "none"
+            msg = f"unit {current!r} has no field {name!r}; it has: {known}"
+            raise SpecError(msg)
+        steps.append(Step(unit=current, name=name))
+        if not remaining:
+            return tuple(steps)
+        # The path continues, so this hop has to be something with fields. A
+        # repeated field is allowed through: an `until` clause reads the
+        # element it just decoded, which is one instance rather than the list.
+        if len(item.types) != 1 or item.types[0].kind is not Kind.OBJECT:
+            msg = (
+                f"field {name!r} of unit {current!r} is not a unit, so "
+                f"{remaining[0]!r} cannot be read"
+            )
+            raise SpecError(msg)
+        current = item.types[0].unit or ""
+    return tuple(steps)

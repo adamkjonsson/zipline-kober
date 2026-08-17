@@ -33,6 +33,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
 
 from kober.errors import EvalError, ExprError
@@ -173,6 +174,16 @@ Expr = IntLiteral | StrLiteral | BoolLiteral | Ref | UnaryOp | BinOp | BoolOp | 
 #: unit, ``parent`` the unit that referenced it, ``root`` the entry unit.
 SCOPE_WORDS = frozenset({"this", "parent", "root"})
 
+#: How the language spells its boolean literals. Lowercase is the documented
+#: spelling and what :func:`unparse` emits; Python's own ``True``/``False``
+#: arrive as constants and are accepted too, since borrowing :func:`ast.parse`
+#: means they cannot be told apart from a literal an author meant.
+#:
+#: Without this a documented literal would parse as a *reference* to a field
+#: named ``true``, and ``unparse`` would render text that meant something else
+#: when read back.
+BOOLEAN_WORDS: Mapping[str, bool] = MappingProxyType({"true": True, "false": False})
+
 _BIN_OPS: dict[type[ast.operator], str] = {
     ast.Add: "+",
     ast.Sub: "-",
@@ -204,6 +215,42 @@ _COMPARE_OPS: dict[type[ast.cmpop], str] = {
 }
 
 _ORDERING_OPS = frozenset({"<", "<=", ">", ">="})
+
+#: Operator precedence, loosest first. The language borrows :func:`ast.parse`,
+#: so it borrows Python's precedence with it, and this table is where that is
+#: written down: :func:`unparse` reads it, and so does a backend rendering
+#: another language, which is what stops two renderers from disagreeing about
+#: how an expression groups.
+PRECEDENCE: Mapping[str, int] = MappingProxyType(
+    {
+        "or": 1,
+        "and": 2,
+        "not": 3,
+        "==": 4,
+        "!=": 4,
+        "<": 4,
+        "<=": 4,
+        ">": 4,
+        ">=": 4,
+        "|": 5,
+        "^": 6,
+        "&": 7,
+        "<<": 8,
+        ">>": 8,
+        "+": 9,
+        "-": 9,
+        "*": 10,
+        "/": 10,
+        "%": 10,
+    }
+)
+
+#: Precedence of ``-x``, ``+x`` and ``~x``. Not in :data:`PRECEDENCE`, which is
+#: keyed by operator text, and ``-`` means two different things there.
+UNARY_PRECEDENCE = 11
+
+#: Precedence of a literal or a reference, which is never parenthesized.
+ATOM_PRECEDENCE = 12
 
 
 class Scope(Protocol):
@@ -253,6 +300,8 @@ def _translate(node: ast.expr, source: str, where: str | None) -> Expr:
     """Translate one whitelisted Python AST node to ours."""
     if isinstance(node, ast.Constant):
         return _translate_constant(node, source, where)
+    if isinstance(node, ast.Name) and node.id in BOOLEAN_WORDS:
+        return BoolLiteral(value=BOOLEAN_WORDS[node.id])
     if isinstance(node, (ast.Name, ast.Attribute)):
         return Ref(path=_flatten_path(node, source, where))
     if isinstance(node, ast.UnaryOp):
@@ -577,15 +626,61 @@ def _eval_unary(expr: UnaryOp, env: Environment) -> ExprValue:
     return value
 
 
-def _shift(op: str, left: int, right: int) -> int:
-    """Shift, refusing counts that are negative or absurd."""
-    if right < 0:
-        msg = f"negative shift count {right} in {op!r}"
+def _check_shift(op: str, count: int) -> None:
+    """Refuse a shift count that is negative or absurd.
+
+    The bound is not fussiness: ``1 << n`` with ``n`` read off the wire
+    allocates until the process dies, and a decode may not be turned into that
+    by its input. It is the one arithmetic limit this language has.
+    """
+    if count < 0:
+        msg = f"negative shift count {count} in {op!r}"
         raise EvalError(msg)
-    if right > MAX_SHIFT:
-        msg = f"shift count {right} in {op!r} exceeds the {MAX_SHIFT}-bit limit"
+    if count > MAX_SHIFT:
+        msg = f"shift count {count} in {op!r} exceeds the {MAX_SHIFT}-bit limit"
         raise EvalError(msg)
-    return left << right if op == "<<" else left >> right
+
+
+def shift_left(value: int, count: int) -> int:
+    """Shift ``value`` left by ``count``, within the language's bound.
+
+    Public because **generated code calls it**. A compiler can see that
+    ``x << 3`` is in range and emit the operator, but not that ``x << n`` is,
+    so the bound has to exist somewhere a generated module can reach — and it
+    has to be this one, or the two implementations would disagree about which
+    inputs are decodable.
+
+    Args:
+        value: What to shift.
+        count: How far.
+
+    Returns:
+        The shifted value.
+
+    Raises:
+        EvalError: If ``count`` is negative or above :data:`MAX_SHIFT`.
+
+    """
+    _check_shift("<<", count)
+    return value << count
+
+
+def shift_right(value: int, count: int) -> int:
+    """Shift ``value`` right by ``count``, within the language's bound.
+
+    Args:
+        value: What to shift.
+        count: How far.
+
+    Returns:
+        The shifted value.
+
+    Raises:
+        EvalError: If ``count`` is negative or above :data:`MAX_SHIFT`.
+
+    """
+    _check_shift(">>", count)
+    return value >> count
 
 
 def _eval_binary(expr: BinOp, env: Environment) -> ExprValue:
@@ -608,8 +703,10 @@ def _eval_binary(expr: BinOp, env: Environment) -> ExprValue:
         # truncation-toward-zero agree; the two differ only on a negative
         # operand, and this is the documented answer there.
         return left // right if expr.op == "/" else left % right
-    if expr.op in ("<<", ">>"):
-        return _shift(expr.op, left, right)
+    if expr.op == "<<":
+        return shift_left(left, right)
+    if expr.op == ">>":
+        return shift_right(left, right)
     if expr.op == "&":
         return left & right
     if expr.op == "|":
@@ -679,10 +776,18 @@ def _collect(expr: Expr, found: list[Ref]) -> None:
 
 
 def unparse(expr: Expr) -> str:
-    """Render an expression back to text, fully parenthesized.
+    """Render an expression back to text, with the parentheses it needs and no more.
 
-    Not a round-trip of the author's formatting — it is for ``kober show``
-    and error messages, where being unambiguous beats being pretty.
+    Not a round-trip of the author's formatting — whitespace and redundant
+    grouping are gone — but a round-trip of the author's *meaning*: what comes
+    out parses back to the same tree, which is the property that lets
+    ``kober show`` and an error message quote an expression without teaching
+    the reader a spelling they cannot use.
+
+    It used to parenthesize everything, on the grounds that being unambiguous
+    beat being pretty. Minimal parentheses are unambiguous too — the grouping
+    is read off :data:`PRECEDENCE` — and ``((a + b) + c) > 0`` is harder to
+    check against what you wrote than ``a + b + c > 0``.
 
     Args:
         expr: The parsed expression.
@@ -692,9 +797,21 @@ def unparse(expr: Expr) -> str:
 
     Example:
         >>> unparse(parse("a + b * 2"))
-        '(a + (b * 2))'
+        'a + b * 2'
+        >>> unparse(parse("(a + b) * 2"))
+        '(a + b) * 2'
 
     """
+    return _unparse(expr, 0)
+
+
+def _grouped(text: str, level: int, limit: int) -> str:
+    """Parenthesize ``text`` only if its operator binds looser than the context."""
+    return f"({text})" if level < limit else text
+
+
+def _unparse(expr: Expr, limit: int) -> str:
+    """Render one node, parenthesized if it binds looser than ``limit``."""
     if isinstance(expr, IntLiteral):
         return str(expr.value)
     if isinstance(expr, StrLiteral):
@@ -704,9 +821,23 @@ def unparse(expr: Expr) -> str:
     if isinstance(expr, Ref):
         return ".".join(expr.path)
     if isinstance(expr, UnaryOp):
+        level = PRECEDENCE["not"] if expr.op == "not" else UNARY_PRECEDENCE
         space = " " if expr.op == "not" else ""
-        return f"({expr.op}{space}{unparse(expr.operand)})"
+        return _grouped(f"{expr.op}{space}{_unparse(expr.operand, level)}", level, limit)
     if isinstance(expr, BoolOp):
-        joined = f" {expr.op} ".join(unparse(operand) for operand in expr.operands)
-        return f"({joined})"
-    return f"({unparse(expr.left)} {expr.op} {unparse(expr.right)})"
+        level = PRECEDENCE[expr.op]
+        # `and`/`or` are associative and their operands are booleans, so a
+        # nested one of the same kind needs no grouping to mean the same thing.
+        joined = f" {expr.op} ".join(_unparse(operand, level) for operand in expr.operands)
+        return _grouped(joined, level, limit)
+    level = PRECEDENCE[expr.op]
+    if isinstance(expr, Compare):
+        # Comparison is non-associative here: chains are refused at parse time,
+        # so a nested comparison has to be parenthesized or it would come back
+        # as a chain rather than as itself.
+        left, right = _unparse(expr.left, level + 1), _unparse(expr.right, level + 1)
+    else:
+        # Left-associative: only the right operand needs grouping at equal
+        # precedence, which is what keeps `a - b - c` from becoming a lie.
+        left, right = _unparse(expr.left, level), _unparse(expr.right, level + 1)
+    return _grouped(f"{left} {expr.op} {right}", level, limit)

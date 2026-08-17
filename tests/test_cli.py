@@ -169,7 +169,7 @@ def test_show_renders_sizes_repeats_and_conditions(
 ):
     main(["show", write(tmp_path, GOOD)])
     out = capsys.readouterr().out
-    assert "bytes[(qdcount * 4)]" in out
+    assert "bytes[qdcount * 4]" in out
     assert "×qdcount" in out
 
 

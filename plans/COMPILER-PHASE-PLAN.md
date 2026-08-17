@@ -359,13 +359,58 @@ renders `((ancount + nscount) + arcount) > 0`, and in *generated code* it would
 be worse. Stage 3 owes a precedence-aware Python renderer, and the docstrings
 should use it once it exists.
 
-### Stage 3 — expressions to source
+### Stage 3 — expressions to source — **done**
 
 The AST already exists and `unparse` is close. New work is scope binding —
 `this`/`parent`/`root` and unit parameters resolving to locals or attributes —
 and the two semantics that differ from Python: `/` is floor division, and
 `and`/`or` must short-circuit exactly as the interpreter does, since a spec
 relies on it to guard a division.
+
+Landed as `pygen.render_expr` and `pygen.Binding`, with `ops.walk_path` for the
+neutral half of resolving a path. The headline test is **differential at the
+expression level**: 27 expressions × 6 value sets, each evaluated by the
+interpreter over its own AST and by Python over the rendered source, and they
+must agree or fail together. Breaking `/` → `//` fails 13 of them; breaking the
+associativity rule fails 6. That is the cheapest strong check available here,
+and it exists because rendering can look right while meaning something else.
+
+**`parent` and `root` are parameters, not a frame chain.** The parent's fields
+are locals in a function that has not finished running, so there is nothing to
+ask for them — but the compiler knows *which* of them an expression names, so it
+passes exactly those. That is the insight of this phase applied again: the
+interpreter carries a frame chain so a generic lookup can find anything, and a
+compiler needs only what is actually referenced. Stage 4 threads them, under the
+`_parent_` and `_root_` prefixes this stage reserves.
+
+**Two guards survive compilation and one does not.** The shift bound has to: `1
+<< n` with `n` off the wire allocates until the process dies, so a count that
+cannot be seen to be in range becomes a call to `expr.shift_left`. Division by
+zero survives as `ZeroDivisionError`, which stage 4's entry point turns into an
+`undecodable` region — the same outcome by a shorter road. What does not survive
+is the interpreter's `_as_int`/`_as_bool`, because the checker proved the types
+already.
+
+**The `unparse` wart is fixed rather than worked around**, and it turned out to
+be worth more than tidiness: `PRECEDENCE` now lives in `expr.py` as the one
+statement of how expressions group, and both renderers read it, so the spec's
+spelling and Python's cannot disagree about grouping. Docstrings use `unparse`
+rather than the Python rendering on purpose — `//` and `_parent_x` are this
+backend's business and would be noise to whoever reads the generated doc.
+
+**One bug found, in the language rather than the compiler.** `true` and `false`
+are documented literals that parsed as *references* to fields with those names,
+because borrowing `ast.parse` makes a bare name a name. So `condition: "true"`
+failed with a message about an undecoded field, and `unparse` emitted `true` for
+a boolean — text that meant something else when read back. Fixed, which is also
+what makes "what `unparse` writes parses back to the same tree" a total
+property rather than one with an exception.
+
+A limitation worth recording: a field named like a Python keyword **cannot be
+referenced from a spec expression at all**, since Python's parser refuses
+`header.class` before this project's whitelist sees it. The compiler maps it to
+`class_`, so it is reachable from generated code and from a consumer — just not
+from the spec that declared it.
 
 ### Stage 4 — the decoder body
 

@@ -32,11 +32,26 @@ from __future__ import annotations
 import ast
 import keyword
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from kober.errors import CompileError
-from kober.expr import unparse
-from kober.ops import Kind, Plan
+from kober.errors import CompileError, SpecError
+from kober.expr import (
+    MAX_SHIFT,
+    PRECEDENCE,
+    SCOPE_WORDS,
+    UNARY_PRECEDENCE,
+    BinOp,
+    BoolLiteral,
+    BoolOp,
+    Compare,
+    IntLiteral,
+    Ref,
+    StrLiteral,
+    UnaryOp,
+    unparse,
+)
+from kober.ops import Kind, Plan, walk_path
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -80,6 +95,8 @@ RESERVED_MODULE = frozenset(
         "Protocol",
         "Sink",
         "Spanned",
+        "shift_left",
+        "shift_right",
         "TEXT_CONTENT_TYPE",
         "TYPE_CHECKING",
         "TruncatedRead",
@@ -97,6 +114,25 @@ RESERVED_MODULE = frozenset(
 #: local inside one of those functions, so a field with one of these names
 #: would shadow it.
 RESERVED_LOCAL = frozenset({"cur", "path", "sink"})
+
+#: How a ``parent.x`` reference reaches its value: a parameter the caller
+#: passes. The parent's fields are locals in a function that has not finished
+#: running, so there is no object to ask — but the compiler knows *which* of
+#: them are referenced, which is why a frame chain is not needed for this.
+PARENT_PREFIX = "_parent_"
+
+#: How a ``root.x`` reference reaches its value: the same, threaded down from
+#: the entry unit through every function on the way.
+ROOT_PREFIX = "_root_"
+
+#: The local holding the element an ``until`` clause is testing. That clause
+#: names the field it repeats, and means the one instance just decoded.
+ELEMENT_LOCAL = "_element"
+
+#: The runtime helpers a shift compiles to when its count is not provably in
+#: range. ``1 << n`` with ``n`` off the wire is a memory-exhaustion bug, which
+#: is why the interpreter bounds it; the bound has to survive compilation.
+SHIFT_HELPERS: Mapping[str, str] = {"<<": "shift_left", ">>": "shift_right"}
 
 #: How a value's kind is spelled as a Python annotation.
 ANNOTATIONS: Mapping[Kind, str] = {
@@ -133,6 +169,7 @@ class Names:
         self._classes: dict[str, str] = {}
         self._constants: dict[str, str] = {}
         self._attributes: dict[tuple[str, str], str] = {}
+        self._params: dict[tuple[str, str], str] = {}
         problems: list[str] = []
         module: dict[str, str] = dict.fromkeys(RESERVED_MODULE, "the generated module itself")
 
@@ -149,18 +186,24 @@ class Names:
             self._classes[obj.unit] = cls
 
         for obj in plan.objects:
+            # Parameters and fields share one namespace: both are locals of the
+            # function that decodes the unit, so a name used twice is a clash
+            # even though only one of them becomes an attribute.
             taken: dict[str, str] = {}
+            for param in obj.params:
+                where = f"parameter {param.name!r} of unit {obj.unit!r}"
+                local = _keyword_safe(param.name)
+                problems.extend(_bad(where, local))
+                problems.extend(_shadowed(where, local))
+                problems.extend(_taken(where, local, taken, where))
+                self._params[obj.unit, param.name] = local
             for item in obj.fields:
                 if item.name is None:
                     continue
                 where = f"field {item.name!r} of unit {obj.unit!r}"
                 attribute = _keyword_safe(item.name)
                 problems.extend(_bad(where, attribute))
-                if attribute in RESERVED_LOCAL:
-                    problems.append(
-                        f"{where} becomes the local {attribute!r}, which every generated "
-                        f"decode function already takes as a parameter; rename it in the spec"
-                    )
+                problems.extend(_shadowed(where, attribute))
                 problems.extend(_taken(where, attribute, taken, where))
                 self._attributes[obj.unit, item.name] = attribute
 
@@ -196,6 +239,19 @@ class Names:
 
         """
         return self._attributes[unit, field]
+
+    def param_of(self, unit: str, param: str) -> str:
+        """Return the local one of a unit's parameters compiles to.
+
+        Args:
+            unit: The unit's name as the spec spells it.
+            param: The parameter's name as the spec spells it.
+
+        Returns:
+            The local's name.
+
+        """
+        return self._params[unit, param]
 
     def constant_of(self, enum: str) -> str:
         """Return the module constant an enum's labels compile to.
@@ -242,6 +298,16 @@ def _bad(where: str, name: str) -> list[str]:
             f"the spec — the backend will not rename it silently"
         ]
     return []
+
+
+def _shadowed(where: str, name: str) -> list[str]:
+    """Report a name that would shadow one the generated functions already use."""
+    if name not in RESERVED_LOCAL:
+        return []
+    return [
+        f"{where} becomes the local {name!r}, which every generated decode function "
+        f"already takes as a parameter; rename it in the spec"
+    ]
 
 
 def _taken(where: str, name: str, seen: dict[str, str], claim: str) -> list[str]:
@@ -342,6 +408,198 @@ def _dict_call(prefix: str, entries: Sequence[str], indent: int) -> list[str]:
     return lines
 
 
+# --- expressions -----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Binding:
+    """Where the values an expression names live, in the function being generated.
+
+    Scope binding is the new work in rendering an expression, and it is all
+    here. A spec says ``qdcount``, ``this.qdcount``, ``parent.qdcount`` or
+    ``root.id``; Python has to say which local or attribute that is, and the
+    answer depends on the function the expression is being rendered into.
+
+    The rules, in one place:
+
+    - A **field of this unit** is a local, named as the field is. It has been
+      decoded already — the checker's ordering rule guarantees that — so there
+      is a variable holding it.
+    - A **parameter** is a local too, for the same reason: it is an argument of
+      the function.
+    - A **dotted path** is attribute access on whatever the first name reached,
+      with every hop mapped by :class:`Names`.
+    - ``parent.x`` and ``root.x`` are **parameters the caller passes**, named
+      with :data:`PARENT_PREFIX` and :data:`ROOT_PREFIX`. The parent's fields
+      are locals in a function that is still running, so there is nothing to
+      ask; but the compiler knows which of them are referenced, so it can pass
+      exactly those and skip the frame chain the interpreter needs.
+    - Inside an ``until`` clause, the repeated field's own name means **the
+      element just decoded**, not the list so far, and resolves to
+      :attr:`element`.
+
+    Attributes:
+        plan: The plan being compiled.
+        names: Its resolved identifiers.
+        unit: The unit whose decode function is being generated.
+        parent: The unit that referenced it, when ``parent`` may appear. Left
+            ``None`` where nothing does, so a stray ``parent`` is refused
+            rather than rendered against a guess.
+        element_of: Name of the field an enclosing ``until`` repeats, if any.
+        element: The local holding that element.
+
+    """
+
+    plan: Plan
+    names: Names
+    unit: str
+    parent: str | None = None
+    element_of: str | None = None
+    element: str = ELEMENT_LOCAL
+
+    def render(self, path: Sequence[str]) -> str:
+        """Render one reference as a Python expression.
+
+        Args:
+            path: The reference's components, scope word included.
+
+        Returns:
+            Python source for the value it names.
+
+        Raises:
+            CompileError: If the path names ``parent`` where nothing is bound,
+                or does not resolve at all.
+
+        """
+        parts = tuple(path)
+        word = parts[0] if parts and parts[0] in SCOPE_WORDS else None
+        rest = parts[1:] if word else parts
+        start, prefix = self._start(word, parts)
+        try:
+            steps = walk_path(self.plan, start, rest)
+        except SpecError as exc:
+            msg = f"cannot compile the reference {'.'.join(parts)!r} in unit {self.unit!r}: {exc}"
+            raise CompileError(msg) from exc
+        head, *tail = steps
+        if head.param:
+            local = self.names.param_of(head.unit, head.name)
+        else:
+            local = self.names.attribute_of(head.unit, head.name)
+        if word in (None, "this") and head.name == self.element_of:
+            local = self.element
+        else:
+            local = prefix + local
+        return local + "".join(
+            f".{self.names.attribute_of(step.unit, step.name)}" for step in tail
+        )
+
+    def _start(self, word: str | None, path: Sequence[str]) -> tuple[str, str]:
+        """Return the unit a path resolves in, and the prefix its local carries."""
+        if word == "parent":
+            if self.parent is None:
+                msg = (
+                    f"the reference {'.'.join(path)!r} names 'parent', but nothing "
+                    f"references unit {self.unit!r} at the point being compiled"
+                )
+                raise CompileError(msg)
+            return self.parent, PARENT_PREFIX
+        if word == "root":
+            return self.plan.entry, ROOT_PREFIX
+        return self.unit, ""
+
+
+def render_expr(expr: Expr, binding: Binding) -> str:
+    """Render an expression as Python source, meaning what the interpreter means.
+
+    Three differences from Python's reading of the same text, and each one is
+    handled rather than hoped about:
+
+    - ``/`` is **integer division** in a spec, so it becomes ``//``. Both
+      floor, and both agree with the interpreter on a negative operand.
+    - ``and`` and ``or`` **short-circuit**, which Python's do identically. That
+      matters more than it looks: a spec guards a division with
+      ``n != 0 and total / n > 1``, and evaluating the right side anyway would
+      turn a valid expression into a failure.
+    - A **shift count** off the wire is bounded. ``1 << n`` with a wire value
+      for ``n`` exhausts memory, which is why the interpreter refuses counts
+      above :data:`kober.expr.MAX_SHIFT`; a count this backend cannot see to be
+      in range becomes a call to a runtime helper that keeps the bound.
+
+    What is *not* here is the interpreter's type checking. ``_as_int`` and
+    ``_as_bool`` exist because it discovers types at decode time; the checker
+    has already proved them, so the compiled form skips them. Division by zero
+    is the one failure that survives compilation, and it survives as
+    ``ZeroDivisionError`` for the entry point to turn into an ``undecodable``
+    region — the same outcome by a shorter road.
+
+    Args:
+        expr: The expression to render.
+        binding: Where the values it names live.
+
+    Returns:
+        Python source for the expression, parenthesized only where the grouping
+        needs it.
+
+    Raises:
+        CompileError: If one of its references cannot be reached.
+
+    Example:
+        >>> render_expr(parse("total / n"), binding)
+        'total // n'
+
+    """
+    return _expr(expr, binding, 0)
+
+
+def _expr(expr: Expr, binding: Binding, limit: int) -> str:
+    """Render one node, parenthesized if it binds looser than ``limit``."""
+    if isinstance(expr, IntLiteral):
+        return str(expr.value)
+    if isinstance(expr, StrLiteral):
+        return _literal(expr.value)
+    if isinstance(expr, BoolLiteral):
+        return "True" if expr.value else "False"
+    if isinstance(expr, Ref):
+        return binding.render(expr.path)
+    if isinstance(expr, UnaryOp):
+        level = PRECEDENCE["not"] if expr.op == "not" else UNARY_PRECEDENCE
+        space = " " if expr.op == "not" else ""
+        return _group(f"{expr.op}{space}{_expr(expr.operand, binding, level)}", level, limit)
+    if isinstance(expr, BoolOp):
+        level = PRECEDENCE[expr.op]
+        joined = f" {expr.op} ".join(_expr(operand, binding, level) for operand in expr.operands)
+        return _group(joined, level, limit)
+    if isinstance(expr, Compare):
+        level = PRECEDENCE[expr.op]
+        left = _expr(expr.left, binding, level + 1)
+        right = _expr(expr.right, binding, level + 1)
+        return _group(f"{left} {expr.op} {right}", level, limit)
+    return _binary(expr, binding, limit)
+
+
+def _binary(expr: BinOp, binding: Binding, limit: int) -> str:
+    """Render an arithmetic or bitwise operator, guarding a shift if it needs it."""
+    if expr.op in SHIFT_HELPERS and not _safe_shift(expr.right):
+        left = _expr(expr.left, binding, 0)
+        right = _expr(expr.right, binding, 0)
+        return f"{SHIFT_HELPERS[expr.op]}({left}, {right})"
+    op = "//" if expr.op == "/" else expr.op
+    level = PRECEDENCE[expr.op]
+    left = _expr(expr.left, binding, level)
+    right = _expr(expr.right, binding, level + 1)
+    return _group(f"{left} {op} {right}", level, limit)
+
+
+def _safe_shift(count: Expr) -> bool:
+    """Whether a shift count is a literal the runtime's bound already allows."""
+    return isinstance(count, IntLiteral) and 0 <= count.value <= MAX_SHIFT
+
+
+def _group(text: str, level: int, limit: int) -> str:
+    """Parenthesize only what the grouping needs."""
+    return f"({text})" if level < limit else text
+
+
 # --- the typed model -------------------------------------------------------
 
 
@@ -383,22 +641,11 @@ def _describe(item: FieldPlan, names: Names) -> str:
     for enum in dict.fromkeys(labelled):
         text = f"{_sentence(text)} Labelled by :data:`{names.constant_of(enum)}`."
     if item.condition is not None:
-        when = _safe(_condition(item.condition))
+        # The spec's spelling, not Python's: `_parent_x` and `//` are this
+        # backend's business and would be noise to whoever reads the doc.
+        when = _safe(unparse(item.condition))
         text = f"{_sentence(text)} Present only when ``{when}``."
     return _sentence(text)
-
-
-def _condition(expr: Expr) -> str:
-    """Render a presence condition for prose.
-
-    :func:`kober.expr.unparse` parenthesizes fully, because it exists for error
-    messages where being unambiguous beats being pretty. The outermost pair
-    says nothing here and only the outermost pair is safe to drop.
-    """
-    text = unparse(expr)
-    if text.startswith("(") and text.endswith(")"):
-        return text[1:-1]
-    return text
 
 
 def _sentence(text: str) -> str:
