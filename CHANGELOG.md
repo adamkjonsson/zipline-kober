@@ -443,6 +443,26 @@ installed from a checkout (see the README).
 - `kober.ops.FieldPlan.emit` and `ObjectPlan.emit` — the spec's own `emit:`
   settings, carried so a backend can resolve granularity without the spec.
 
+- `kober compile SPEC -o OUT.py [--emit field|message|none]` — the CLI verb, and
+  the last of `DESIGN.md` §6's list plus one. It checks the spec first and
+  writes nothing if that fails, which is what "errors move to build time" means
+  in practice, and prints the findings `kober check` would print. With no `-o`
+  it writes the module to standard output.
+
+- `kober.stage.run_compiled` and `decode_stream_compiled` — the driver for a
+  generated module, so one is runnable over a `.zpf` file without hand-written
+  glue. **The same driver as the interpreter's**: gaps are message boundaries,
+  a seam is owed after a hole, a run's tail is accounted for, and only the step
+  in the middle differs. Everything the driver does is true of a decode however
+  the decode was written, and one implementation of the seam rules is one place
+  for them to be wrong.
+
+  The interpreter's own path now writes through that sink too, which is the
+  shape Q1 argued for: `plan` gained a second producer rather than being
+  replaced, and here the two producers meet the same writer. A generated module
+  and the interpreter produce **byte-identical decoded files** for the same
+  input, which is what `tests/test_compiled.py` asserts.
+
 ### Changed
 
 - The `zpf` requirement is now `>=0.2.0,<0.3`, up from `>=0.2.0.dev0,<0.3`.

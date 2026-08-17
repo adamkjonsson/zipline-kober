@@ -521,9 +521,34 @@ Measured at field granularity: 16.6 µs a message against the interpreter's
 126.6, so **7.6×**, of which emission is about 2.5 µs. Q5's direct-read pass is
 still the outstanding one.
 
-### Stage 6 — `kober compile`, and the runtime
+### Stage 6 — `kober compile`, and the runtime — **done**
 
 The CLI verb, and `kober.runtime` factored out of what generated code needs.
+
+The runtime arrived early — stage 4 needed something for generated code to read
+through — so what was left here was the verb and the thing nobody had listed: a
+**driver**, without which a generated module is only usable by hand-written
+glue. `kober compile examples/dns.yaml -o dns.py` now produces a module, and
+`kober.run_compiled` runs it over a capture.
+
+**One driver, two producers.** The seam rules — a gap is a message boundary, a
+seam is owed after a hole, a run's tail belongs to whoever owns the run — are
+true of a decode however the decode was written, and they are the subtlest code
+in this project; the gap-seam bug of the real-capture phase passed every
+hand-built test. So `stage.py` was refactored rather than duplicated: a
+`_Writer` sink, a step-based loop, and two steps. The interpreter's path writes
+through that sink as well, which is Q1's argument arriving where it was always
+going — `plan()` gained a second producer, and the two meet the same writer.
+
+That makes the differential stronger than "the same records": the two write
+**byte-identical files**, block for block, over a capture holding a whole
+message, a truncated one, and one with bytes after it. Acceptance criterion 2,
+at the level a user would notice.
+
+One thing straightened out on the way: `decode_from` now accounts for its own
+extent at message and none granularity, where before the entry point did it.
+A driver decoding several messages from one run cannot account for a message it
+did not write, and the module always can.
 
 ### Stage 7 — testing
 

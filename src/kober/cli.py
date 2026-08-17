@@ -1,11 +1,18 @@
 """The ``kober`` command line, one verb per API entry point.
 
-The four verbs of ``DESIGN.md`` §6::
+The four verbs of ``DESIGN.md`` §6, and the one the compiler adds::
 
-    kober check SPEC                    # validate and type-check
-    kober show  SPEC                    # print the field tree a spec describes
-    kober run   SPEC IN.zpf -o OUT.zpf  # decode a file into a decode stage
-    kober try   SPEC --hex 0a0b         # decode one buffer, print the tree
+    kober check   SPEC                    # validate and type-check
+    kober show    SPEC                    # print the field tree a spec describes
+    kober run     SPEC IN.zpf -o OUT.zpf  # decode a file into a decode stage
+    kober try     SPEC --hex 0a0b         # decode one buffer, print the tree
+    kober compile SPEC -o dns.py          # write a decoder for it, as Python
+
+``compile`` is the one verb whose output is not a decode. It turns a spec into
+a module with a typed API, which then decodes without this project's loader,
+checker or spec model — only :mod:`kober.runtime`. The interpreter stays: it is
+what ``try`` should always use, and it is the reference the generated code is
+checked against.
 
 Exit codes are the usual three: ``0`` success, ``1`` the work could not be
 done, ``2`` the command line itself was wrong, which argparse reports.
@@ -23,6 +30,7 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kober import __version__
@@ -31,6 +39,8 @@ from kober.decoder import Decoder
 from kober.errors import KoberError
 from kober.expr import unparse
 from kober.node import NodeStatus
+from kober.ops import Plan
+from kober.pygen import render_spec
 from kober.spec import (
     BytesType,
     Computed,
@@ -119,6 +129,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="what to record as the producer",
     )
 
+    compiler = verbs.add_parser("compile", help="write a decoder for a spec, as Python")
+    _add_spec(compiler)
+    compiler.add_argument(
+        "-o",
+        "--output",
+        metavar="OUT.py",
+        help="where to write the module; standard output if omitted",
+    )
+    compiler.add_argument(
+        "--emit",
+        choices=[Emit.MESSAGE.value, Emit.FIELD.value, Emit.NONE.value],
+        default=Emit.MESSAGE.value,
+        help=(
+            "granularity to compile for: one record per message (default), one per "
+            "field, or none at all. A compile-time choice, not a flag the module "
+            "carries — at message granularity it builds no field paths at all"
+        ),
+    )
+
     prober = verbs.add_parser("try", help="decode one buffer and print the tree")
     _add_spec(prober)
     prober.add_argument(
@@ -149,6 +178,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _show(spec)
         if args.verb == "run":
             return _run(spec, args)
+        if args.verb == "compile":
+            return _compile(spec, args)
         return _try(spec, args)
     except KoberError as exc:
         print(f"kober: {exc}", file=sys.stderr)
@@ -168,6 +199,31 @@ def _run(spec: Spec, args: argparse.Namespace) -> int:
     print(f"{args.output}: {records} record(s), {len(regions)} undecoded region(s)")
     for reason, count in sorted(regions.items()):
         print(f"  {reason}: {count}")
+    return OK
+
+
+def _compile(spec: Spec, args: argparse.Namespace) -> int:
+    """Write a decoder for a spec, and say where it went.
+
+    Errors move to build time, which is half of what compiling buys: a spec that
+    does not check refuses here rather than at decode time, with the same
+    findings ``kober check`` prints.
+    """
+    findings = check(spec)
+    errors = [finding for finding in findings if finding.severity is Severity.ERROR]
+    for finding in findings:
+        print(finding, file=sys.stderr)
+    if errors:
+        print(f"kober: {spec.name!r} has {len(errors)} error(s); nothing written", file=sys.stderr)
+        return FAILED
+
+    source = render_spec(spec, emit=Emit(args.emit), check=False)
+    if args.output is None:
+        print(source, end="")
+        return OK
+    Path(args.output).write_text(source, encoding="utf-8")
+    units = len(Plan.from_spec(spec, check=False).objects)
+    print(f"{args.output}: {units} unit(s), {Emit(args.emit).value} granularity")
     return OK
 
 

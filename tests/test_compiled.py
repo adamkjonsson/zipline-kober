@@ -18,6 +18,7 @@ undecoded and a difference there is a difference in the output file.
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 import struct
 import sys
 from pathlib import Path
@@ -26,8 +27,9 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import zpf
-from zpf.blocks import UNDECODED_REASONS
+from zpf.blocks import UNDECODED_REASONS, Record, Undecoded
 
+from kober.cli import main
 from kober.decoder import Decoder
 from kober.emit import Emission, Unclaimed, plan
 from kober.errors import CompileError, EvalError, TruncatedRead, Undecodable
@@ -36,6 +38,7 @@ from kober.ops import Plan
 from kober.pygen import Names, render
 from kober.runtime import Cursor, span
 from kober.spec import Emit, Spec
+from kober.stage import run_compiled
 
 if TYPE_CHECKING:
     from kober.ops import ObjectPlan
@@ -786,23 +789,33 @@ def write_transport(path: Path, *payloads: bytes) -> None:
 
 
 def run_stage(spec: Spec, emit: Emit, source: Path, sink: Path) -> None:
-    """Decode a transport file with a generated module, one datagram at a time."""
-    module = compiled(spec, emit)
-    with zpf.decode_stage(
+    """Decode a transport file with a generated module, through the shipped driver."""
+    run_compiled(
+        compiled(spec, emit),
         source,
         sink,
-        decoder=(module.NAME, module.VERSION),
         produced_by="kober compiler",
         produced_at=1_700_000_000,
-    ) as stage:
-        for stream in stage.streams():
-            # One sink per stream, because a seam owed by one datagram is carried
-            # by the next datagram's first record.
-            writer = RecordingSink(stage, stream)
-            for datagram in stream.datagrams():
-                writer.ts = datagram.ts
-                module.decode(datagram.data, base=datagram.off_start, sink=writer)
-                writer.finish()
+    )
+
+
+def blocks(path: Path) -> list[tuple[object, ...]]:
+    """Return what a decoded file says, in file order.
+
+    Records and undecoded regions both, since a difference in either is a
+    difference in the file. Read from the raw block stream rather than the
+    session views, because the order the two implementations write in is part of
+    what is being compared.
+    """
+    out: list[tuple[object, ...]] = []
+    with zpf.open(path) as handle:
+        for block in handle.blocks():
+            if isinstance(block, Record):
+                spans = tuple((s.off_start, s.off_end) for s in block.spans)
+                out.append(("record", block.content_type, block.comment, block.payload, spans))
+            elif isinstance(block, Undecoded):
+                out.append(("undecoded", block.reason, block.off_start, block.off_end))
+    return out
 
 
 def assert_conformant(path: Path, source: Path) -> None:
@@ -873,3 +886,53 @@ def test_a_message_record_reads_back_through_the_decoder(tmp_path: Path):
             )
     assert payloads == [QUERY]
     assert module.decode(payloads[0]) is not None
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_a_generated_module_writes_the_file_the_interpreter_writes(tmp_path: Path, emit: Emit):
+    """The differential at its strongest: not the same records, the same *file*.
+
+    Both go through the same driver — gaps, seams, tails and all — so what is
+    left to differ is what each decided to write, which is the thing being
+    checked. Acceptance criterion 2, one capture at a time.
+    """
+    source = tmp_path / "transport.zpf"
+    write_transport(source, QUERY, RESPONSE, QUERY[:5], QUERY + b"\xff")
+    spec = example("dns")
+
+    compiled_out = tmp_path / "compiled.zpf"
+    run_stage(spec, emit, source, compiled_out)
+
+    interpreted_out = tmp_path / "interpreted.zpf"
+    Decoder(spec, emit=emit).run(
+        source, interpreted_out, produced_by="kober compiler", produced_at=1_700_000_000
+    )
+
+    assert blocks(compiled_out) == blocks(interpreted_out)
+    assert_conformant(compiled_out, source)
+
+
+def test_the_shipped_driver_is_what_makes_a_generated_module_runnable(tmp_path: Path):
+    """Acceptance 1, spelled as the plan spells it: compile, then decode a capture."""
+    out = tmp_path / "dns.py"
+    assert main(["compile", str(EXAMPLES / "dns.yaml"), "-o", str(out), "--emit", "field"]) == 0
+
+    module = imported(out)
+    source = tmp_path / "transport.zpf"
+    write_transport(source, QUERY, RESPONSE)
+    decoded = tmp_path / "decoded.zpf"
+    run_compiled(module, source, decoded, produced_by="kober", produced_at=1_700_000_000)
+    assert_conformant(decoded, source)
+
+
+def imported(path: Path) -> ModuleType:
+    """Import a generated module from a file, the way a consumer would."""
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[path.stem] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        del sys.modules[path.stem]
+    return module

@@ -94,6 +94,37 @@ message  [0, 29)
 Unlike `run`, it fails when the decode did not complete — answering that is the
 point of it.
 
+## Compiling
+
+`compile` turns a spec into a Python module with a typed API. The module reads
+bytes without this project's loader, checker, or spec model — only
+`kober.runtime` — so a protocol decoder becomes something you can ship:
+
+```console
+$ kober compile dns.yaml -o dns.py --emit field
+dns.py: 5 unit(s), field granularity
+```
+
+```python
+>>> import dns
+>>> from kober.runtime import span
+>>> message = dns.decode(payload)
+>>> message.questions[0].qname.labels[0].text
+'example'
+>>> span(message, "qdcount")
+(4, 6)
+```
+
+Fields are `int` and `str` rather than a generic tree, so an editor can complete
+them and a typo is an error at import time instead of `None` at runtime. Byte
+ranges live beside the values rather than wrapping them, which is what keeps a
+decode cheap. `kober.run_compiled` drives such a module over a `.zpf` file
+exactly as `run` drives the interpreter.
+
+The interpreter is not going anywhere: it is what `try` should always use, and
+it is the reference implementation the generated code is tested against — the
+two must produce the same file for the same input.
+
 Everything the CLI does is reachable from the API:
 
 ```python

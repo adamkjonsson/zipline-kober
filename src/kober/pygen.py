@@ -1526,41 +1526,61 @@ def render_entry(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.ME
     ]
     call = f"{names.function_of(plan.entry)}({', '.join(arguments)})"
     if emit is Emit.FIELD:
-        # The records are written as the fields are read, so there is nothing
-        # left to say here.
+        # The records were written as the fields were read, and the bytes after
+        # the last of them belong to whoever owns the run.
         lines.append(f"    return {call}")
+    elif emit is Emit.MESSAGE:
+        lines.extend(
+            [
+                "    _extent = cur.tell()",
+                "    try:",
+                f"        _message = {call}",
+                "    except (EvalError, TruncatedRead, Undecodable, ZeroDivisionError) as _exc:",
+                "        if sink is not None:",
+                *_comment(
+                    "Nothing cited these bytes: only a *whole* message is a message, "
+                    "and this one is not. A region no record claims is the only honest "
+                    "thing to say about them.",
+                    indent=12,
+                ),
+                "            _s, _e = cur.span(_extent)",
+                "            if _e > _s:",
+                "                sink.undecoded(_s, _e, _reason(_exc))",
+                "        raise",
+                "    if sink is not None:",
+                "        _s, _e = cur.span(_extent)",
+                *_comment(
+                    "Its payload is a copy of the input rather than anything the decode "
+                    "created, which is what a `dec:` type means.",
+                    indent=8,
+                ),
+                "        if _e > _s:",
+                "            _payload = cur.slice(_s, _e)",
+                "            sink.record(_payload, MESSAGE_CONTENT_TYPE, _s, _e, None)",
+                "    return _message",
+            ]
+        )
     else:
-        lines.extend(["    _extent = cur.tell()", f"    _message = {call}"])
-        lines.extend(["    if sink is not None:", "        _s, _e = cur.span(_extent)"])
-        if emit is Emit.MESSAGE:
-            lines.extend(
-                [
-                    *_comment(
-                        "Only a *whole* message is a message, so this is reached only "
-                        "when one decoded. Its payload is a copy of the input rather "
-                        "than anything the decode created, which is what a `dec:` type "
-                        "means.",
-                        indent=8,
-                    ),
-                    "        if _e > _s:",
-                    "            _payload = cur.slice(_s, _e)",
-                    "            sink.record(_payload, MESSAGE_CONTENT_TYPE, _s, _e, None)",
-                ]
-            )
-        else:
-            lines.extend(
-                [
-                    *_comment(
-                        "Nothing is written at this granularity, so the message's own "
-                        "bytes are named: read, understood, and deliberately not "
-                        "reported.",
-                        indent=8,
-                    ),
-                    "        if _e > _s:",
-                    '            sink.undecoded(_s, _e, "skipped")',
-                ]
-            )
-        lines.append("    return _message")
+        lines.extend(
+            [
+                "    _extent = cur.tell()",
+                "    try:",
+                f"        _message = {call}",
+                "    finally:",
+                *_comment(
+                    "Nothing is written at this granularity, so the message's own bytes "
+                    "are named instead: read, understood, and deliberately not reported. "
+                    "That is as true of the part that decoded before a failure as of a "
+                    "whole message.",
+                    indent=8,
+                ),
+                "        if sink is not None:",
+                "            _s, _e = cur.span(_extent)",
+                "            if _e > _s:",
+                '                sink.undecoded(_s, _e, "skipped")',
+                "    return _message",
+            ]
+        )
     lines.extend(
         [
             "",
@@ -1601,57 +1621,21 @@ def render_entry(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.ME
             "        _message = decode_from(cur, sink)",
             "    except (EvalError, TruncatedRead, Undecodable, ZeroDivisionError) as _exc:",
             "        if sink is not None:",
-        ]
-    )
-    if emit is Emit.FIELD:
-        lines.extend(
-            [
-                *_comment(
-                    "From where the cursor stopped: the fields before it are cited one "
-                    "by one, and naming their bytes as well would claim them twice.",
-                    indent=12,
-                ),
-                "            sink.undecoded(_stopped_at(cur, base), _end, _reason(_exc))",
-            ]
-        )
-    elif emit is Emit.MESSAGE:
-        lines.extend(
-            [
-                *_comment(
-                    "From `base`, not from where the cursor stopped: nothing cited the "
-                    "bytes that did decode, so a region no record claims is the only "
-                    "honest thing to say about them.",
-                    indent=12,
-                ),
-                "            sink.undecoded(base, _end, _reason(_exc))",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                *_comment(
-                    "Two regions, not one: what was read is skipped, and only what ran "
-                    "out is the failure. Nothing was written either way, but the reason "
-                    "is different on each side of where it stopped.",
-                    indent=12,
-                ),
-                "            _stop = _stopped_at(cur, base)",
-                "            if _stop > base:",
-                '                sink.undecoded(base, _stop, "skipped")',
-                "            sink.undecoded(_stop, _end, _reason(_exc))",
-            ]
-        )
-    lines.extend(
-        [
+            *_comment(
+                "From where the cursor stopped. Whatever this message could account "
+                "for it has already said; what is left is what was never decoded.",
+                indent=12,
+            ),
+            "            sink.undecoded(_stopped_at(cur, base), _end, _reason(_exc))",
             "        return None",
             "    if sink is not None:",
-            "        _stop = _stopped_at(cur, base)",
-            "        if _stop < _end:",
             *_comment(
                 "Whatever this message did not claim is this datagram's alone: a "
                 "following message cannot use it, so it is skipped rather than left.",
                 indent=8,
             ),
+            "        _stop = _stopped_at(cur, base)",
+            "        if _stop < _end:",
             '            sink.undecoded(_stop, _end, "skipped")',
             "    return _message",
             "",

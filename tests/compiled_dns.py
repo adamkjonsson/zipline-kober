@@ -585,15 +585,16 @@ def decode(data: bytes, *, base: int = 0, sink: Sink | None = None) -> Message |
         _message = decode_from(cur, sink)
     except (EvalError, TruncatedRead, Undecodable, ZeroDivisionError) as _exc:
         if sink is not None:
-            # From where the cursor stopped: the fields before it are cited one
-            # by one, and naming their bytes as well would claim them twice.
+            # From where the cursor stopped. Whatever this message could
+            # account for it has already said; what is left is what was never
+            # decoded.
             sink.undecoded(_stopped_at(cur, base), _end, _reason(_exc))
         return None
     if sink is not None:
-        _stop = _stopped_at(cur, base)
-        if _stop < _end:
         # Whatever this message did not claim is this datagram's alone: a
         # following message cannot use it, so it is skipped rather than left.
+        _stop = _stopped_at(cur, base)
+        if _stop < _end:
             sink.undecoded(_stop, _end, "skipped")
     return _message
 

@@ -8,11 +8,15 @@ writes it through `zpf`.
 ```
   loader.py ──→ spec.py ──→ check.py          the spec: data, then validated
                    │
-                   ▼
-  cursor.py ──→ decoder.py ──→ node.py        the engine: bytes → tree
-                   │
-                   ▼
-                emit.py                       pure: tree → what to write
+        ┌──────────┴──────────┐
+        ▼                     ▼
+  cursor.py ──→ decoder.py    ops.py ──→ pygen.py    interpret, or compile
+                   │             (neutral)  (Python)
+                   ▼                     │
+                node.py                  ▼
+                   │              a generated module
+                   ▼                     │
+                emit.py ◀────────────────┘   both produce records
                    │
                    ▼
                 stage.py ─────────────────→   the only module that imports zpf
@@ -20,8 +24,16 @@ writes it through `zpf`.
                    ▼
                  cli.py
 
+  runtime.py                                  what generated code imports
   errors.py                                   used by all of it
 ```
+
+**There are two ways to run a spec and one way to write the result.** The
+interpreter walks the spec over a cursor and builds a tree; the compiler turns
+the spec into a module that reads bytes directly. Both write through the same
+sink, the same driver, and the same `zpf` file — which is what lets a test
+insist they produce the same output, and is why the interpreter is kept as the
+reference implementation rather than retired.
 
 **The boundary is the fact worth knowing first.** `decoder.py` and `emit.py`
 import no `zpf` at all, which is why both are testable without opening a file
@@ -44,7 +56,10 @@ outside `stage.py` is almost certainly in the wrong module.
 | `decoder.py` | The decode engine: walks a spec over a cursor and returns a tree. Catches every decode-time signal and turns it into a node status. |
 | `emit.py` | Pure. Decides what records to write and what regions to mark, given a tree. Holds the single site that formats a field path. |
 | `stage.py` | The `zpf`-facing driver: reads `chunks()`, handles gaps and seams, writes records, and runs a whole file through `Decoder.run`. |
-| `cli.py` | The `kober` console script: `check`, `show`, `run`, `try`. |
+| `ops.py` | The compiler's language-neutral half: a `Plan` describing what a spec means, with the analyses a backend uses to drop a runtime check. Carries the spec's own names. |
+| `pygen.py` | The Python backend: a plan rendered as source. Names, spans, expressions, decode functions, emission — everything Python-specific about compiling. |
+| `runtime.py` | What a *generated* module imports, and all it imports. Mostly re-exports, so both implementations read, fail, and normalize payloads the same way. |
+| `cli.py` | The `kober` console script: `check`, `show`, `run`, `try`, `compile`. |
 
 Everything is re-exported at the package top level, so `import kober` reaches
 all of it and no consumer imports a submodule.
