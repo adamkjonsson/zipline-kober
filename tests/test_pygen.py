@@ -41,7 +41,7 @@ from kober.pygen import (
     render_spec,
 )
 from kober.runtime import span
-from kober.spec import Spec
+from kober.spec import Emit, Spec
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES = ROOT / "examples"
@@ -71,34 +71,25 @@ def imported(source: str, tmp_path: Path, name: str = "generated") -> ModuleType
     return module
 
 
-def block(title: str) -> str:
-    """Return one ``# --- title ---`` section of the hand-written spike.
-
-    Sliced from the file rather than imported, because what is being compared
-    is the *text* — a class that merely behaves the same is not convergence.
-    """
-    lines = Path(compiled_dns.__file__).read_text().splitlines()
-    rule = f"# --- {title} "
-    start = next(index for index, line in enumerate(lines) if line.startswith(rule))
-    after = range(start + 1, len(lines))
-    end = next((index for index in after if lines[index].startswith("# --- ")), len(lines))
-    return "\n".join(lines[start + 1 : end]).strip("\n")
-
-
 # --- converging on the spike -----------------------------------------------
 
 
-def test_the_typed_model_is_what_the_spike_says_it_should_be():
-    assert render_model(Plan.from_spec(load("dns.yaml"))) == block("the typed model")
+def test_the_generated_module_is_the_one_in_the_repository():
+    """``compiled_dns.py`` is not a copy of the output; it *is* the output.
 
-
-def test_the_enum_labels_are_what_the_spike_says_they_should_be():
-    assert render_enums(Plan.from_spec(load("dns.yaml"))) == block("enums")
+    Character for character, header and docstrings included. It began as stage
+    1's hand-written spike — the module the compiler should produce — and every
+    stage since has replaced another block of it with generated text. Comparing
+    the whole file is what stops the target from drifting while nobody is
+    looking, and it makes a diff in generated code reviewable like any other.
+    """
+    generated = render_spec(load("dns.yaml"), emit=Emit.FIELD)
+    assert generated == Path(compiled_dns.__file__).read_text()
 
 
 def test_the_generated_classes_hold_what_the_spike_holds(tmp_path: Path):
     """The same shape reached from the other side: attributes, in order, typed."""
-    module = imported(render_spec(load("dns.yaml")), tmp_path, "dns_model")
+    module = imported(render_spec(load("dns.yaml"), emit=Emit.FIELD), tmp_path, "dns_model")
     for name in ("Message", "Flags", "Question", "Name", "Label"):
         generated = getattr(module, name)
         handwritten = getattr(compiled_dns, name)
@@ -289,13 +280,14 @@ def test_every_naming_problem_is_reported_at_once():
 # --- the source it renders -------------------------------------------------
 
 
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE, Emit.NONE], ids=lambda e: e.value)
 @pytest.mark.parametrize("name", ["dns.yaml", "http.yaml"])
-def test_a_generated_module_passes_this_projects_ruff(name: str, tmp_path: Path):
+def test_a_generated_module_passes_this_projects_ruff(name: str, emit: Emit, tmp_path: Path):
     """Generated modules are source this project ships, so they lint like it."""
     if shutil.which("ruff") is None:
         pytest.skip("ruff is not on PATH")
     path = tmp_path / "generated.py"
-    path.write_text(render_spec(load(name)))
+    path.write_text(render_spec(load(name), emit=emit))
     result = subprocess.run(
         ["ruff", "check", "--config", str(ROOT / "ruff.toml"), str(path)],
         capture_output=True,
@@ -305,9 +297,12 @@ def test_a_generated_module_passes_this_projects_ruff(name: str, tmp_path: Path)
     assert result.returncode == 0, result.stdout
 
 
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE, Emit.NONE], ids=lambda e: e.value)
 @pytest.mark.parametrize("name", ["dns.yaml", "http.yaml"])
-def test_a_generated_module_imports(name: str, tmp_path: Path):
-    module = imported(render_spec(load(name)), tmp_path, name.split(".")[0] + "_model")
+def test_a_generated_module_imports(name: str, emit: Emit, tmp_path: Path):
+    module = imported(
+        render_spec(load(name), emit=emit), tmp_path, f"{name.split('.')[0]}_{emit.value}"
+    )
     assert name.split(".")[0] == module.NAME
     assert module.VERSION == "1.0"
 

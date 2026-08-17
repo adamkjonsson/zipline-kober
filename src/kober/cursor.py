@@ -109,6 +109,28 @@ class Cursor:
         end = self._base + (high + _BITS_PER_BYTE - 1) // _BITS_PER_BYTE
         return start, end
 
+    def slice(self, off_start: int, off_end: int) -> bytes:
+        """Return the bytes of an absolute range, without moving the position.
+
+        For a record whose payload *is* the input: a whole-message record cites
+        the bytes it copies, and whoever emits it needs them. Reading is what
+        moves the position, and this does not read — it hands back a range the
+        cursor has already passed over.
+
+        Args:
+            off_start: First byte, in the stream's offset space.
+            off_end: One past the last.
+
+        Returns:
+            The bytes. Clipped to the run, so a range that runs past its end
+            comes back short rather than raising: a caller asking about bytes
+            this run does not hold is asking about bytes nobody has.
+
+        """
+        start = max(off_start - self._base, 0)
+        end = max(off_end - self._base, 0)
+        return self._data[start:end]
+
     def seek(self, bit: int) -> None:
         """Move to an absolute bit position within the run.
 

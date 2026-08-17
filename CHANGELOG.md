@@ -406,6 +406,43 @@ installed from a checkout (see the README).
   `needs_root` say which outer values a unit depends on, `needs_root` including
   what the units below it need, since those values are threaded through.
 
+- Emission, which is what the compiler phase has been pointing at since its
+  first question: `kober.pygen.render_decoder` and `render_entry` take an
+  `emit`, and a generated decoder **writes records as it reads**, with the
+  field path, the content type, the `prim:` token and the payload encoding all
+  baked in as literals. No tree is built and nothing generic is walked
+  afterwards.
+
+  **Granularity is a compile-time choice**, because it is a difference in the
+  code and not in a flag: at `message` a decoder builds no field paths and
+  carries no sink at all, at `field` the path is threaded through every unit
+  function, and at `none` the message's own bytes are named rather than
+  reported. `kober.pygen.granularity` resolves it once per unit, where the
+  interpreter resolves it per node while walking a finished tree. A unit reached
+  at two different granularities is refused rather than compiled twice.
+
+  Four things a compiler knows and an interpreter has to work out: a field's
+  `prim:` token from its declared width, its payload encoding from its type, the
+  bytes a `computed:` field cites — the fields its expression read — and which
+  leaves are `emit: none` and so name their bytes `skipped`. The one payload
+  that cannot be baked is a `computed:` integer, which nothing declares a width
+  for; that goes through `kober.runtime.prim_int` and is sized by its value, as
+  the interpreter sizes it.
+
+- `kober.runtime.Sink` — the sink protocol, moved in from the stage 1 spike.
+  Its two calls are `Emission` and `Unclaimed` written as method signatures, so
+  a generated decoder is a second producer for the contract the interpreter's
+  emitter already has. `kober.runtime.cited` and `prim_int` are the two answers
+  that cannot be settled until a message arrives.
+
+- `kober.cursor.Cursor.slice` — the bytes of an absolute range, without moving
+  the position. A whole-message record's payload *is* the input, so whoever
+  emits it needs the bytes back; reading is what moves the cursor, and this does
+  not read.
+
+- `kober.ops.FieldPlan.emit` and `ObjectPlan.emit` — the spec's own `emit:`
+  settings, carried so a backend can resolve granularity without the spec.
+
 ### Changed
 
 - The `zpf` requirement is now `>=0.2.0,<0.3`, up from `>=0.2.0.dev0,<0.3`.
@@ -425,7 +462,29 @@ installed from a checkout (see the README).
   compiler generates. What comes out parses back to the same tree, which is now
   a test rather than a hope.
 
+- `prim_token`, `normalize_int`, `PRIM_WIDTHS` and `TEXT_CONTENT_TYPE` moved
+  from `kober.emit` to `kober.runtime`. Still re-exported from `kober`, and
+  `kober.emit` still uses them, so nothing changes for a caller. The reason is
+  that a *generated* decoder normalizes its payloads the same way and may not
+  import `kober.emit` — it would pull in the tree and the spec model — and two
+  answers to "what is a `u4` written as" would be one too many.
+
 ### Fixed
+
+- **Two places the interpreter threw away what it had decoded.** A nested unit
+  that failed part-way was discarded whole by `_unit_ref`, and a repetition
+  whose element failed lost *every* element, because they were accumulated in a
+  list that a raise unwound past. In both cases the bytes had been read and
+  understood, and the emitter then named them `truncated` — true of the byte
+  that ran out and false of the ones before it. Now a partial nested unit is
+  returned, like a scalar field that failed always was, and elements reach the
+  caller as they are decoded.
+
+  On a three-byte DNS query the emitter used to write one record and mark
+  `[2, 3)`; it now writes six and marks nothing, which is what those bytes
+  deserve. Found by the compiler's differential test, which is what it is for: a
+  generated decoder emits as it reads, so it had already reported those fields,
+  and the disagreement was the interpreter's.
 
 - `true` and `false` now parse as **boolean literals**, which is what
   `docs/format/expressions.md` has always said they are. Borrowing `ast.parse`

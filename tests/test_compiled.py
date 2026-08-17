@@ -25,14 +25,17 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 import pytest
+import zpf
+from zpf.blocks import UNDECODED_REASONS
 
 from kober.decoder import Decoder
-from kober.errors import EvalError, TruncatedRead, Undecodable
+from kober.emit import Emission, Unclaimed, plan
+from kober.errors import CompileError, EvalError, TruncatedRead, Undecodable
 from kober.node import Node, NodeStatus
 from kober.ops import Plan
 from kober.pygen import Names, render
 from kober.runtime import Cursor, span
-from kober.spec import Spec
+from kober.spec import Emit, Spec
 
 if TYPE_CHECKING:
     from kober.ops import ObjectPlan
@@ -65,7 +68,7 @@ HTTP = b"GET / HTTP/1.1\r\nHost: httpforever.com\r\nAccept: */*\r\n\r\nbody"
 _MODULES: dict[str, ModuleType] = {}
 
 
-def compiled(spec: Spec) -> ModuleType:
+def compiled(spec: Spec, emit: Emit = Emit.MESSAGE) -> ModuleType:
     """Compile a spec and import the module, without going through a file.
 
     Registered in ``sys.modules`` because ``dataclasses`` looks a class's module
@@ -73,7 +76,7 @@ def compiled(spec: Spec) -> ModuleType:
     also true of a generated module a consumer imports normally, so nothing is
     being papered over.
     """
-    source = render(Plan.from_spec(spec))
+    source = render(Plan.from_spec(spec), emit=emit)
     if source in _MODULES:
         return _MODULES[source]
     name = f"compiled_{spec.name}_{len(_MODULES)}"
@@ -95,6 +98,133 @@ def inline(source: str) -> Spec:
 
 
 # --- comparing the two ------------------------------------------------------
+
+
+class RecordingSink:
+    """A sink that keeps what it is told, and optionally writes it to a stage.
+
+    It speaks :class:`kober.emit.Emission` and :class:`kober.emit.Unclaimed`,
+    which is the whole reason a generated decoder and the interpreter's emitter
+    can be compared: they are two producers for one contract.
+
+    Adjacent regions sharing a reason are coalesced, which ``plan`` also does. A
+    generated decoder emits in decode order and never revisits, so one pending
+    region is all the buffering that needs.
+    """
+
+    def __init__(
+        self, stage: zpf.DecodeStage | None = None, stream: object = None, ts: int = 0
+    ) -> None:
+        self.records: list[Emission] = []
+        self.regions: list[Unclaimed] = []
+        #: The timestamp records get, which a driver sets per datagram.
+        self.ts = ts
+        self._stage = stage
+        self._stream = stream
+        self._pending: Unclaimed | None = None
+        self._seam: zpf.Seam | None = None
+
+    def record(
+        self,
+        payload: bytes,
+        content_type: str,
+        off_start: int,
+        off_end: int,
+        comment: str | None,
+    ) -> None:
+        """Keep one record, and write it if there is a stage to write to."""
+        self._flush()
+        self.records.append(Emission(payload, content_type, off_start, off_end, comment))
+        if self._stage is not None:
+            self._stage.record(
+                self._stream,
+                payload,
+                ts=self.ts,
+                content_type=content_type,
+                cites=(off_start, off_end),
+                comment=comment,
+                seam=self._seam,
+            )
+            self._seam = None
+
+    def undecoded(self, off_start: int, off_end: int, reason: str) -> None:
+        """Keep one region, coalescing it with the last if it abuts."""
+        if off_end <= off_start:
+            return
+        pending = self._pending
+        if pending is not None and pending.reason == reason and pending.off_end >= off_start:
+            self._pending = Unclaimed(pending.off_start, max(pending.off_end, off_end), reason)
+            return
+        self._flush()
+        self._pending = Unclaimed(off_start, off_end, reason)
+
+    def finish(self) -> None:
+        """Write out whatever is still pending. Call once per message."""
+        self._flush()
+
+    def _flush(self) -> None:
+        if self._pending is None:
+            return
+        region = self._pending
+        self._pending = None
+        self.regions.append(region)
+        if self._stage is not None:
+            self._stage.undecoded(
+                self._stream, region.off_start, region.off_end, reason=region.reason
+            )
+            # A seam is owed after a *hole* — bytes that never existed — because
+            # content either side of one does not run on. The classification is
+            # read from `zpf` rather than restated, as `kober.stage` does.
+            if UNDECODED_REASONS.get(region.reason) == "hole":
+                self._seam = zpf.Seam(reason=region.reason)
+
+
+def merged(regions: list[Unclaimed]) -> list[Unclaimed]:
+    """Coalesce adjacent regions sharing a reason, the way a sink does.
+
+    The interpreter writes its tail through a second call to the driver rather
+    than through ``plan``, so it can leave two adjacent regions with one reason
+    where a sink leaves one. That is a difference in how many calls were made,
+    not in what either says about a byte.
+    """
+    sink = RecordingSink()
+    for region in regions:
+        sink.undecoded(region.off_start, region.off_end, region.reason)
+    sink.finish()
+    return sink.regions
+
+
+def interpreted(
+    spec: Spec, data: bytes, emit: Emit, base: int = 0
+) -> tuple[list[Emission], list[Unclaimed]]:
+    """Return what the interpreter would write for ``data``, tail included.
+
+    ``plan`` stops at how far the decode got and leaves the rest to the driver,
+    so the driver's part is done here — otherwise the two sides would be compared
+    over different amounts of input.
+    """
+    tree = Decoder(spec).decode_bytes(data, base=base)
+    emissions, unclaimed = plan(spec, tree, data, emit=emit, base=base)
+    end = base + len(data)
+    if tree.off_end < end:
+        reason = "skipped" if tree.status is NodeStatus.OK else tree.status.value
+        unclaimed.append(Unclaimed(tree.off_end, end, reason))
+    return emissions, merged(unclaimed)
+
+
+def emitted(
+    spec: Spec, data: bytes, emit: Emit, base: int = 0
+) -> tuple[list[Emission], list[Unclaimed]]:
+    """Return what the generated module writes for ``data``."""
+    sink = RecordingSink()
+    compiled(spec, emit).decode(data, base=base, sink=sink)
+    sink.finish()
+    return sink.records, sink.regions
+
+
+def writes(spec: Spec, data: bytes, emit: Emit, base: int = 0) -> None:
+    """Require both implementations to write the same thing for ``data``."""
+    assert emitted(spec, data, emit, base) == interpreted(spec, data, emit, base)
 
 
 def compare(spec: Spec, data: bytes, base: int = 0) -> None:
@@ -495,3 +625,251 @@ def test_a_malformed_string_decodes_the_same_way():
               - {name: text, type: {string: {size: {fixed: 3}}}}
     """)
     compare(spec, b"\xff\xfe\xfd")
+
+
+# --- the same records as the interpreter ------------------------------------
+
+#: The inputs both implementations must agree about. Between them they reach a
+#: whole message, a skipped section, a message that runs out inside a nested
+#: unit, and one that does not fill its datagram.
+DNS_INPUTS = [QUERY, RESPONSE, QUERY[:3], QUERY[:5], QUERY + b"\xff"]
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE, Emit.NONE], ids=lambda e: e.value)
+@pytest.mark.parametrize("data", DNS_INPUTS, ids=lambda d: str(len(d)))
+def test_the_same_records_are_written_for_dns(data: bytes, emit: Emit):
+    """Q1's claim, tested rather than argued: direct emission reproduces ``plan``."""
+    writes(example("dns"), data, emit)
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_the_same_records_are_written_for_http(emit: Emit):
+    writes(example("http"), HTTP, emit)
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_every_prefix_writes_the_same_records(emit: Emit):
+    """Where a decode stops is where a region starts, so every stop is checked."""
+    spec = example("dns")
+    for length in range(len(QUERY) + 1):
+        writes(spec, QUERY[:length], emit)
+
+
+def test_offsets_in_records_stay_absolute():
+    writes(example("dns"), QUERY, Emit.FIELD, base=4096)
+
+
+def test_a_skipped_section_is_named_rather_than_claimed():
+    """`emit: none` on a conditional field: the answer section."""
+    records, regions = emitted(example("dns"), RESPONSE, Emit.FIELD)
+    assert regions == [Unclaimed(29, len(RESPONSE), "skipped")]
+    assert all(record.off_end <= 29 for record in records)
+
+
+def test_a_truncated_message_keeps_what_it_read_before_the_trouble():
+    records, regions = emitted(example("dns"), QUERY[:5], Emit.FIELD)
+    assert [record.comment for record in records[:2]] == ["dns.id", "dns.flags.qr"]
+    assert regions == [Unclaimed(4, 5, "truncated")]
+
+
+def test_a_truncated_message_is_never_written_as_a_message():
+    records, regions = emitted(example("dns"), QUERY[:5], Emit.MESSAGE)
+    assert records == []
+    assert regions == [Unclaimed(0, 5, "truncated")]
+
+
+def test_a_repeated_leaf_names_each_element():
+    spec = inline("""
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: items, type: {int: {bits: 8}}, repeat: {to_end: true}}
+    """)
+    records, _ = emitted(spec, b"abc", Emit.FIELD)
+    assert [record.comment for record in records] == ["t.items[0]", "t.items[1]", "t.items[2]"]
+    writes(spec, b"abc", Emit.FIELD)
+
+
+def test_a_switch_labels_the_record_by_what_it_decoded():
+    spec = inline("""
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: kind, type: {int: {bits: 8}}}
+              - name: body
+                type:
+                  switch:
+                    on: kind
+                    cases:
+                      1: {int: {bits: 16}}
+                      2: {bytes: {size: {fixed: 2}}}
+    """)
+    for kind, content in ((1, "prim:u16"), (2, "prim:bytes")):
+        records, _ = emitted(spec, bytes([kind]) + b"ab", Emit.FIELD)
+        assert records[1].content_type == content
+        writes(spec, bytes([kind]) + b"ab", Emit.FIELD)
+
+
+def test_a_computed_field_cites_the_fields_it_read():
+    """§3.2: it consumed nothing, so its own position would say nothing."""
+    spec = inline("""
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: words, type: {int: {bits: 8}}}
+              - {name: pad, type: {int: {bits: 8}}}
+              - {name: octets, type: {computed: "words * 4"}}
+    """)
+    records, _ = emitted(spec, b"\x02\x00", Emit.FIELD)
+    computed = records[-1]
+    assert computed.comment == "t.octets"
+    assert (computed.off_start, computed.off_end) == (0, 1)
+    writes(spec, b"\x02\x00", Emit.FIELD)
+
+
+def test_a_computed_integer_is_sized_by_its_value():
+    """Nothing declares a width for it, so the token comes from the number."""
+    spec = inline("""
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: n, type: {int: {bits: 8}}}
+              - {name: big, type: {computed: "n * 100000"}}
+    """)
+    records, _ = emitted(spec, b"\x02", Emit.FIELD)
+    assert records[-1].content_type == "prim:u32"
+    writes(spec, b"\x02", Emit.FIELD)
+
+
+def test_a_unit_reached_at_two_granularities_is_refused():
+    """The interpreter resolves this per node; a compiler would have to emit twice."""
+    spec = inline("""
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: a, type: {unit: part}}
+              - {name: b, type: {unit: part}, emit: none}
+          part:
+            fields: [{name: x, type: {int: {bits: 8}}}]
+    """)
+    with pytest.raises(CompileError, match="granularity"):
+        compiled(spec, Emit.FIELD)
+
+
+# --- through a real decode stage --------------------------------------------
+
+
+def write_transport(path: Path, *payloads: bytes) -> None:
+    """Write a transport file carrying each payload as one UDP datagram."""
+    with zpf.create(path, tick_hz=1_000_000) as writer:
+        writer.add_source("capture", uri="dns.pcap")
+        with writer.begin_session(proto="udp", key="10.0.0.1:51000 <-> 10.0.0.2:53") as session:
+            client = session.participant("10.0.0.1:51000")
+            for index, payload in enumerate(payloads):
+                session.record(client, ts=1000 + index, payload=payload)
+            session.end(reason="closed")
+
+
+def run_stage(spec: Spec, emit: Emit, source: Path, sink: Path) -> None:
+    """Decode a transport file with a generated module, one datagram at a time."""
+    module = compiled(spec, emit)
+    with zpf.decode_stage(
+        source,
+        sink,
+        decoder=(module.NAME, module.VERSION),
+        produced_by="kober compiler",
+        produced_at=1_700_000_000,
+    ) as stage:
+        for stream in stage.streams():
+            # One sink per stream, because a seam owed by one datagram is carried
+            # by the next datagram's first record.
+            writer = RecordingSink(stage, stream)
+            for datagram in stream.datagrams():
+                writer.ts = datagram.ts
+                module.decode(datagram.data, base=datagram.off_start, sink=writer)
+                writer.finish()
+
+
+def assert_conformant(path: Path, source: Path) -> None:
+    """Fail unless the file passes conformance and accounts for its input."""
+    checker = zpf.ConformanceChecker()
+    with zpf.open(path) as handle:
+        checker.check(handle.blocks())
+    checker.finish()
+    assert checker.coverage_findings() == []
+    assert zpf.check_coverage(path, source) == []
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_a_capture_decodes_into_a_conformant_file(tmp_path: Path, emit: Emit):
+    """Acceptance 1: coverage is a promise about a file, so a file is written."""
+    source = tmp_path / "transport.zpf"
+    write_transport(source, QUERY, RESPONSE)
+    sink = tmp_path / "decoded.zpf"
+    run_stage(example("dns"), emit, source, sink)
+    assert_conformant(sink, source)
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_a_truncated_capture_still_covers_every_byte(tmp_path: Path, emit: Emit):
+    source = tmp_path / "partial.zpf"
+    write_transport(source, QUERY[:5], QUERY[:3])
+    sink = tmp_path / "partial-decoded.zpf"
+    run_stage(example("dns"), emit, source, sink)
+    assert_conformant(sink, source)
+
+
+def test_the_written_records_read_back_named_and_typed(tmp_path: Path):
+    source = tmp_path / "transport.zpf"
+    write_transport(source, QUERY)
+    sink = tmp_path / "fields.zpf"
+    run_stage(example("dns"), Emit.FIELD, source, sink)
+
+    seen: dict[str, object] = {}
+    with zpf.open(sink) as handle:
+        for session in handle.sessions():
+            for record in session.records():
+                if record.content_type.startswith("prim:"):
+                    token = record.content_type.split(":", 1)[1]
+                    seen[record.comment] = zpf.decode_prim(record.payload, token)
+
+    assert seen["dns.id"] == 0x1234
+    assert seen["dns.flags.rd"] == 1
+    assert seen["dns.questions[0].qname.labels[0].length"] == 7
+    # The anonymous field is written, and has nowhere to be named but its path.
+    assert seen["dns.flags._"] == 0
+
+
+def test_a_message_record_reads_back_through_the_decoder(tmp_path: Path):
+    """A `dec:` type means whatever its decoder documents, and this one reads it."""
+    source = tmp_path / "transport.zpf"
+    write_transport(source, QUERY)
+    sink = tmp_path / "messages.zpf"
+    run_stage(example("dns"), Emit.MESSAGE, source, sink)
+
+    module = compiled(example("dns"), Emit.MESSAGE)
+    payloads = []
+    with zpf.open(sink) as handle:
+        for session in handle.sessions():
+            payloads.extend(
+                record.payload
+                for record in session.records()
+                if record.content_type == module.MESSAGE_CONTENT_TYPE
+            )
+    assert payloads == [QUERY]
+    assert module.decode(payloads[0]) is not None

@@ -476,11 +476,50 @@ unit's records until it completes — reintroducing bookkeeping this phase remov
 — or argues that citing what was actually read is better and takes the
 difference to the interpreter instead.
 
-### Stage 5 — emission
+### Stage 5 — emission — **done**
 
 Wire Q1's answer through: constants baked in, sink calls emitted, coverage
 regions reported. When this lands, a generated module decodes a real capture
 into a conformant `.zpf`.
+
+It does. `tests/test_compiled.py` writes a two-datagram capture through a real
+decode stage at both granularities and puts it past `ConformanceChecker` and
+`check_coverage` — **acceptance criterion 1**, with a generated module rather
+than a hand-written one. And the differential now covers records: every prefix
+of a real DNS query, at every granularity, must produce the same emissions and
+the same regions as `plan()`.
+
+**Granularity is a compile-time choice**, which the plan suspected and this
+stage confirms as a difference in the *code*: at `message` a decoder builds no
+field paths and takes no sink, at `field` the path is threaded through every
+unit function. A unit reached at two granularities is refused rather than
+compiled twice — the interpreter resolves that per node, and a compiler would
+have to emit the function twice, which is worth building when a real spec asks.
+
+**`tests/compiled_dns.py` is now the generator's output, byte for byte**, header
+and docstrings included. The spike is fully converged: what began as the module
+the compiler *should* produce is what it *does* produce, and one test compares
+the whole file. Generated code stays in the repository on purpose — it is source
+this project ships, so a diff in it should be reviewable like any other.
+
+**The blocking question answered itself in the interpreter's favour being
+wrong.** Stage 4 found that a nested unit failing part-way was discarded whole,
+so `plan()` named bytes `truncated` that had been read and understood. Emitting
+as you go cannot reproduce that without buffering — the bookkeeping this phase
+exists to remove — so the alternative was to take the difference to the
+interpreter, and it did not survive contact: those bytes *were* read. Fixed
+there. Then the prefix sweep found the same bug one level down, where a
+repetition lost **every** element because they were accumulated in a list a
+raise unwound past. Fixed the same way.
+
+Both were latent before the compiler existed and neither had a failing test.
+That is the differential test earning the phase's cost on its own: two bugs in
+the reference implementation, found by writing a second one and insisting they
+agree.
+
+Measured at field granularity: 16.6 µs a message against the interpreter's
+126.6, so **7.6×**, of which emission is about 2.5 µs. Q5's direct-read pass is
+still the outstanding one.
 
 ### Stage 6 — `kober compile`, and the runtime
 

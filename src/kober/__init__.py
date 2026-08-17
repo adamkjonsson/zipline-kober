@@ -30,7 +30,7 @@ __version__: str = _distribution_version("kober")
 
 from kober.check import Finding, Severity, check, require_valid, scope_at
 from kober.decoder import Decoder
-from kober.emit import Emission, Unclaimed, field_path, plan, prim_token
+from kober.emit import Emission, Unclaimed, field_path, plan
 from kober.errors import (
     CompileError,
     EvalError,
@@ -43,9 +43,44 @@ from kober.errors import (
 from kober.expr import ExprType, shift_left, shift_right
 from kober.loader import from_dict, from_file, from_json, from_yaml
 from kober.node import Node, NodeStatus
-from kober.ops import FieldPlan, Kind, ObjectPlan, Plan, ValueType
-from kober.pygen import Names, render, render_enums, render_model, render_spec
-from kober.runtime import Spanned, read_int_le, span
+from kober.ops import (
+    Branch,
+    FieldPlan,
+    Kind,
+    ObjectPlan,
+    ParamPlan,
+    Plan,
+    Step,
+    ValueType,
+    nonnegative,
+    walk_path,
+)
+from kober.pygen import (
+    Binding,
+    Names,
+    content_type_of,
+    granularity,
+    payload_of,
+    render,
+    render_decoder,
+    render_entry,
+    render_enums,
+    render_expr,
+    render_model,
+    render_spec,
+)
+from kober.runtime import (
+    PRIM_WIDTHS,
+    TEXT_CONTENT_TYPE,
+    Sink,
+    Spanned,
+    cited,
+    normalize_int,
+    prim_int,
+    prim_token,
+    read_int_le,
+    span,
+)
 from kober.spec import (
     MAX_INT_BITS,
     BytesType,
@@ -77,6 +112,10 @@ from kober.stage import content_registry, decode_stream, run
 
 __all__ = [
     "MAX_INT_BITS",
+    "PRIM_WIDTHS",
+    "TEXT_CONTENT_TYPE",
+    "Binding",
+    "Branch",
     "BytesType",
     "CompileError",
     "Computed",
@@ -104,14 +143,17 @@ __all__ = [
     "NodeStatus",
     "ObjectPlan",
     "Param",
+    "ParamPlan",
     "Plan",
     "Remaining",
     "Repeat",
     "Severity",
+    "Sink",
     "SizeSpec",
     "Spanned",
     "Spec",
     "SpecError",
+    "Step",
     "StringType",
     "Switch",
     "Terminated",
@@ -124,18 +166,28 @@ __all__ = [
     "Until",
     "ValueType",
     "check",
+    "cited",
     "content_registry",
+    "content_type_of",
     "decode_stream",
     "field_path",
     "from_dict",
     "from_file",
     "from_json",
     "from_yaml",
+    "granularity",
+    "nonnegative",
+    "normalize_int",
+    "payload_of",
     "plan",
+    "prim_int",
     "prim_token",
     "read_int_le",
     "render",
+    "render_decoder",
+    "render_entry",
     "render_enums",
+    "render_expr",
     "render_model",
     "render_spec",
     "require_valid",
@@ -144,5 +196,6 @@ __all__ = [
     "shift_left",
     "shift_right",
     "span",
+    "walk_path",
     "__version__",
 ]

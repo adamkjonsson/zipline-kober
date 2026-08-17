@@ -41,6 +41,7 @@ from kober.spec import (
     BytesType,
     Computed,
     Count,
+    Emit,
     Fixed,
     FromExpr,
     IntType,
@@ -158,6 +159,9 @@ class FieldPlan:
         condition: The expression deciding whether it is there at all, if any.
             Carried rather than reduced to a flag, because a target may want
             to say *when* a field is present.
+        emit: How much of this field reaches an output file, if the spec says.
+            ``None`` inherits, and what it inherits from is the enclosing unit
+            and then whatever granularity the decoder was asked for.
         doc: The spec's own description, verbatim. Author-supplied text, and
             the reason a backend must escape rather than interpolate.
 
@@ -169,6 +173,7 @@ class FieldPlan:
     branches: tuple[Branch, ...] = ()
     repeat: Repeat | None = None
     condition: Expr | None = None
+    emit: Emit | None = None
     doc: str | None = None
 
     @property
@@ -231,6 +236,7 @@ class ObjectPlan:
         unit: The unit's name as the spec spells it.
         fields: Its fields, in decode order, anonymous ones included.
         params: Values its callers supply, in declaration order.
+        emit: How much of this unit reaches an output file, if the spec says.
         confirm: The dispatch guess held up, if this expression is true.
         reject: The input is not this unit, if this expression is true.
         recursive: Whether decoding it can reach itself. A target that decodes
@@ -249,6 +255,7 @@ class ObjectPlan:
     unit: str
     fields: tuple[FieldPlan, ...]
     params: tuple[ParamPlan, ...] = ()
+    emit: Emit | None = None
     confirm: Expr | None = None
     reject: Expr | None = None
     recursive: bool = False
@@ -503,6 +510,7 @@ def _object(
         unit=unit,
         fields=fields,
         params=params,
+        emit=target.emit,
         confirm=target.confirm,
         reject=target.reject,
         recursive=recursive,
@@ -633,6 +641,7 @@ def _field(spec: Spec, unit: str, index: int, item: Field) -> FieldPlan:
         branches=branches,
         repeat=item.repeat,
         condition=item.condition,
+        emit=item.emit,
         doc=item.doc,
     )
 
