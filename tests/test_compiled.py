@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import zpf
+from fuzzing import SEEDS, cases, variants
 from zpf.blocks import UNDECODED_REASONS, Record, Undecoded
 
 from kober.cli import main
@@ -936,3 +937,317 @@ def imported(path: Path) -> ModuleType:
     finally:
         del sys.modules[path.stem]
     return module
+
+
+# --- the same answers over adversarial input --------------------------------
+
+#: Specs chosen to reach the parts of the compiler an example does not. Between
+#: them: bitfields that end on a byte and bitfields that do not divide one, a
+#: word split across two bytes, a switch whose cases differ in width, a repeat
+#: by count and one to the end, a computed value, a conditional field, and every
+#: size a spec can write.
+AWKWARD: dict[str, str] = {
+    "bitfields": """
+        name: bits
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: a, type: {int: {bits: 3}}}
+              - {name: b, type: {int: {bits: 5}}}
+              - {name: c, type: {int: {bits: 1}}}
+              - {name: d, type: {int: {bits: 7}}}
+              - {name: e, type: {int: {bits: 12}}}
+              - {name: f, type: {int: {bits: 4}}}
+              - {name: rest, type: {bytes: {size: {remaining: true}}}}
+    """,
+    "signed and wide": """
+        name: wide
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: small, type: {int: {bits: 4, signed: true}}}
+              - {name: also, type: {int: {bits: 4, signed: true}}}
+              - {name: big, type: {int: {bits: 32, signed: true}}}
+              - {name: little, type: {int: {bits: 16, endian: little}}}
+              - {name: huge, type: {int: {bits: 64}}}
+    """,
+    "nested at an offset": """
+        name: nested
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: kind, type: {int: {bits: 8}}}
+              - {name: head, type: {unit: head}}
+              - {name: tail, type: {unit: head}}
+          head:
+            fields:
+              - {name: hi, type: {int: {bits: 4}}}
+              - {name: lo, type: {int: {bits: 4}}}
+              - {name: word, type: {int: {bits: 16}}}
+    """,
+    "switch of differing widths": """
+        name: switched
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: kind, type: {int: {bits: 8}}}
+              - name: body
+                type:
+                  switch:
+                    on: kind
+                    cases:
+                      1: {int: {bits: 8}}
+                      2: {int: {bits: 32}}
+                      3: {bytes: {size: {fixed: 3}}}
+                      4: {unit: inner}
+                    default: {bytes: {size: {remaining: true}}}
+              - {name: after, type: {int: {bits: 8}}}
+          inner:
+            fields:
+              - {name: x, type: {int: {bits: 16}}}
+    """,
+    "repeats": """
+        name: repeated
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: count, type: {int: {bits: 8}}}
+              - {name: words, type: {int: {bits: 16}}, repeat: {count: "count"}}
+              - {name: pairs, type: {unit: pair}, repeat: {to_end: true}}
+          pair:
+            fields:
+              - {name: hi, type: {int: {bits: 8}}}
+              - {name: lo, type: {int: {bits: 8}}}
+    """,
+    "sizes": """
+        name: sized
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: n, type: {int: {bits: 8}}}
+              - {name: fixed, type: {bytes: {size: {fixed: 2}}}}
+              - {name: counted, type: {bytes: {size: {expr: "n"}}}}
+              - {name: line, type: {string: {size: {terminated: {delimiter: "\\r\\n"}}}}}
+              - name: loose
+                type:
+                  string:
+                    size: {terminated: {delimiter: "\\n", required: false, consume: false}}
+              - {name: rest, type: {bytes: {size: {remaining: true}}}}
+    """,
+    "computed and conditional": """
+        name: derived
+        version: "1"
+        entry: m
+        units:
+          m:
+            confirm: "words < 200"
+            fields:
+              - {name: words, type: {int: {bits: 8}}}
+              - {name: octets, type: {computed: "words * 4"}}
+              - {name: shifted, type: {computed: "1 << words"}}
+              - {name: half, type: {computed: "128 / words"}}
+              - {name: body, type: {bytes: {size: {expr: "octets"}}}, condition: "words > 0"}
+              - {name: rest, type: {bytes: {size: {remaining: true}}}}
+    """,
+}
+
+#: What each awkward spec is fuzzed from. Long enough that a truncation lands
+#: somewhere different every time.
+AWKWARD_SEEDS: dict[str, bytes] = {
+    "bitfields": bytes(range(1, 12)),
+    "signed and wide": bytes(range(0x80, 0x90)),
+    "nested at an offset": bytes(range(1, 12)),
+    "switch of differing widths": bytes([2, 0, 0, 0, 1, 9, 9, 9]),
+    "repeats": bytes([3, 0, 1, 0, 2, 0, 3, 7, 7, 7, 7]),
+    "sizes": b"\x03abcdefline\r\nloose\nrest",
+    "computed and conditional": bytes([2, *range(20)]),
+}
+
+
+def awkward(name: str) -> Spec:
+    """Load one of the specs chosen to be hard to compile."""
+    return inline(AWKWARD[name])
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+@pytest.mark.parametrize("name", sorted(SEEDS))
+@pytest.mark.parametrize("seed", [1, 2])
+def test_the_two_agree_over_mutated_input(name: str, seed: int, emit: Emit):
+    """Stage 7's headline: every example spec, every fuzz case, both ways.
+
+    Values, byte ranges, records, regions. A disagreement here is a bug in one
+    of them and this does not say which — but it says *which input*, which is
+    the part that is hard to find.
+    """
+    spec = example(name.removesuffix(".yaml"))
+    for data in cases(name, seed):
+        try:
+            compare(spec, data)
+            writes(spec, data, emit)
+        except AssertionError as exc:
+            exc.add_note(f"disagreed: {name} {emit.value} seed={seed} on {data!r}")
+            raise
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+@pytest.mark.parametrize("name", sorted(AWKWARD))
+def test_the_two_agree_on_the_awkward_specs(name: str, emit: Emit):
+    """The constructs an example does not reach, over adversarial input.
+
+    Sub-byte fields that do not divide a byte, a word straddling two, a switch
+    whose branches are different widths — every place the compiler's arithmetic
+    about *where a field is* could be wrong while the examples stayed right.
+    """
+    spec = awkward(name)
+    for data in variants(AWKWARD_SEEDS[name], seed=11, rounds=40):
+        try:
+            compare(spec, data)
+            writes(spec, data, emit)
+        except AssertionError as exc:
+            exc.add_note(f"disagreed: {name!r} {emit.value} on {data!r}")
+            raise
+
+
+@pytest.mark.parametrize("name", [*sorted(SEEDS), *sorted(AWKWARD)])
+def test_a_generated_decode_never_raises(name: str):
+    """The promise a generated decoder inherits: failure is a result, not an exception.
+
+    A decoder that raises leaves its input unaccounted for, and coverage is a
+    promise about output (§2). The compiled entry point catches everything the
+    generated code can raise, so anything escaping is something the generator
+    did not know it could produce.
+    """
+    spec = example(name.removesuffix(".yaml")) if name in SEEDS else awkward(name)
+    seeds = SEEDS[name] if name in SEEDS else AWKWARD_SEEDS[name]
+    module = compiled(spec, Emit.FIELD)
+    for data in variants(seeds, seed=12, rounds=40):
+        sink = RecordingSink()
+        try:
+            module.decode(data, sink=sink)
+        except Exception as exc:
+            exc.add_note(f"escaped a generated decode: {name} on {data!r}")
+            raise
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE, Emit.NONE], ids=lambda e: e.value)
+@pytest.mark.parametrize("name", [*sorted(SEEDS), *sorted(AWKWARD)])
+def test_a_generated_decode_accounts_for_every_byte_exactly_once(name: str, emit: Emit):
+    """Cited or named, never both, never outside the input — over anything.
+
+    The property a real bug violated in the interpreter, asserted again on the
+    other implementation. It is the whole coverage guarantee in one line, and
+    the only one that cannot be checked by reading the code.
+    """
+    spec = example(name.removesuffix(".yaml")) if name in SEEDS else awkward(name)
+    seeds = SEEDS[name] if name in SEEDS else AWKWARD_SEEDS[name]
+    allowed = {member.value for member in NodeStatus}
+    for data in variants(seeds, seed=13, rounds=40):
+        records, regions = emitted(spec, data, emit)
+        cited: set[int] = set()
+        for record in records:
+            assert record.off_end <= len(data), f"{name}: a record ran past {data!r}"
+            cited.update(range(record.off_start, record.off_end))
+        named: set[int] = set()
+        for region in regions:
+            assert region.off_end <= len(data), f"{name}: a region ran past {data!r}"
+            assert region.reason in allowed, f"{name}: unknown reason {region.reason!r}"
+            named.update(range(region.off_start, region.off_end))
+        assert not cited & named, f"{name} {emit.value}: cited and named on {data!r}"
+        assert cited | named == set(range(len(data))), (
+            f"{name} {emit.value}: {len(data) - len(cited | named)} byte(s) "
+            f"unaccounted for on {data!r}"
+        )
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_a_fuzzed_capture_decodes_into_a_conformant_file(tmp_path: Path, emit: Emit):
+    """The pipeline that found the seam bug, run against a generated decoder.
+
+    Records and regions from many messages in one file, which is where the rules
+    a single message cannot exercise live: a seam owed after a hole, and a
+    region joining the tail of one datagram to the head of the next.
+    """
+    source = tmp_path / "fuzzed.zpf"
+    write_transport(source, *variants(QUERY, seed=14, rounds=24))
+    sink = tmp_path / "decoded.zpf"
+    run_stage(example("dns"), emit, source, sink)
+    assert_conformant(sink, source)
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_a_fuzzed_capture_decodes_the_same_way_both_ways(tmp_path: Path, emit: Emit):
+    """And the two implementations write the same file for it, block for block."""
+    source = tmp_path / "fuzzed.zpf"
+    write_transport(source, *variants(QUERY, seed=15, rounds=24))
+    spec = example("dns")
+
+    from_compiler = tmp_path / "compiled.zpf"
+    run_stage(spec, emit, source, from_compiler)
+    from_interpreter = tmp_path / "interpreted.zpf"
+    Decoder(spec, emit=emit).run(
+        source, from_interpreter, produced_by="kober compiler", produced_at=1_700_000_000
+    )
+    assert blocks(from_compiler) == blocks(from_interpreter)
+
+
+def test_the_empty_and_tiny_inputs_agree():
+    """The edges the mutators reach rarely, made certain, on both."""
+    for name in sorted(AWKWARD):
+        spec = awkward(name)
+        for data in (b"", b"\x00", b"\xff", b"\x00" * 3, b"\xff" * 9):
+            compare(spec, data)
+            writes(spec, data, Emit.FIELD)
+
+
+def write_stream(path: Path, records: list[tuple[int, bytes, int]]) -> None:
+    """Write a byte-oriented transport file from ``(ts, payload, seq_start)`` triples.
+
+    A sequence number that skips leaves a hole the reader reports as a ``Gap``,
+    which is the structure a datagram file cannot have and the one the seam
+    rules exist for.
+    """
+    with zpf.create(path, tick_hz=1_000_000) as writer:
+        writer.add_source("capture", uri="fuzz.pcap")
+        with writer.begin_session(proto="tcp", key="10.0.0.1:51000 <-> 10.0.0.2:53") as session:
+            client = session.participant("10.0.0.1:51000", isn=1000)
+            for ts, payload, seq in records:
+                session.record(client, ts=ts, payload=payload, seq_start=seq)
+            session.end(reason="fin")
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_a_fuzzed_stream_with_a_hole_in_it_decodes_the_same_way(tmp_path: Path, emit: Emit):
+    """The structure only a byte stream has, over adversarial input.
+
+    Several messages in one run, a lost region between two of them, and messages
+    that do not end where the run does. It is the shape the seam rules exist for
+    — and where the bug that fuzzing found in the interpreter lived — so a
+    generated decoder driven over it has to produce the same file.
+    """
+    variants_ = variants(QUERY, seed=16, rounds=8)
+    first = b"".join(variants_[:4])
+    second = b"".join(variants_[4:])
+    source = tmp_path / "stream.zpf"
+    write_stream(source, [(1000, first, 1001), (2000, second, 1001 + len(first) + 64)])
+    spec = example("dns")
+
+    from_compiler = tmp_path / "compiled.zpf"
+    run_stage(spec, emit, source, from_compiler)
+    from_interpreter = tmp_path / "interpreted.zpf"
+    Decoder(spec, emit=emit).run(
+        source, from_interpreter, produced_by="kober compiler", produced_at=1_700_000_000
+    )
+    assert blocks(from_compiler) == blocks(from_interpreter)
+    assert_conformant(from_compiler, source)

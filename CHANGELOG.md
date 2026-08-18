@@ -494,6 +494,19 @@ installed from a checkout (see the README).
   buffer itself, which is the difference between a method call per field and an
   index, so it has to be able to ask for it.
 
+- The differential is now **fuzzed**. Every mutation of every example, and of a
+  corpus of specs chosen to be hard to compile, is decoded both ways and the two
+  must agree — same values, same byte ranges, same records, same regions, and
+  where a decode fails, the same offset with the same reason. Both
+  implementations are fuzzed from the same mutators, in `tests/fuzzing.py`,
+  because results over inputs that differ cannot be compared.
+
+  A generated decoder is held to the interpreter's promises too: it never
+  raises, never claims a byte it was not given, never both cites and names one,
+  and accounts for every byte of every input. And a fuzzed capture — datagrams,
+  and a byte stream with a hole in it — is driven through both and must produce
+  the same file, block for block.
+
 ### Changed
 
 - The `zpf` requirement is now `>=0.2.0,<0.3`, up from `>=0.2.0.dev0,<0.3`.
@@ -527,6 +540,27 @@ installed from a checkout (see the README).
   field.
 
 ### Fixed
+
+- **A computed value too wide for `prim:` raised out of the emitter.** `prim:`
+  stops at 64 bits and a computed value does not: `1 << n` with `n` off the wire
+  is an ordinary expression and an enormous number, and labelling one raised
+  `ValueError` through `plan()` and through a generated decoder alike. There is
+  nothing honest to write for it, so nothing is written — `kober.runtime.prim_int`
+  returns `None` and both sides skip the record. Coverage is untouched: a
+  computed field consumes nothing, and the bytes it would have cited belong to
+  the fields it read, which have records of their own.
+
+- A `switch` with both a unit case and a value case wrote **no record** for the
+  value cases. The field was treated as a container because one of its
+  alternatives was, and a container's leaves do the writing — but an integer
+  case has no leaves, only itself. Now only a field whose every alternative is a
+  unit is a container.
+
+- A signed field narrower than a byte crashed a generated decoder with a
+  `NameError`: the two's-complement helper was called and never emitted.
+
+  All three were found by fuzzing the compiler's corpus of awkward specs, none
+  had a failing test, and the first two were in code the interpreter shares.
 
 - **Two places the interpreter threw away what it had decoded.** A nested unit
   that failed part-way was discarded whole by `_unit_ref`, and a repetition

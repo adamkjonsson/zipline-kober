@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 
 from kober.expr import references
 from kober.node import NodeStatus
-from kober.runtime import TEXT_CONTENT_TYPE, normalize_int, prim_token
+from kober.runtime import TEXT_CONTENT_TYPE, normalize_int, prim_int, prim_token
 from kober.spec import Computed, Emit, IntType
 
 if TYPE_CHECKING:
@@ -100,7 +100,8 @@ def _int_bits(node: Node) -> tuple[int, bool]:
     kind = node.resolved_type
     if isinstance(kind, IntType):
         return kind.bits, kind.signed
-    # A Computed integer has no declared width; size it by its magnitude.
+    # A Computed integer has no declared width; `kober.runtime.prim_int` sizes
+    # it by its magnitude, and this is only reached for the declared ones.
     value = node.value
     magnitude = abs(value) if isinstance(value, int) else 0
     bits = max(8, magnitude.bit_length() + 1)
@@ -301,6 +302,13 @@ def _leaf(node: Node, path: list[str | None], parent: Node) -> Emission | None:
         return Emission(payload, TEXT_CONTENT_TYPE, off_start, off_end, field_path(path))
     if isinstance(value, bool):
         return Emission(bytes([int(value)]), "prim:u8", off_start, off_end, field_path(path))
+    if isinstance(node.resolved_type, Computed):
+        # Nothing declared its width, so the value decides it — and a value
+        # wider than the vocabulary gets no record. See `kober.runtime.prim_int`.
+        labelled = prim_int(value)
+        if labelled is None:
+            return None
+        return Emission(*labelled, off_start, off_end, field_path(path))
     bits, signed = _int_bits(node)
     payload = normalize_int(value, bits, signed)
     token = prim_token(bits, signed)

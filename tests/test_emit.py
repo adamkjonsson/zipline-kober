@@ -300,6 +300,50 @@ units:
     assert computed.payload == b"\x08"
 
 
+def test_a_computed_value_too_wide_for_the_vocabulary_gets_no_record():
+    """`prim:` stops at 64 bits and a computed value does not.
+
+    Found by fuzzing the compiler's corpus, which reaches `computed:` where the
+    shipped examples do not: `1 << n` with `n` off the wire is an ordinary
+    expression and an enormous number, and labelling it raised `ValueError` out
+    of the emitter — in *both* implementations. There is nothing honest to write
+    for it, so nothing is written; the bytes it would have cited belong to the
+    fields it read, which have records of their own.
+    """
+    spec = Spec.from_yaml("""
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: huge, type: {computed: "1 << n"}}
+""")
+    data = b"\xc8"
+    tree = Decoder(spec).decode_bytes(data)
+    assert tree.find("huge").value == 1 << 200
+    emissions, unclaimed = plan(spec, tree, data, emit=Emit.FIELD)
+    assert [record.comment for record in emissions] == ["t.n"]
+    assert unclaimed == []
+
+
+def test_a_computed_value_the_vocabulary_holds_still_gets_one():
+    spec = Spec.from_yaml("""
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: doubled, type: {computed: "n * 2"}}
+""")
+    tree = Decoder(spec).decode_bytes(b"\x05")
+    emissions, _ = plan(spec, tree, b"\x05", emit=Emit.FIELD)
+    assert [record.content_type for record in emissions] == ["prim:u8", "prim:u8"]
+
+
 # --- failures are named ----------------------------------------------------
 
 

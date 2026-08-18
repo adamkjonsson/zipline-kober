@@ -27,6 +27,7 @@ from types import ModuleType
 
 import compiled_dns
 import pytest
+from test_compiled import AWKWARD
 
 from kober.errors import CompileError, EvalError
 from kober.expr import ExprValue, evaluate, parse, shift_left, shift_right
@@ -299,6 +300,26 @@ def test_a_generated_module_passes_this_projects_ruff(name: str, emit: Emit, tmp
         pytest.skip("ruff is not on PATH")
     path = tmp_path / "generated.py"
     path.write_text(render_spec(load(name), emit=emit))
+    assert_lints(path)
+
+
+@pytest.mark.parametrize("name", sorted(AWKWARD))
+def test_the_awkward_specs_generate_modules_that_lint(name: str, tmp_path: Path):
+    """The shapes an example does not reach still have to be code someone can read.
+
+    A signed sub-byte field, a switch dispatching a record, a delimited read:
+    each emits something the examples never ask for, and each could emit an
+    unused local or an unreachable branch that only ``ruff`` would notice.
+    """
+    if shutil.which("ruff") is None:
+        pytest.skip("ruff is not on PATH")
+    path = tmp_path / "generated.py"
+    path.write_text(render_spec(Spec.from_yaml(AWKWARD[name]), emit=Emit.FIELD))
+    assert_lints(path)
+
+
+def assert_lints(path: Path) -> None:
+    """Fail unless a generated module passes this project's own ruff configuration."""
     result = subprocess.run(
         ["ruff", "check", "--config", str(ROOT / "ruff.toml"), str(path)],
         capture_output=True,
@@ -306,6 +327,9 @@ def test_a_generated_module_passes_this_projects_ruff(name: str, emit: Emit, tmp
         check=False,
     )
     assert result.returncode == 0, result.stdout
+
+
+
 
 
 @pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE, Emit.NONE], ids=lambda e: e.value)

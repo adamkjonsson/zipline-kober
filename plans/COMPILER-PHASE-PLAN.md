@@ -598,7 +598,7 @@ extent at message and none granularity, where before the entry point did it.
 A driver decoding several messages from one run cannot account for a message it
 did not write, and the module always can.
 
-### Stage 7 — testing
+### Stage 7 — testing — **done**
 
 The headline is **differential**: for every example spec and every fuzz corpus,
 the interpreter and the generated module must produce the same values, the same
@@ -608,6 +608,33 @@ implementation's own tests, and it is the reason to keep both.
 Also: generated modules must pass `ruff` (they are source we ship), and the
 existing fuzz properties must hold over generated decoders — which means the
 suite generates, then fuzzes.
+
+All of it, and one addition the plan did not ask for that turned out to matter
+more than the rest: **a corpus of specs chosen to be hard to compile.** The
+shipped examples exercise a fraction of the language, and every one of the
+compiler's decisions about *where a field is* stays right on `dns.yaml` while
+being wrong elsewhere. Seven specs now cover bitfields that do not divide a
+byte, a word straddling two, a switch whose branches differ in width, repeats by
+count and to the end, every size a spec can write, and a computed value.
+
+**Three bugs, in under a minute of running it.** A signed sub-byte field called
+a helper the generator never emitted. A `switch` with both a unit case and an
+integer case wrote no record for the integer, because one object alternative
+made the whole field a container. And a computed value too wide for `prim:`
+raised `ValueError` out of the emitter — **in both implementations**, since
+`1 << n` with `n` off the wire is an ordinary expression and an enormous number.
+The first is the compiler's; the other two were shared or the interpreter's, and
+neither had a failing test.
+
+That is now four bugs the differential has found in the reference
+implementation, against one in the compiler. Which is the argument for keeping
+both, arriving from the direction nobody expected: the compiler's value here has
+been as much in what it revealed about the interpreter as in what it produces.
+
+The fuzzing reaches the driver as well, which the in-suite fuzzing never could
+before: a fuzzed capture of datagrams, and a fuzzed byte stream with a hole in
+it, driven through both implementations and compared block for block. That is
+the shape the seam rules exist for.
 
 ### Stage 8 — documentation
 

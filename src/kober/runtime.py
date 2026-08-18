@@ -133,27 +133,38 @@ def normalize_int(value: int, bits: int, signed: bool) -> bytes:
     return value.to_bytes(token_bytes, "little", signed=signed)
 
 
-def prim_int(value: int) -> tuple[bytes, str]:
+def prim_int(value: int) -> tuple[bytes, str] | None:
     """Return the payload and content type for an integer of no declared width.
 
     A ``computed:`` integer is the one value nothing declares a width for, so it
     is sized by its magnitude: the narrowest token that holds it, signed only if
-    it is negative. Both implementations have to agree about that, and a
-    generated decoder cannot work it out at compile time — the value is not
-    known until the message is.
+    it is negative. Both implementations have to agree about that, and neither
+    can work it out ahead of time — the value is not known until the message is.
+
+    **``None`` when no token holds it.** ``prim:`` stops at 64 bits and a
+    computed value does not: ``1 << n`` with ``n`` off the wire is a perfectly
+    ordinary expression and a perfectly enormous number. There is nothing
+    dishonest to write for it, so nothing is written — the value is still in the
+    decoded object, and the bytes it *cites* are the fields it read, which have
+    records of their own. Coverage is untouched, because a computed field
+    consumed nothing.
 
     Args:
         value: The computed value.
 
     Returns:
-        The payload, and the ``prim:`` content type labelling it.
+        The payload and its ``prim:`` content type, or ``None``.
 
     Example:
         >>> prim_int(300)[1]
         'prim:u16'
+        >>> prim_int(1 << 200) is None
+        True
 
     """
     bits = max(8, abs(value).bit_length() + 1)
+    if bits > PRIM_WIDTHS[-1] * 8:
+        return None
     signed = value < 0
     return normalize_int(value, bits, signed), f"prim:{prim_token(bits, signed)}"
 

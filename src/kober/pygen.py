@@ -1302,9 +1302,11 @@ class _Function:
             start, end = self.cites(index, value, start, end, indent)
         if value.kind is Kind.INT and value.bits is None:
             # The one payload a compiler cannot bake: nothing declares the width
-            # of a computed integer, so it is sized by its value.
-            self.emit(f"{pad}_payload, _type = prim_int({local})")
-            self.emit(f"{pad}_sink.record(_payload, _type, {start}, {end}, {comment})")
+            # of a computed integer, so it is sized by its value — and a value
+            # too wide for the vocabulary gets no record at all.
+            self.emit(f"{pad}_labelled = prim_int({local})")
+            self.emit(f"{pad}if _labelled is not None:")
+            self.emit(f"{pad}    _sink.record(*_labelled, {start}, {end}, {comment})")
             return
         payload = payload_of(value, local)
         content = _literal(content_type_of(self.plan, value))
@@ -1351,12 +1353,15 @@ class _Function:
         return self.names.attribute_of(self.obj.unit, item.name)
 
     def container(self, item: FieldPlan) -> bool:
-        """Whether a field holds decoded objects rather than a value of its own.
+        """Whether a field holds only decoded objects, never a value of its own.
 
         A container writes no record: its leaves do, which is what keeps a
-        repeated field from being spelled twice in the paths under it.
+        repeated field from being spelled twice in the paths under it. **Only**
+        when every alternative is one, though — a ``switch`` with a unit case
+        and an integer case still has an integer to write when it takes that
+        branch, and the record emitted for it dispatches on the same selector.
         """
-        return any(value.kind is Kind.OBJECT for value in item.types)
+        return all(value.kind is Kind.OBJECT for value in item.types)
 
     def present(self, index: int, item: FieldPlan, target: str | None, indent: int) -> None:
         """Emit a field's read, at whatever indentation its condition left."""
@@ -1735,9 +1740,34 @@ def render_decoder(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.
     """
     names = names or Names(plan)
     inside = granularity(plan, emit)
-    return "\n\n\n".join(
+    functions = [
         _Function(plan, names, obj, inside[obj.unit], emit).render() for obj in plan.objects
-    )
+    ]
+    body = "\n\n\n".join(functions)
+    if "_signed(" not in body:
+        return body
+    return "\n\n\n".join([_SIGNED_HELPER, body])
+
+
+#: Reinterpreting a sub-byte field as two's complement. Emitted only when a
+#: spec has such a field, because most do not — a whole-byte one is read as
+#: signed by ``int.from_bytes`` and never comes here.
+_SIGNED_HELPER = '''def _signed(value: int, bits: int) -> int:
+    """Reinterpret ``bits`` bits as a two's complement number.
+
+    Only sub-byte fields need this. A signed field of whole bytes is read as
+    signed where it is read, and a signed field narrower than a byte has no
+    sign bit until its width is known — which it is, here, as a constant.
+
+    Args:
+        value: The bits, as an unsigned number.
+        bits: How many of them the field declared.
+
+    Returns:
+        The signed value.
+
+    """
+    return value - (1 << bits) if value >= 1 << (bits - 1) else value'''
 
 
 def render_entry(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.MESSAGE) -> str:
@@ -2216,7 +2246,15 @@ def _runtime_import(body: str) -> list[str]:
     wanted = sorted(RUNTIME_NAMES & used)
     if not wanted:
         return []
-    return [f"from kober.runtime import {', '.join(wanted)}", ""]
+    one = f"from kober.runtime import {', '.join(wanted)}"
+    if len(one) <= LINE_LENGTH:
+        return [one, ""]
+    return [
+        "from kober.runtime import (",
+        *(f"    {name}," for name in wanted),
+        ")",
+        "",
+    ]
 
 
 def _guards(obj: ObjectPlan) -> list[Expr]:
