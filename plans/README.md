@@ -37,3 +37,4 @@ The live records stay in the project root:
 | [`REAL-CAPTURE-PHASE-PLAN.md`](REAL-CAPTURE-PHASE-PLAN.md) | Real captures through `zpfwire`: DNS, HTTP, and packet loss, to test the design rather than the code. | **Done** — landed on `real_captures`. |
 | [`DOCS-PHASE-PLAN.md`](DOCS-PHASE-PLAN.md) | The documentation tree, following `python-zipline`'s style: developer docs first, then the spec-format reference. | **Done** — landed on `docs_phase`. |
 | [`COMPILER-PHASE-PLAN.md`](COMPILER-PHASE-PLAN.md) | A compiler alongside the interpreter: a spec becomes a Python module with a typed API. | **Done** — landed on `compiler_phase`. |
+| [`POINTER-PHASE-PLAN.md`](POINTER-PHASE-PLAN.md) | The two things real captures asked for and the language could not say: the `Pointer` construct, and three string builtins. | **Planned** — not started. |

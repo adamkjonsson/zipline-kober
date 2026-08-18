@@ -10,7 +10,7 @@ that is still a question.
 `zpf` by [`pressure_test.py`](pressure_test.py), and since revision 6 against
 real captures too.
 
-Revision 6. Revision 1 was written blind and got the layer wrong — it invented
+Revision 7. Revision 1 was written blind and got the layer wrong — it invented
 reassembly, gaps, and provenance that `zpf` already provides. Revision 2 fixed
 that against the source. Revision 3 added the results of an executable pressure
 test (§10) and treated this project as what it is: **a load test of `zpf`, where
