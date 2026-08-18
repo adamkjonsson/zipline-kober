@@ -21,9 +21,15 @@ extending it:
   regardless. The line that matters is §2.1's: **who moves the cursor.**
 - **Revision 6** records what real captures found, in §13, and dropped a status
   line claiming nothing was implemented that had been false for two phases.
+- **Revision 7** adds the compiler (§14) and **restates §2.1**, which had
+  claimed an impossibility that generated code ends: a compiled decoder keeps
+  its read position in a local, so the cursor rule becomes a property of one
+  program rather than of the language. The restatement is the argument for why
+  that is still defensible, and it rests on the comparison rather than on
+  assertion.
 
 Sections most worth reading before changing code: §2.1 (the cursor rule), §4.1
-(field naming and its stopgap), §5 (seams), §9.2 and §13.
+(field naming and its stopgap), §5 (seams), §9.2, §13 and §14.
 
 ## `plans/` — how each phase was run, and what it found
 
@@ -41,6 +47,12 @@ is the part that would otherwise vanish. Two examples:
   constructible.
 - It also sized the `prim:` problem as sub-byte only. The vocabulary is closed
   at 8/16/32/64, so `u24` has no token either.
+- The compiler phase predicted that reading directly instead of through the
+  cursor was worth 6.6×. It is worth 2×; the other 3× is in *baked offsets*, and
+  the plan records both the wrong estimate and the four measurements that
+  replaced it. It also predicted a fast path with a careful fallback for exact
+  truncation, which turned out to be unnecessary — a per-field bounds check
+  against a known offset costs nothing measurable.
 
 ## Upstream issues — what is blocked on the format
 

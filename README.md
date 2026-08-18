@@ -8,12 +8,13 @@ into a [Zipline](https://github.com/adamkjonsson/zipline) decode stage — a
 input bytes it came from. It is a CLI backed by a Python API, and everything
 the CLI does is reachable from the API.
 
-> ⚠️ **Early, and not released.** All four CLI verbs work and a spec decodes
-> real `.zpf` files at message or field granularity, checked against `zpf`'s
-> own conformance and coverage checkers. It has been exercised on small
-> hand-built captures rather than in anger. See [DESIGN.md](DESIGN.md) for the
-> reasoning, and for which claims were verified against `zpf` rather than
-> merely reasoned about.
+> ⚠️ **Early, and not released.** All five CLI verbs work: a spec decodes real
+> `.zpf` files at message or field granularity, checked against `zpf`'s own
+> conformance and coverage checkers, and `compile` turns one into a Python
+> module that does the same about twenty times faster. It has been exercised on
+> small hand-built captures and adversarial input rather than in anger. See
+> [DESIGN.md](DESIGN.md) for the reasoning, and for which claims were verified
+> against `zpf` rather than merely reasoned about.
 
 ## Writing and checking a spec
 

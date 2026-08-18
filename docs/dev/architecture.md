@@ -94,16 +94,31 @@ lies between two records, and accounts for whatever the tree did not reach.
 These shape the whole codebase. A change that breaks one is almost certainly
 wrong, and each has tests that exist specifically to catch it.
 
-### The read cursor belongs to the runtime
+### The read position is the runtime's, or the generator's
 
-Nothing author-supplied moves it. A spec describes *what* to read and the
-runtime decides *where* — which is what makes coverage provable, because bytes
-can only be consumed by being claimed. See `DESIGN.md` §2.1.
+A spec describes *what* to read and something else decides *where* — which is
+what makes coverage provable, because bytes can only be consumed by being
+claimed. How that is guaranteed differs between the two implementations, and
+`DESIGN.md` §2.1 argues the difference rather than glossing it.
 
-The practical rules: every advance goes through a {class}`kober.cursor.Cursor`
-method; `Cursor.read_bytes` refuses a half-consumed byte rather than aligning
-past bits nobody accounted for; and the planned `Pointer` construct will name
-an offset for the runtime to read at rather than being handed the position.
+**Interpreted, it is an impossibility.** Every advance goes through a
+{class}`kober.cursor.Cursor` method, a spec has no way to reach past it, and
+`Cursor.read_bytes` refuses a half-consumed byte rather than aligning past bits
+nobody accounted for. The planned `Pointer` construct will name an offset for
+the runtime to read at rather than being handed the position.
+
+**Compiled, it is a property of one program.** A generated decoder keeps a byte
+offset in a local and reads the buffer by index, because that is worth about
+five times what a cursor costs. So the guarantee moves into
+{mod}`kober.pygen`: every read it emits is preceded by that read's bounds
+check, every advance is by what the read consumed, and every byte the position
+passes is cited or named. A spec still cannot influence *how* — only how many
+fields of what widths.
+
+That is weaker than an impossibility, and what makes it hold is the comparison
+rather than the argument: the two must produce the same byte ranges for every
+input the suite can generate, and the interpreter still cannot move its own
+cursor wrongly.
 
 ### Failure never escapes a decode
 

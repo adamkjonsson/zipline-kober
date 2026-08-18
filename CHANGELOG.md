@@ -638,6 +638,27 @@ installed from a checkout (see the README).
 
 ### Documentation
 
+- `DESIGN.md` **revision 7**: the compiler as §14, and a restatement of §2.1.
+  The cursor rule was true by impossibility — there was no author-supplied code,
+  so nothing author-supplied could move the position. Generated code ends that,
+  so the rule becomes a property of one program: the generator emits a bounds
+  check before every read, advances by what the read consumed, and cites or
+  names every byte the position passes. That is weaker than an impossibility and
+  saying so is the point; what makes it defensible is that the two
+  implementations are compared on every input the suite can generate.
+
+- `docs/dev/compiler.md` — how the compiler is put together, the seam a second
+  backend attaches to, and the invariants a change to it must not break. Plus
+  what the Python backend *refuses* and why, since both refusals are narrower
+  than what the interpreter accepts and that is the honest cost of compiling.
+
+- `docs/api/` covers `kober.ops`, `kober.pygen` and `kober.runtime`;
+  `docs/dev/architecture.md` gains the compiler's half of the module map and
+  restates the read-position invariant; `docs/dev/testing.md` explains the
+  differential and why an awkward-spec corpus exists; `docs/index.md` and the
+  README show what `compile` produces. `docs/format/` is unchanged — the spec
+  language did not change.
+
 - `docs/format/` — the spec-format reference, which is the product's real
   surface and previously had no documentation anywhere: `DESIGN.md` describes
   the Python model, not the YAML an author types. `document.md` covers the top

@@ -1,6 +1,6 @@
 # Phase plan: the compiler
 
-**State: live.** Written after the documentation phase landed, against
+**State: done.** Written after the documentation phase landed, against
 `DESIGN.md` revision 6, and on the evidence in
 [`CODEGEN-ANALYSIS.md`](CODEGEN-ANALYSIS.md).
 
@@ -636,11 +636,23 @@ before: a fuzzed capture of datagrams, and a fuzzed byte stream with a hole in
 it, driven through both implementations and compared block for block. That is
 the shape the seam rules exist for.
 
-### Stage 8 — documentation
+### Stage 8 — documentation — **done**
 
 `docs/format/` gains nothing; the spec language does not change. `docs/dev/`
 gains a compiler page, `docs/api/` the new modules, and `DESIGN.md` gains a
 section — including the restatement below.
+
+All four. `docs/dev/compiler.md` is the page, `DESIGN.md` gains §14 and
+**revision 7**, and §2.1 says what is now true of both implementations rather
+than what was true when only one existed. `docs/format/` is untouched, as
+predicted — the one language change of the phase was a *fix* that made
+`true` and `false` work as the reference already documented them.
+
+The restatement is the part worth reading. The cursor rule was true by
+impossibility; it is now a property of one program, and the argument for why
+that is still defensible rests on the comparison rather than on assertion —
+with the four interpreter bugs the comparison found as the evidence that it is
+not wishful.
 
 ## What has to be restated, not just extended
 
@@ -669,15 +681,41 @@ carelessness.
   for one line, and it costs immutability that was deliberate. A separate
   decision on its own merits; 1.5× and 56× are not alternatives.
 
-## Acceptance
+## Acceptance — all five
 
-1. `kober compile examples/dns.yaml -o dns.py` produces a module that decodes
+1. ✅ `kober compile examples/dns.yaml -o dns.py` produces a module that decodes
    the real DNS capture into a conformant `.zpf`, clean under
-   `ConformanceChecker` and `check_coverage`.
-2. The differential test passes over both example specs and the fuzz corpora:
-   same values, same ranges, same records as the interpreter.
-3. Generated modules pass `ruff` and are readable — someone can open one and
-   see what their protocol decodes to.
-4. The measured throughput is within reach of the analysis's 16.8 MB/s ceiling.
-   If it is not, the reason is understood and written down.
-5. `DESIGN.md` §2.1 says what is actually true of both implementations.
+   `ConformanceChecker` and `check_coverage`. Tested by compiling to a file,
+   importing it, and driving it over a capture.
+2. ✅ The differential passes over both example specs, an awkward-spec corpus,
+   and the fuzz corpora — and does more than the criterion asked: the two write
+   **byte-identical files**, block for block, at every granularity.
+3. ✅ Generated modules pass `ruff` with this project's own configuration, and
+   `tests/compiled_dns.py` is one of them, checked in and compared character for
+   character so a diff in generated code is reviewable like any other.
+4. ✅ 4.7–8.8 MB/s against a ceiling measured without bounds checks, byte ranges
+   or field paths. What separates 3.3 µs from that 1.7 is exactly those three,
+   and each is something the phase promised rather than overhead. The reason is
+   understood and written down either way, in Q5.
+5. ✅ `DESIGN.md` §2.1 says what is true of both, and says which of the two it is
+   true of *by construction* — which is not the same thing, and is the point.
+
+## What the phase actually produced
+
+Worth stating plainly, because it is not what the plan predicted.
+
+**The compiler works and is fast**: 20.6× at field granularity, a typed API, a
+runtime a generated module can ship against, and a CLI verb. That was the goal.
+
+**The differential found five bugs, four of them in the interpreter or in code
+both implementations share.** Two places a partial decode was thrown away, a
+`switch` case that wrote no record, a computed value that raised out of the
+emitter, and one — a missing helper — in the compiler. None had a failing test.
+The plan sold differential testing as insurance for the *new* implementation;
+it has mostly been an audit of the old one.
+
+**Two predictions were wrong in ways worth keeping.** Q5 attributed a 6.6×
+speedup to reading directly rather than to knowing where to read, and it
+expected exact truncation to need a fast path with a fallback. Both are recorded
+above with the measurements that replaced them, because a plan that only records
+its correct guesses is a worse document than one that does not.
