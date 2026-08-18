@@ -190,6 +190,31 @@ def test_reference_into_a_nested_unit():
     assert tree.find("body").value == b"xy"
 
 
+def test_a_nested_unit_that_failed_part_way_keeps_what_it_decoded():
+    """Found by the compiler's differential test, which is what it is for.
+
+    A generated decoder emits as it reads, so it had already reported the two
+    fields below by the time the third ran out. The interpreter used to throw
+    the whole nested unit away, leaving the emitter to name bytes ``truncated``
+    that had in fact been read and understood.
+    """
+    fields = "      - {name: h, type: {unit: header}}"
+    extra = """
+  header:
+    fields:
+      - {name: a, type: {int: {bits: 8}}}
+      - {name: b, type: {int: {bits: 8}}}
+      - {name: c, type: {int: {bits: 8}}}
+"""
+    tree = decode(fields, b"\x01\x02", extra_units=extra)
+    assert tree.status is NodeStatus.TRUNCATED
+    nested = tree.find("h")
+    assert nested is not None, "the nested unit was discarded"
+    assert nested.status is NodeStatus.TRUNCATED
+    assert [child.value for child in nested.children] == [1, 2, None]
+    assert (nested.off_start, nested.off_end) == (0, 2)
+
+
 def test_unit_parameters():
     fields = '      - {name: b, type: {unit: {name: body, args: ["4"]}}}'
     extra = """

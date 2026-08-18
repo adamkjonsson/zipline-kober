@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from kober.errors import ExprError
+from kober.errors import ExprError, SpecError
 from kober.expr import ExprType, infer_type, unparse
 from kober.spec import (
     BytesType,
@@ -59,7 +59,7 @@ from kober.spec import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from kober.expr import Expr
+    from kober.expr import Expr, Scope
     from kober.spec import FieldType, SizeSpec, Spec
 
 
@@ -111,6 +111,64 @@ def check(spec: Spec) -> tuple[Finding, ...]:
     return _Checker(spec).run()
 
 
+def require_valid(spec: Spec) -> None:
+    """Refuse a spec that has errors, listing every one of them.
+
+    The counterpart of :func:`check` for callers that cannot proceed on a
+    broken spec — the decode engine and the compiler both rely on what a clean
+    check proves, so both refuse rather than promise it by hand.
+
+    Args:
+        spec: The spec to validate.
+
+    Raises:
+        SpecError: If the spec has any ``ERROR`` finding. Warnings do not stop
+            it: they say something is probably not what the author meant, not
+            that it cannot be run.
+
+    """
+    errors = [finding for finding in check(spec) if finding.severity is Severity.ERROR]
+    if errors:
+        listed = "\n  ".join(str(finding) for finding in errors)
+        msg = f"spec {spec.name!r} has {len(errors)} error(s):\n  {listed}"
+        raise SpecError(msg)
+
+
+def scope_at(spec: Spec, unit: str, index: int, *, element_of: str | None = None) -> Scope:
+    """Return the scope an expression at one field's position resolves against.
+
+    The compiler needs exactly what the checker computes — which names are
+    visible where, and what type each has — and **one** implementation of that
+    is the point: a second would be a second set of scoping rules, drifting
+    from the rules the checker enforces.
+
+    Args:
+        spec: The spec the unit belongs to.
+        unit: Name of the unit the expression is written in.
+        index: Position of the field the expression belongs to. A field sees
+            its unit's parameters and every *named* field declared before it,
+            so ``index`` is what makes the answer precise.
+        element_of: Name of the field an enclosing ``until`` repeats. That
+            field alone resolves to its element type rather than being refused
+            as a list, because ``until`` runs once per element with that
+            element in hand.
+
+    Returns:
+        A :class:`kober.expr.Scope` to hand to :func:`kober.expr.infer_type`.
+
+    Raises:
+        SpecError: If ``unit`` is not a unit of ``spec``.
+
+    Example:
+        >>> scope = scope_at(spec, "message", 3)
+        >>> infer_type(expr, scope, unparse(expr))
+        <ExprType.INT: 'int'>
+
+    """
+    target = spec.unit(unit)
+    return _Scope(_Checker(spec), target, _visible_names(target, index), element_of)
+
+
 def _walk_types(kind: FieldType) -> Iterator[FieldType]:
     """Yield a field type and every type nested inside it."""
     yield kind
@@ -160,6 +218,7 @@ class _Checker:
         # Field index is what makes `parent` visibility precise: a parent's
         # later fields are not decoded when the child runs.
         self.parents: dict[str, list[tuple[Unit, int]]] = {}
+        self._index_parents()
 
     def report(self, severity: Severity, where: str, message: str) -> None:
         """Record one finding."""
@@ -175,7 +234,6 @@ class _Checker:
 
     def run(self) -> tuple[Finding, ...]:
         """Run every check and return the findings."""
-        self._index_parents()
         self._check_entry()
         for unit in self.spec.units.values():
             self._check_unit(unit)

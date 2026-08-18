@@ -61,6 +61,19 @@ class Cursor:
         return self._base
 
     @property
+    def data(self) -> bytes:
+        """The run this cursor reads.
+
+        Generated code reads the buffer itself — it is the difference between a
+        method call per field and an index — so it has to be able to ask for it.
+        That is a real weakening of §2.1's rule that nothing outside this class
+        moves the read position, and the answer is that the rule becomes a
+        property of the *generator*: it emits patterns that claim what they read,
+        and hands the position back through :meth:`seek` when it is done.
+        """
+        return self._data
+
+    @property
     def size(self) -> int:
         """The run's length in bytes."""
         return len(self._data)
@@ -108,6 +121,28 @@ class Cursor:
         start = self._base + low // _BITS_PER_BYTE
         end = self._base + (high + _BITS_PER_BYTE - 1) // _BITS_PER_BYTE
         return start, end
+
+    def slice(self, off_start: int, off_end: int) -> bytes:
+        """Return the bytes of an absolute range, without moving the position.
+
+        For a record whose payload *is* the input: a whole-message record cites
+        the bytes it copies, and whoever emits it needs them. Reading is what
+        moves the position, and this does not read — it hands back a range the
+        cursor has already passed over.
+
+        Args:
+            off_start: First byte, in the stream's offset space.
+            off_end: One past the last.
+
+        Returns:
+            The bytes. Clipped to the run, so a range that runs past its end
+            comes back short rather than raising: a caller asking about bytes
+            this run does not hold is asking about bytes nobody has.
+
+        """
+        start = max(off_start - self._base, 0)
+        end = max(off_end - self._base, 0)
+        return self._data[start:end]
 
     def seek(self, bit: int) -> None:
         """Move to an absolute bit position within the run.

@@ -300,6 +300,50 @@ units:
     assert computed.payload == b"\x08"
 
 
+def test_a_computed_value_too_wide_for_the_vocabulary_gets_no_record():
+    """`prim:` stops at 64 bits and a computed value does not.
+
+    Found by fuzzing the compiler's corpus, which reaches `computed:` where the
+    shipped examples do not: `1 << n` with `n` off the wire is an ordinary
+    expression and an enormous number, and labelling it raised `ValueError` out
+    of the emitter — in *both* implementations. There is nothing honest to write
+    for it, so nothing is written; the bytes it would have cited belong to the
+    fields it read, which have records of their own.
+    """
+    spec = Spec.from_yaml("""
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: huge, type: {computed: "1 << n"}}
+""")
+    data = b"\xc8"
+    tree = Decoder(spec).decode_bytes(data)
+    assert tree.find("huge").value == 1 << 200
+    emissions, unclaimed = plan(spec, tree, data, emit=Emit.FIELD)
+    assert [record.comment for record in emissions] == ["t.n"]
+    assert unclaimed == []
+
+
+def test_a_computed_value_the_vocabulary_holds_still_gets_one():
+    spec = Spec.from_yaml("""
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: doubled, type: {computed: "n * 2"}}
+""")
+    tree = Decoder(spec).decode_bytes(b"\x05")
+    emissions, _ = plan(spec, tree, b"\x05", emit=Emit.FIELD)
+    assert [record.content_type for record in emissions] == ["prim:u8", "prim:u8"]
+
+
 # --- failures are named ----------------------------------------------------
 
 
@@ -323,6 +367,34 @@ units:
     assert unclaimed == []
     assert tree.off_end == 2
     assert tree.status.value == "truncated", "the reason the driver will use"
+
+
+def test_a_nested_unit_that_failed_part_way_still_cites_what_it_read():
+    """The emitting half of the interpreter fix the compiler's differential found.
+
+    The bytes a nested unit read before running out are cited by its fields, not
+    named ``truncated`` — they were read and understood, and the byte that ran
+    out is the only one that was not there.
+    """
+    spec = Spec.from_yaml("""
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: h, type: {unit: header}}
+  header:
+    fields:
+      - {name: a, type: {int: {bits: 8}}}
+      - {name: b, type: {int: {bits: 8}}}
+      - {name: c, type: {int: {bits: 8}}}
+""")
+    data = b"\x01\x02"
+    tree = Decoder(spec).decode_bytes(data)
+    emissions, unclaimed = plan(spec, tree, data, emit=Emit.FIELD)
+    assert [r.comment for r in emissions] == ["t.h.a", "t.h.b"]
+    assert unclaimed == []
 
 
 def test_a_failure_does_not_reclaim_what_was_already_cited():

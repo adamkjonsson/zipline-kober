@@ -47,6 +47,7 @@ nitpick_ignore = [
     ("py:class", "datetime"),
     ("py:class", "datetime.datetime"),
     ("py:class", "enum.Enum"),
+    ("py:class", "enum.IntEnum"),
     ("py:class", "os.PathLike"),
     ("py:class", "Path"),
     ("py:class", "pathlib.Path"),

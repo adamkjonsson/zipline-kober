@@ -8,12 +8,13 @@ into a [Zipline](https://github.com/adamkjonsson/zipline) decode stage — a
 input bytes it came from. It is a CLI backed by a Python API, and everything
 the CLI does is reachable from the API.
 
-> ⚠️ **Early, and not released.** All four CLI verbs work and a spec decodes
-> real `.zpf` files at message or field granularity, checked against `zpf`'s
-> own conformance and coverage checkers. It has been exercised on small
-> hand-built captures rather than in anger. See [DESIGN.md](DESIGN.md) for the
-> reasoning, and for which claims were verified against `zpf` rather than
-> merely reasoned about.
+> ⚠️ **Early, and not released.** All five CLI verbs work: a spec decodes real
+> `.zpf` files at message or field granularity, checked against `zpf`'s own
+> conformance and coverage checkers, and `compile` turns one into a Python
+> module that does the same about twenty times faster. It has been exercised on
+> small hand-built captures and adversarial input rather than in anger. See
+> [DESIGN.md](DESIGN.md) for the reasoning, and for which claims were verified
+> against `zpf` rather than merely reasoned about.
 
 ## Writing and checking a spec
 
@@ -93,6 +94,37 @@ message  [0, 29)
 
 Unlike `run`, it fails when the decode did not complete — answering that is the
 point of it.
+
+## Compiling
+
+`compile` turns a spec into a Python module with a typed API. The module reads
+bytes without this project's loader, checker, or spec model — only
+`kober.runtime` — so a protocol decoder becomes something you can ship:
+
+```console
+$ kober compile dns.yaml -o dns.py --emit field
+dns.py: 5 unit(s), field granularity
+```
+
+```python
+>>> import dns
+>>> from kober.runtime import span
+>>> message = dns.decode(payload)
+>>> message.questions[0].qname.labels[0].text
+'example'
+>>> span(message, "qdcount")
+(4, 6)
+```
+
+Fields are `int` and `str` rather than a generic tree, so an editor can complete
+them and a typo is an error at import time instead of `None` at runtime. Byte
+ranges live beside the values rather than wrapping them, which is what keeps a
+decode cheap. `kober.run_compiled` drives such a module over a `.zpf` file
+exactly as `run` drives the interpreter.
+
+The interpreter is not going anywhere: it is what `try` should always use, and
+it is the reference implementation the generated code is tested against — the
+two must produce the same file for the same input.
 
 Everything the CLI does is reachable from the API:
 

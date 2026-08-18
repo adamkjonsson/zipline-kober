@@ -1,4 +1,4 @@
-"""Adversarial input must not break the decoder's promises.
+"""Adversarial input must not break the *interpreter's* promises.
 
 `kober.decoder` promises that **failure never escapes a decode**: a decoder
 that raises leaves its input unaccounted for, and coverage is a promise about
@@ -6,31 +6,19 @@ output (``DESIGN.md`` §2). `kober.emit` promises that a byte is never both
 cited and marked undecoded. Neither promise is testable by example — they are
 claims about *all* input — so this fuzzes.
 
-**Why this exists.** The technique came from `packeteer`, whose ``fuzz`` verb
-generates adversarial variants for exactly this. Run end to end
-(``packeteer fuzz`` → ``zpfwire convert`` → ``kober run``) it found a real
-conformance bug the whole hand-built suite had missed: a seam rule that fired
-on `Gap` only, where `zpf` needs one after any *hole*-class region. See
-``plans/REAL-CAPTURE-PHASE-PLAN.md`` §13.5 and the README for that pipeline,
-which is deeper than this file and needs both sibling checkouts.
-
-What is here is the part that should run every time, so it depends on nothing
-outside the standard library. By the time bytes reach the decoder the transport
-layers are gone and what is left is payload, so the mutations that actually
-reach it are the payload-level ones — truncate, extend, flip, replace — and
-those are cheap to generate directly.
-
-Seeded, so a failure is reproducible from the case it prints rather than being
-a story about a run that happened once.
+The same promises are made by a decoder the compiler wrote, and
+``test_compiled.py`` holds it to them with the same mutations, from
+:mod:`fuzzing`. Sharing the inputs is the point: the two implementations must
+agree about the awkward ones, and they cannot be compared over inputs that
+differ.
 """
 
 from __future__ import annotations
 
-import random
-import struct
 from pathlib import Path
 
 import pytest
+from fuzzing import SEEDS, cases
 
 from kober.decoder import Decoder
 from kober.emit import plan
@@ -38,62 +26,6 @@ from kober.node import Node, NodeStatus
 from kober.spec import Emit, Spec
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
-
-#: How many mutations per seed case. Small enough to keep the suite fast,
-#: large enough that each run covers every mutation kind several times.
-ROUNDS = 60
-
-DNS_QUERY = (
-    struct.pack(">HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
-    + b"\x07example\x03com\x00"
-    + struct.pack(">HH", 1, 1)
-)
-
-HTTP_REQUEST = b"GET / HTTP/1.1\r\nHost: httpforever.com\r\nAccept: */*\r\n\r\n"
-
-SEEDS: dict[str, bytes] = {"dns.yaml": DNS_QUERY, "http.yaml": HTTP_REQUEST}
-
-
-def mutate(data: bytes, rng: random.Random) -> bytes:
-    """Return one adversarial variant of ``data``.
-
-    The kinds `packeteer` calls truncate, extend, bit-flip, and boundary,
-    plus wholesale replacement — the payload-level subset, since that is what
-    survives the transport layers to reach a decoder.
-    """
-    kind = rng.randrange(6)
-    if not data:
-        return bytes(rng.randrange(256) for _ in range(rng.randrange(8)))
-    if kind == 0:  # truncate
-        return data[: rng.randrange(len(data))]
-    if kind == 1:  # extend
-        tail = bytes(rng.randrange(256) for _ in range(rng.randrange(1, 32)))
-        return data + tail
-    if kind == 2:  # bit flip
-        index = rng.randrange(len(data))
-        out = bytearray(data)
-        out[index] ^= 1 << rng.randrange(8)
-        return bytes(out)
-    if kind == 3:  # boundary value in one byte
-        index = rng.randrange(len(data))
-        out = bytearray(data)
-        out[index] = rng.choice((0x00, 0x01, 0x7F, 0x80, 0xFE, 0xFF))
-        return bytes(out)
-    if kind == 4:  # a run of bytes replaced
-        start = rng.randrange(len(data))
-        end = rng.randrange(start, len(data))
-        out = bytearray(data)
-        for index in range(start, end):
-            out[index] = rng.randrange(256)
-        return bytes(out)
-    return bytes(rng.randrange(256) for _ in range(rng.randrange(64)))
-
-
-def cases(name: str, seed: int) -> list[bytes]:
-    """Build one reproducible batch of variants for a spec's seed input."""
-    rng = random.Random(seed)
-    base = SEEDS[name]
-    return [mutate(base, rng) for _ in range(ROUNDS)]
 
 
 def check_tree(tree: Node, data: bytes) -> None:

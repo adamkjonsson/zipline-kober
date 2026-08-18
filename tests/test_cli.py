@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -39,7 +41,7 @@ units:
         type: {int: {bits: 1}}
       - name: opcode
         type: {int: {bits: 4, enum: opcode}}
-      - {name: null, type: {int: {bits: 2}}}
+      - {name: null, type: {int: {bits: 3}}}
 """
 
 WARNS_ONLY = """
@@ -161,7 +163,7 @@ def test_show_renders_the_field_tree(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert "flags: → flags" in out
     assert "qr: u1" in out
     assert "opcode: u4 enum opcode" in out
-    assert "(anonymous): u2" in out
+    assert "(anonymous): u3" in out
 
 
 def test_show_renders_sizes_repeats_and_conditions(
@@ -169,7 +171,7 @@ def test_show_renders_sizes_repeats_and_conditions(
 ):
     main(["show", write(tmp_path, GOOD)])
     out = capsys.readouterr().out
-    assert "bytes[(qdcount * 4)]" in out
+    assert "bytes[qdcount * 4]" in out
     assert "×qdcount" in out
 
 
@@ -312,6 +314,68 @@ def test_run_requires_an_output(tmp_path: Path):
     with pytest.raises(SystemExit) as caught:
         main(["run", spec, source])
     assert caught.value.code == 2
+
+
+# --- compile ---------------------------------------------------------------
+
+
+def test_compile_writes_a_module(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    out = tmp_path / "dns.py"
+    assert main(["compile", write(tmp_path, GOOD), "-o", str(out)]) == OK
+    assert "2 unit(s), message granularity" in capsys.readouterr().out
+    assert out.read_text().startswith('"""Decoder for the ``dns`` specification')
+
+
+def test_compile_writes_to_standard_output_when_asked_for_no_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    assert main(["compile", write(tmp_path, GOOD)]) == OK
+    assert "def decode(" in capsys.readouterr().out
+
+
+def test_compile_takes_the_granularity_it_compiles_for(tmp_path: Path):
+    """A compile-time choice, so it is a compile-time flag."""
+    field = tmp_path / "field.py"
+    message = tmp_path / "message.py"
+    main(["compile", write(tmp_path, GOOD), "-o", str(field), "--emit", "field"])
+    main(["compile", write(tmp_path, GOOD), "-o", str(message), "--emit", "message"])
+    assert "sink.record(" in field.read_text()
+    assert "MESSAGE_CONTENT_TYPE" in message.read_text()
+    assert "MESSAGE_CONTENT_TYPE" not in field.read_text()
+
+
+def test_compile_refuses_an_invalid_spec(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    """Errors move to build time: that is half of what compiling buys."""
+    out = tmp_path / "dns.py"
+    assert main(["compile", write(tmp_path, HAS_ERRORS), "-o", str(out)]) == FAILED
+    assert "nothing written" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_compile_reports_warnings_and_still_writes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    out = tmp_path / "warned.py"
+    assert main(["compile", write(tmp_path, WARNS_ONLY), "-o", str(out)]) == OK
+    assert "warning" in capsys.readouterr().err
+    assert out.exists()
+
+
+def test_a_compiled_module_imports_and_decodes(tmp_path: Path):
+    """The end of the line for `kober compile`: a module that reads bytes."""
+    out = tmp_path / "dns.py"
+    main(["compile", write(tmp_path, GOOD), "-o", str(out), "--emit", "field"])
+    spec = importlib.util.spec_from_file_location("compiled_cli", out)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["compiled_cli"] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        del sys.modules["compiled_cli"]
+    message = module.decode(b"\x12\x34\x00\x00\x00")
+    assert message is not None
+    assert message.id == 0x1234
 
 
 # --- try -------------------------------------------------------------------

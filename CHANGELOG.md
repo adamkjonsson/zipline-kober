@@ -268,6 +268,245 @@ installed from a checkout (see the README).
   (§3.2), so the decode engine turns it into a `truncated` region. Like
   `EvalError`, letting one escape a decode is a bug.
 
+- `kober.ops` — the language-neutral half of the compiler. `Plan.from_spec`
+  reduces a spec to `ObjectPlan`/`FieldPlan`/`ValueType`: which units exist,
+  what each field can hold, whether it repeats, and when it is present at all.
+  It carries **the spec's own names**, unmapped, and no target's decisions:
+  identifiers, keywords, and how a byte range is exposed all belong to a
+  backend, because what collides and what reads well differ by language. A
+  future Rust or C++ backend attaches here. Deliberately not an intermediate
+  representation.
+
+  Units unreachable from `entry` are left out — dead code in any target — and
+  a `switch` becomes the list of types it can decode as, since that is what a
+  target has to be able to hold. A `computed:` field's kind is the one thing a
+  spec does not state, so it is inferred through `check.scope_at`.
+
+- `kober.pygen` — the Python backend: a plan rendered as source. This stage
+  renders the **typed model** — one `slots` dataclass per unit, with the
+  annotations a consumer completes against, `list[...]` for a repeat, `| None`
+  for a `condition`, and the `__spans__` tuple that carries byte ranges — plus
+  a spec's `enums:` as module constants.
+
+  Enums are **mappings, not `IntEnum` subclasses**: a value with no label is
+  normal on the wire (DNS opcode 3 has none) and a decoder may not raise, so a
+  labelled field stays an `int` and the labels are a lookup beside it.
+
+  Names follow one rule with no exceptions: a unit becomes a `CamelCase`
+  class, a field keeps its spec name, a Python keyword gets a trailing
+  underscore, and **anything else is refused rather than renamed**. Names
+  colliding, names that are not identifiers, and names inside the namespace the
+  backend reserves for itself all raise `CompileError`, all of them reported at
+  once. An anonymous field gets no attribute at all: it is read and cited, but
+  a field with no name is not something a caller can ask for.
+
+  Author-supplied text — names, labels, `doc:` strings — never reaches source
+  by interpolation. Identifiers are validated against a whitelist and
+  everything else becomes an escaped literal or an escaped docstring, and
+  `render` parses its own output before returning it. "A spec cannot run code"
+  is partly a security property, and this is where it would be lost.
+
+- `kober.CompileError` — a valid spec cannot be expressed in the language being
+  generated. Deliberately not a `SpecError`: the spec may be perfectly valid
+  and run under the interpreter, and what collides differs by target, so this
+  is a fact about a compilation rather than about the spec.
+
+- `kober.check.require_valid` and `kober.check.scope_at`. The first refuses a
+  spec with errors, listing all of them — what `Decoder.__init__` did inline,
+  now shared with the compiler, which relies on the same guarantees. The second
+  returns the scope an expression at one field's position resolves against, so
+  the compiler asks the checker what a name means instead of implementing
+  scoping a second time and drifting from it.
+
+- `kober.pygen.render_expr`, and `kober.pygen.Binding`, which is where scope
+  binding lives — the new work in compiling an expression. A field of the unit
+  being decoded is a local; so is a parameter; a dotted path is attribute
+  access; and `parent.x` / `root.x` are **parameters the caller passes**, since
+  the parent's fields are locals in a function that has not finished running.
+  The compiler knows which of them an expression names, so it can pass exactly
+  those and skip the frame chain the interpreter needs at decode time. Inside an
+  `until` clause the repeated field's own name means the element just decoded,
+  which is what that clause is for.
+
+  Three semantics survive compilation rather than being hoped about. `/` is
+  integer division in a spec, so it becomes `//`. `and` and `or` short-circuit,
+  which Python's do identically — and a spec relies on it to guard a division,
+  so it is tested rather than assumed. A shift count this backend cannot see to
+  be in range becomes a call to a bounded helper, because `1 << n` with `n` off
+  the wire allocates until the process dies.
+
+  What does *not* survive is the interpreter's type checking: `_as_int` and
+  `_as_bool` exist because it learns types at decode time, and the checker has
+  already proved them. Division by zero survives as `ZeroDivisionError`, for a
+  generated decoder's entry point to turn into an `undecodable` region.
+
+- `kober.ops.ParamPlan` and `ObjectPlan.params` — a unit's parameters. Not
+  fields: they decode nothing and appear in no decoded instance, but they are in
+  scope for its expressions and a target has to name them somewhere.
+  `ObjectPlan.field` and `ObjectPlan.param` look either up by the name the spec
+  gives it.
+
+- `kober.ops.walk_path` and `kober.ops.Step` — resolving a reference path to the
+  fields it traverses, so a backend knows which unit each name belongs to and
+  can map it the way that language maps names. The scope word is the caller's to
+  strip, because which unit a path starts in is the only part of scoping a
+  target has an opinion about.
+
+- `kober.shift_left` and `kober.shift_right` — the language's shift bound, as
+  functions **generated code can call**. A compiler can see that `x << 3` is in
+  range and emit the operator, but not that `x << n` is; the bound has to live
+  somewhere a generated module reaches, and it has to be this one or the two
+  implementations would disagree about which inputs are decodable.
+
+- `kober.runtime` — what a generated decoder imports, and the only thing it
+  imports from this project. No spec model, no `Node`, no YAML, no checker: a
+  consumer installs `kober` and gets a decoder that reads bytes, and the
+  machinery that turned a specification into it stays behind. Mostly
+  re-exports, deliberately — a generated decoder and the interpreter read
+  through the same cursor, raise the same signals, and bound a shift the same
+  way, which is what makes the two comparable. `read_int_le` is the one wrapper
+  that earns its keep: `Cursor.read_int` takes a `kober.spec.Endian`, and this
+  is where that import happens so generated code never needs it. `span` and
+  `Spanned` moved here from the stage 1 spike.
+
+- `kober.Undecodable` — a generated decoder read its input and could not make
+  sense of it: a `switch` with no case, a negative size or count, a `confirm`
+  that did not hold, a repetition that consumed nothing, nesting past
+  `MAX_DEPTH`. The interpreter needs no equivalent because it records the
+  verdict on a `Node`; generated code has no tree to record it on, so it says so
+  by raising, and the entry point turns it into an `undecodable` region.
+
+- `kober.pygen.render_decoder` and `kober.pygen.render_entry` — the decode
+  functions, one per unit, and the two entry points. `decode(data)` returns the
+  typed object or `None`; `decode_from(cur)` takes the cursor and lets the
+  failure through, which is what a driver decoding several messages from one run
+  needs in order to say where it stopped and why.
+
+  Every field type, size and repeat, `condition`, `confirm`, `reject`, the
+  bounded loops, and the two scope words. `parent.x` and `root.x` are
+  **parameters the caller passes**: the compiler knows which outer values an
+  expression names, so it passes exactly those and needs no frame chain at
+  decode time. `root` inside the entry unit is that unit's own local, and a
+  `root` reference to a field the entry unit has not decoded yet is refused at
+  compile time — the one ordering rule the checker deliberately leaves alone,
+  because only a compiler knows the position an expression is compiled at.
+
+  Four runtime checks are **compiled away where they cannot fire**: a repeat
+  count or size from an unsigned field is never negative, a repetition whose
+  element always reads cannot spin, a codec name validated once cannot fail to
+  exist, and a depth bound is threaded only through specs that can actually
+  recurse. Where any of them can fire, the check is emitted.
+
+- `kober.ops` grew the operations a decoder needs, which is what makes the
+  neutral layer worth having for more than the object model: sizes, repeats,
+  switch `branches`, `confirm`/`reject`, and the *analyses* a backend uses to
+  drop a check — `FieldPlan.consumes`, `ObjectPlan.consumes`,
+  `ObjectPlan.recursive`, and `nonnegative`. Those are facts about the format
+  rather than about Python, so any backend gets them. `needs_parent` and
+  `needs_root` say which outer values a unit depends on, `needs_root` including
+  what the units below it need, since those values are threaded through.
+
+- Emission, which is what the compiler phase has been pointing at since its
+  first question: `kober.pygen.render_decoder` and `render_entry` take an
+  `emit`, and a generated decoder **writes records as it reads**, with the
+  field path, the content type, the `prim:` token and the payload encoding all
+  baked in as literals. No tree is built and nothing generic is walked
+  afterwards.
+
+  **Granularity is a compile-time choice**, because it is a difference in the
+  code and not in a flag: at `message` a decoder builds no field paths and
+  carries no sink at all, at `field` the path is threaded through every unit
+  function, and at `none` the message's own bytes are named rather than
+  reported. `kober.pygen.granularity` resolves it once per unit, where the
+  interpreter resolves it per node while walking a finished tree. A unit reached
+  at two different granularities is refused rather than compiled twice.
+
+  Four things a compiler knows and an interpreter has to work out: a field's
+  `prim:` token from its declared width, its payload encoding from its type, the
+  bytes a `computed:` field cites — the fields its expression read — and which
+  leaves are `emit: none` and so name their bytes `skipped`. The one payload
+  that cannot be baked is a `computed:` integer, which nothing declares a width
+  for; that goes through `kober.runtime.prim_int` and is sized by its value, as
+  the interpreter sizes it.
+
+- `kober.runtime.Sink` — the sink protocol, moved in from the stage 1 spike.
+  Its two calls are `Emission` and `Unclaimed` written as method signatures, so
+  a generated decoder is a second producer for the contract the interpreter's
+  emitter already has. `kober.runtime.cited` and `prim_int` are the two answers
+  that cannot be settled until a message arrives.
+
+- `kober.cursor.Cursor.slice` — the bytes of an absolute range, without moving
+  the position. A whole-message record's payload *is* the input, so whoever
+  emits it needs the bytes back; reading is what moves the cursor, and this does
+  not read.
+
+- `kober.ops.FieldPlan.emit` and `ObjectPlan.emit` — the spec's own `emit:`
+  settings, carried so a backend can resolve granularity without the spec.
+
+- `kober compile SPEC -o OUT.py [--emit field|message|none]` — the CLI verb, and
+  the last of `DESIGN.md` §6's list plus one. It checks the spec first and
+  writes nothing if that fails, which is what "errors move to build time" means
+  in practice, and prints the findings `kober check` would print. With no `-o`
+  it writes the module to standard output.
+
+- `kober.stage.run_compiled` and `decode_stream_compiled` — the driver for a
+  generated module, so one is runnable over a `.zpf` file without hand-written
+  glue. **The same driver as the interpreter's**: gaps are message boundaries,
+  a seam is owed after a hole, a run's tail is accounted for, and only the step
+  in the middle differs. Everything the driver does is true of a decode however
+  the decode was written, and one implementation of the seam rules is one place
+  for them to be wrong.
+
+  The interpreter's own path now writes through that sink too, which is the
+  shape Q1 argued for: `plan` gained a second producer rather than being
+  replaced, and here the two producers meet the same writer. A generated module
+  and the interpreter produce **byte-identical decoded files** for the same
+  input, which is what `tests/test_compiled.py` asserts.
+
+- Generated decoders **read the buffer at offsets the compiler resolved**,
+  rather than through a cursor. A read is an index, a bounds check is a
+  comparison against a number known when the spec was compiled, and a byte range
+  is an addition — because the compiler tracks where every field sits relative to
+  the last position only the running decode could know.
+
+  Measured on a real DNS query: **6.2 µs a message at field granularity against
+  16.6**, and 3.3 µs at message granularity against 13.8. Against the
+  interpreter that is 20.6× and 27.6×.
+
+  The win is in knowing the offsets, not in the reads: tracking the position in
+  bits and computing each range measures 6.9 µs, against 2.9 for the same reads
+  at baked offsets. And exact truncation came free — a per-field bounds check
+  against a known offset costs nothing measurable, so every field keeps its own
+  and a decode stops exactly where the interpreter stops.
+
+  One narrowing, and it belongs to the Python backend rather than the language:
+  a unit whose fields do not add up to a whole number of bytes is refused, with
+  a message saying which unit and how far into a byte it reached. The
+  interpreter carries on mid-byte and then raises out of the decode at the next
+  `bytes` field, so such a spec is nearly always a fault already.
+
+- `kober.errors.Stopped` — the base of `TruncatedRead` and `Undecodable`,
+  carrying **where** a decode stopped. Generated code keeps its position in a
+  local, so nothing else can be asked afterwards; the entry point reads it off
+  the exception and hands it back to the cursor.
+
+- `kober.cursor.Cursor.data` — the run a cursor reads. Generated code reads the
+  buffer itself, which is the difference between a method call per field and an
+  index, so it has to be able to ask for it.
+
+- The differential is now **fuzzed**. Every mutation of every example, and of a
+  corpus of specs chosen to be hard to compile, is decoded both ways and the two
+  must agree — same values, same byte ranges, same records, same regions, and
+  where a decode fails, the same offset with the same reason. Both
+  implementations are fuzzed from the same mutators, in `tests/fuzzing.py`,
+  because results over inputs that differ cannot be compared.
+
+  A generated decoder is held to the interpreter's promises too: it never
+  raises, never claims a byte it was not given, never both cites and names one,
+  and accounts for every byte of every input. And a fuzzed capture — datagrams,
+  and a byte stream with a hole in it — is driven through both and must produce
+  the same file, block for block.
+
 ### Changed
 
 - The `zpf` requirement is now `>=0.2.0,<0.3`, up from `>=0.2.0.dev0,<0.3`.
@@ -278,7 +517,73 @@ installed from a checkout (see the README).
   the API this project is built on. Not a breaking change for anyone — no
   release of this project has shipped.
 
+- `kober.expr.unparse` now emits **only the parentheses the grouping needs**.
+  It used to parenthesize everything, on the grounds that being unambiguous
+  beat being pretty; minimal grouping is unambiguous too — it is read off the
+  new `kober.expr.PRECEDENCE` table — and `((ancount + nscount) + arcount) > 0`
+  is harder to check against what you wrote than `ancount + nscount + arcount >
+  0`. Visible in `kober show`, in checker messages, and in the docstrings the
+  compiler generates. What comes out parses back to the same tree, which is now
+  a test rather than a hope.
+
+- `prim_token`, `normalize_int`, `PRIM_WIDTHS` and `TEXT_CONTENT_TYPE` moved
+  from `kober.emit` to `kober.runtime`. Still re-exported from `kober`, and
+  `kober.emit` still uses them, so nothing changes for a caller. The reason is
+  that a *generated* decoder normalizes its payloads the same way and may not
+  import `kober.emit` — it would pull in the tree and the spec model — and two
+  answers to "what is a `u4` written as" would be one too many.
+
+- The Python backend no longer reserves the plain names `cur`, `sink` and
+  `path`. Everything a generated function introduces now begins with an
+  underscore, which the backend reserved anyway, so `size`, `data` and `path`
+  are usable field names again — and they are ordinary names for a protocol
+  field.
+
 ### Fixed
+
+- **A computed value too wide for `prim:` raised out of the emitter.** `prim:`
+  stops at 64 bits and a computed value does not: `1 << n` with `n` off the wire
+  is an ordinary expression and an enormous number, and labelling one raised
+  `ValueError` through `plan()` and through a generated decoder alike. There is
+  nothing honest to write for it, so nothing is written — `kober.runtime.prim_int`
+  returns `None` and both sides skip the record. Coverage is untouched: a
+  computed field consumes nothing, and the bytes it would have cited belong to
+  the fields it read, which have records of their own.
+
+- A `switch` with both a unit case and a value case wrote **no record** for the
+  value cases. The field was treated as a container because one of its
+  alternatives was, and a container's leaves do the writing — but an integer
+  case has no leaves, only itself. Now only a field whose every alternative is a
+  unit is a container.
+
+- A signed field narrower than a byte crashed a generated decoder with a
+  `NameError`: the two's-complement helper was called and never emitted.
+
+  All three were found by fuzzing the compiler's corpus of awkward specs, none
+  had a failing test, and the first two were in code the interpreter shares.
+
+- **Two places the interpreter threw away what it had decoded.** A nested unit
+  that failed part-way was discarded whole by `_unit_ref`, and a repetition
+  whose element failed lost *every* element, because they were accumulated in a
+  list that a raise unwound past. In both cases the bytes had been read and
+  understood, and the emitter then named them `truncated` — true of the byte
+  that ran out and false of the ones before it. Now a partial nested unit is
+  returned, like a scalar field that failed always was, and elements reach the
+  caller as they are decoded.
+
+  On a three-byte DNS query the emitter used to write one record and mark
+  `[2, 3)`; it now writes six and marks nothing, which is what those bytes
+  deserve. Found by the compiler's differential test, which is what it is for: a
+  generated decoder emits as it reads, so it had already reported those fields,
+  and the disagreement was the interpreter's.
+
+- `true` and `false` now parse as **boolean literals**, which is what
+  `docs/format/expressions.md` has always said they are. Borrowing `ast.parse`
+  made them plain names, so a spec writing `condition: "true"` got a reference
+  to a field of that name and an error about it not being decoded — and
+  `unparse` rendered a `BoolLiteral` as `true`, text that meant something else
+  when read back. Python's own `True` and `False` are still accepted. A spec
+  with a field actually named `true` or `false` can no longer reference it.
 
 - A seam is now declared after **any** hole-class undecoded region, not only
   after a `Gap`. `zpf` sorts reasons into two recoverability classes and puts
@@ -332,6 +637,27 @@ installed from a checkout (see the README).
   asked for a committed example and had only test fixtures.
 
 ### Documentation
+
+- `DESIGN.md` **revision 7**: the compiler as §14, and a restatement of §2.1.
+  The cursor rule was true by impossibility — there was no author-supplied code,
+  so nothing author-supplied could move the position. Generated code ends that,
+  so the rule becomes a property of one program: the generator emits a bounds
+  check before every read, advances by what the read consumed, and cites or
+  names every byte the position passes. That is weaker than an impossibility and
+  saying so is the point; what makes it defensible is that the two
+  implementations are compared on every input the suite can generate.
+
+- `docs/dev/compiler.md` — how the compiler is put together, the seam a second
+  backend attaches to, and the invariants a change to it must not break. Plus
+  what the Python backend *refuses* and why, since both refusals are narrower
+  than what the interpreter accepts and that is the honest cost of compiling.
+
+- `docs/api/` covers `kober.ops`, `kober.pygen` and `kober.runtime`;
+  `docs/dev/architecture.md` gains the compiler's half of the module map and
+  restates the read-position invariant; `docs/dev/testing.md` explains the
+  differential and why an awkward-spec corpus exists; `docs/index.md` and the
+  README show what `compile` produces. `docs/format/` is unchanged — the spec
+  language did not change.
 
 - `docs/format/` — the spec-format reference, which is the product's real
   surface and previously had no documentation anywhere: `DESIGN.md` describes

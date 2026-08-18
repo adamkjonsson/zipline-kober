@@ -214,7 +214,7 @@ def test_unit_reference_with_arguments():
 def test_computed():
     kind = sole_field({"name": "a", "type": {"computed": "1 + 2"}}).type
     assert isinstance(kind, Computed)
-    assert unparse(kind.expr) == "(1 + 2)"
+    assert unparse(kind.expr) == "1 + 2"
 
 
 def test_switch():

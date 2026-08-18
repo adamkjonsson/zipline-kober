@@ -12,6 +12,13 @@ Every error kober raises is a :class:`KoberError`. Below that the split is by
 - :class:`EvalError` — an expression could not produce a value *for this
   input*. Not a spec fault: the spec may be perfectly valid and the wire value
   simply zero where something divided by it.
+- :class:`Undecodable` — the input was read and made no sense of. A decode-time
+  signal like :class:`EvalError`, and the compiled counterpart of a verdict the
+  interpreter records on a node rather than raising. With
+  :class:`TruncatedRead` it shares :class:`Stopped`, which carries *where* a
+  decode stopped for generated code that keeps its position in a local.
+- :class:`CompileError` — a valid spec cannot be expressed in the language
+  being generated. Not a spec fault either: what collides differs by target.
 
 :func:`kober.check.check` deliberately does **not** raise. A validator that
 stops at the first fault makes an author fix a spec one line per run, so it
@@ -67,7 +74,58 @@ class ExprError(SpecError):
         super().__init__(f"{message}{location}: {source!r}")
 
 
-class TruncatedRead(KoberError):
+class Stopped(KoberError):
+    """A decode-time failure that knows where it stopped.
+
+    Generated code keeps the read position in a local, so nothing else can be
+    asked afterwards where a decode got to — the exception has to carry it. The
+    offset is in **bytes** and absolute, and it is the first byte no record
+    claims: whoever catches this marks from there.
+
+    Attributes:
+        at: Where the decode stopped, or ``None`` when it was raised by
+            something that does not track a position — the cursor, which is
+            asked instead.
+
+    """
+
+    def __init__(self, message: str = "", at: int | None = None) -> None:
+        super().__init__(message)
+        self.at = at
+
+
+class Undecodable(Stopped):
+    """A generated decoder read its input and could not make sense of it.
+
+    A ``switch`` with no matching case and no default, a size or count that came
+    off the wire negative, a ``confirm`` that did not hold, a repetition that
+    consumed nothing, unit nesting past :data:`kober.decoder.MAX_DEPTH`. In
+    every one of them the bytes exist and were read; what failed is the reading.
+
+    The interpreter has no equivalent because it needs none: it records the
+    verdict on a :class:`~kober.node.Node` and unwinds internally. Generated
+    code has no tree to record it on, so it says so by raising, and the entry
+    point of a generated module turns it into an ``undecodable`` region. Like
+    :class:`EvalError`, letting one escape a decode is a bug.
+    """
+
+
+class CompileError(KoberError):
+    """A valid spec cannot be expressed in the language being generated.
+
+    Deliberately **not** a :class:`SpecError`. The spec may be perfectly valid
+    and run under the interpreter; what is wrong is that two of its names
+    collide in the target language, or that one of them is not an identifier
+    there. Rust reserves different words than Python and mangles different
+    characters, so this is a fact about a *compilation*, not about the spec —
+    which is why it is raised by a backend and never by the checker.
+
+    Silence is the alternative this exists to refuse: a decoder whose field
+    quietly changed name is worse than one that would not compile.
+    """
+
+
+class TruncatedRead(Stopped):
     """A read ran past the end of the available bytes.
 
     The sibling of :class:`EvalError`, and the same kind of signal: not a

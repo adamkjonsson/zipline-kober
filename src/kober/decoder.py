@@ -25,10 +25,9 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING
 
-from kober.check import Severity
-from kober.check import check as check_spec
+from kober.check import require_valid
 from kober.cursor import Cursor
-from kober.errors import EvalError, SpecError, TruncatedRead
+from kober.errors import EvalError, TruncatedRead
 from kober.expr import ExprValue, evaluate
 from kober.node import Node, NodeStatus
 from kober.spec import (
@@ -49,7 +48,7 @@ from kober.spec import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
     from datetime import datetime
     from pathlib import Path
 
@@ -186,11 +185,7 @@ class Decoder:
 
     def __init__(self, spec: Spec, *, emit: Emit = Emit.MESSAGE, check: bool = True) -> None:
         if check:
-            errors = [f for f in check_spec(spec) if f.severity is Severity.ERROR]
-            if errors:
-                listed = "\n  ".join(str(finding) for finding in errors)
-                msg = f"spec {spec.name!r} has {len(errors)} error(s):\n  {listed}"
-                raise SpecError(msg)
+            require_valid(spec)
         self.spec = spec
         self.emit = emit
 
@@ -410,10 +405,17 @@ class Decoder:
 
     def _elements(
         self, item: Field, repeat: Repeat, frame: _Frame, cursor: Cursor, depth: int
-    ) -> list[Node]:
-        """Decode a repetition's elements, guarding against a loop that cannot end."""
+    ) -> Iterator[Node]:
+        """Decode a repetition's elements, guarding against a loop that cannot end.
+
+        A generator, so that an element reaches the caller *before* anything can
+        go wrong after it. Accumulating them here and returning the list would
+        lose every one of them when the fourth of four ran out, and those three
+        were read: the same reason :meth:`_unit_ref` hands back a nested unit
+        that failed part-way rather than throwing it away.
+        """
         env = _Environment(frame)
-        elements: list[Node] = []
+        count = 0
         wanted: int | None = None
         if isinstance(repeat, Count):
             wanted = self._int(repeat.expr, env, "repeat count")
@@ -421,15 +423,14 @@ class Decoder:
                 raise _Stop(NodeStatus.UNDECODABLE, f"negative repeat count {wanted}")
 
         while True:
-            if wanted is not None and len(elements) >= wanted:
-                return elements
+            if wanted is not None and count >= wanted:
+                return
             if isinstance(repeat, ToEnd) and cursor.at_end():
-                return elements
-            if wanted is None and isinstance(repeat, ToEnd) and cursor.remaining_bits() <= 0:
-                return elements
+                return
             before = cursor.tell()
             element = self._one(item, item.type, frame, cursor, depth)
-            elements.append(element)
+            yield element
+            count += 1
             if element.status is not NodeStatus.OK:
                 # Stop rather than spin: the next element would fail the same
                 # way, and a Count read off the wire could ask for billions.
@@ -444,7 +445,7 @@ class Decoder:
                 if item.name is not None:
                     frame.named[item.name] = element
                 if self._bool(repeat.expr, _Environment(frame), "repeat until"):
-                    return elements
+                    return
 
     # --- values ------------------------------------------------------------
 
@@ -609,12 +610,19 @@ class Decoder:
         depth: int,
         env: _Environment,
     ) -> Node:
-        """Decode a nested unit instance."""
+        """Decode a nested unit instance.
+
+        A nested unit that failed part-way is **returned rather than thrown
+        away**. The enclosing unit stops on it either way — its loop appends the
+        field and then raises, which is what it already does for a scalar that
+        failed — and the difference is that everything the nested unit decoded
+        before the trouble stays in the tree. Those bytes were read and
+        understood; discarding them made the emitter name them ``truncated``,
+        which was true of the byte that ran out and false of the ones before it.
+        """
         target = self.spec.unit(kind.unit)
         args = [evaluate(argument, env) for argument in kind.args]
         node = self._unit(target, args, frame, cursor, depth + 1)
-        if node.status is not NodeStatus.OK:
-            raise _Stop(node.status, node.detail or f"unit {kind.unit!r} could not be decoded")
         # Keep the field's name, not the unit's: `header: {unit: header_v4}`
         # is referenced as `header`.
         return Node(
@@ -625,6 +633,7 @@ class Decoder:
             status=node.status,
             children=node.children,
             unit=target.name,
+            detail=node.detail,
             spec_field=item,
             resolved_type=kind,
         )

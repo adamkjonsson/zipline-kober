@@ -14,8 +14,11 @@ is what makes that a one-line change. For the same reason **nothing here reads
 a comment back** — the read side is the tree, not the file.
 
 The ``prim:`` vocabulary is closed (``u8``…``u64``, ``i8``…``i64``, ``bytes``),
-so a field whose width is not 8, 16, 32, or 64 bits has no token of its own.
-See :func:`prim_token`.
+so a field whose width is not 8, 16, 32, or 64 bits has no token of its own. See
+:func:`kober.runtime.prim_token`, which lives in the runtime rather than here
+because a *generated* decoder normalizes its payloads the same way and may not
+import this module — and two answers to "what is a ``u4`` written as" would be
+one too many.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from kober.expr import references
 from kober.node import NodeStatus
+from kober.runtime import TEXT_CONTENT_TYPE, normalize_int, prim_int, prim_token
 from kober.spec import Computed, Emit, IntType
 
 if TYPE_CHECKING:
@@ -32,14 +36,6 @@ if TYPE_CHECKING:
 
     from kober.node import Node
     from kober.spec import Spec
-
-#: The widths `zpf`'s closed ``prim:`` integer vocabulary can label, in bytes.
-PRIM_WIDTHS = (1, 2, 4, 8)
-
-#: How a text field's payload is labelled. Not ``prim:`` — that scheme has no
-#: text token — so the format's other fully-specified scheme is used instead.
-TEXT_CONTENT_TYPE = "mime:text/plain; charset=utf-8"
-
 
 @dataclass(frozen=True)
 class Emission:
@@ -99,66 +95,13 @@ def field_path(names: Sequence[str | None]) -> str:
     return ".".join(name if name is not None else "_" for name in names)
 
 
-def prim_token(bits: int, signed: bool) -> str:
-    """Return the ``prim:`` token for an integer of ``bits`` width.
-
-    `zpf`'s ``prim:`` vocabulary is **closed** — 8, 16, 32, and 64 bits, signed
-    or not — so a width outside it has no token. Rather than drop to ``dec:``
-    and lose the normative typing §4.1 fought to keep, the value is widened to
-    the smallest token that holds it: a four-bit field is written as
-    ``prim:u8``.
-
-    The payload is *created* rather than copied, so this is honest about the
-    value — a ``u4`` holding 5 really is the integer 5 — and any reader gets
-    the right number without our registry. What is lost is the field's exact
-    width, which the format has nowhere to record anyway; ``cites`` already
-    rounds a sub-byte field out to its containing byte for the same reason.
-
-    Args:
-        bits: The declared width.
-        signed: Whether the field is two's complement.
-
-    Returns:
-        A token such as ``"u8"`` or ``"i32"``.
-
-    Raises:
-        ValueError: If ``bits`` exceeds the widest token.
-
-    """
-    needed = (bits + 7) // 8
-    for width in PRIM_WIDTHS:
-        if needed <= width:
-            return f"{'i' if signed else 'u'}{width * 8}"
-    msg = f"no prim: token holds a {bits}-bit integer"
-    raise ValueError(msg)
-
-
-def normalize_int(value: int, bits: int, signed: bool) -> bytes:
-    """Encode an integer as its ``prim:`` token requires: little-endian.
-
-    ``prim:`` is little-endian by definition, so a big-endian wire value is
-    re-encoded here. That the payload then differs from the bytes it cites is
-    fine and **[verified]** — a decode stage's records are created, not copied.
-
-    Args:
-        value: The decoded value.
-        bits: The declared width, which decides the token's width.
-        signed: Whether to encode as two's complement.
-
-    Returns:
-        The payload.
-
-    """
-    token_bytes = int(prim_token(bits, signed)[1:]) // 8
-    return value.to_bytes(token_bytes, "little", signed=signed)
-
-
 def _int_bits(node: Node) -> tuple[int, bool]:
     """Return the declared width and signedness behind an integer node."""
     kind = node.resolved_type
     if isinstance(kind, IntType):
         return kind.bits, kind.signed
-    # A Computed integer has no declared width; size it by its magnitude.
+    # A Computed integer has no declared width; `kober.runtime.prim_int` sizes
+    # it by its magnitude, and this is only reached for the declared ones.
     value = node.value
     magnitude = abs(value) if isinstance(value, int) else 0
     bits = max(8, magnitude.bit_length() + 1)
@@ -359,6 +302,13 @@ def _leaf(node: Node, path: list[str | None], parent: Node) -> Emission | None:
         return Emission(payload, TEXT_CONTENT_TYPE, off_start, off_end, field_path(path))
     if isinstance(value, bool):
         return Emission(bytes([int(value)]), "prim:u8", off_start, off_end, field_path(path))
+    if isinstance(node.resolved_type, Computed):
+        # Nothing declared its width, so the value decides it — and a value
+        # wider than the vocabulary gets no record. See `kober.runtime.prim_int`.
+        labelled = prim_int(value)
+        if labelled is None:
+            return None
+        return Emission(*labelled, off_start, off_end, field_path(path))
     bits, signed = _int_bits(node)
     payload = normalize_int(value, bits, signed)
     token = prim_token(bits, signed)

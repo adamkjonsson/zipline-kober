@@ -1,7 +1,8 @@
 # Testing
 
-The suite is native `pytest`, in `tests/`, run with `.venv/bin/pytest`. It is
-fast — under a second — and every test must stay green on every change.
+The suite is native `pytest`, in `tests/`, run with `.venv/bin/pytest`. It takes
+about ten seconds, most of it fuzzing, and every test must stay green on every
+change.
 
 What makes it worth reading before writing a test here: **example-based tests
 verify the code against its author's reading of the format.** Real captures and
@@ -23,9 +24,37 @@ itself came from the second kind, and none of them needed a clever test.
 | `test_emit.py` | What the emitter *decides*, with no file involved: granularity resolution, `prim:` widening, field paths, coverage arithmetic. |
 | `test_emit_conformance.py` | What `zpf` *accepts*: real files written through a decode stage and put past `ConformanceChecker` and `check_coverage`. |
 | `test_stage.py` | The driver: gaps, seams, shape dispatch, chaining, timestamps, `content_registry`. |
-| `test_cli.py` | All four verbs, driving `main()` directly. |
+| `test_cli.py` | All five verbs, driving `main()` directly. |
 | `test_examples.py` | The shipped `examples/` specs — they must check clean, carry documentation, and still decode. |
-| `test_fuzz.py` | **The invariants**, over adversarial input. See below. |
+| `test_ops.py` | The compiler's neutral plan: what it carries about a format, and what it deliberately does not carry about a target. |
+| `test_pygen.py` | The Python backend: names and the refusals, expression rendering, and that its output passes `ruff` and is the module checked into `tests/compiled_dns.py`. |
+| `test_compiled_dns.py` | That checked-in module from a consumer's side: typed fields, byte ranges, enum labels. |
+| `test_compiled.py` | **The differential**, and the fuzzing of it. See below. |
+| `test_fuzz.py` | **The interpreter's invariants**, over adversarial input. See below. |
+| `fuzzing.py` | Not a test: the mutators, shared so both implementations are fuzzed with the same inputs. |
+
+## Two implementations, and the test that compares them
+
+`kober` decodes a spec two ways: `Decoder` interprets it, and `kober compile`
+turns it into a module. Neither's own tests can catch a decoder that is
+confidently wrong, so the strongest test here is that **they agree**:
+
+- the same values and the same byte ranges, field by field, unit by unit;
+- the same records and the same undecoded regions, in the same order;
+- the same **file**, block for block, when both are driven over a capture;
+- and where a decode fails, the same offset with the same reason.
+
+That comparison is `test_compiled.py`, and it earns its cost. Four bugs have
+come out of it so far, every one of them in the *interpreter* or in code both
+share: two places a partial decode was thrown away, a `switch` case that wrote
+no record, and a computed value too wide for `prim:` raising out of the emitter.
+None had a failing test before, and none would have been found by reading.
+
+**A construct the shipped examples do not use gets a spec in that file's
+awkward corpus**, not only an example — bitfields that do not divide a byte, a
+switch whose branches differ in width, a computed value, every size a spec can
+write. The compiler's arithmetic about *where a field is* is exactly the kind of
+thing that stays right on `dns.yaml` and wrong everywhere else.
 
 ## Fuzzing is standard, not optional
 
@@ -48,6 +77,10 @@ It generates payload-level mutations — truncate, extend, bit-flip, boundary,
 replace — because that is what actually reaches a decoder. By the time bytes
 get there the transport layers are gone.
 
+**Both implementations are fuzzed with the same inputs**, from `fuzzing.py`.
+That is not tidiness: the differential can only compare results over inputs that
+match, and the mutations that break one are the ones worth showing the other.
+
 ## The deeper pipeline
 
 The in-suite fuzzing covers the engine and the emitter. It **cannot reach the
@@ -68,6 +101,16 @@ Two sibling checkouts, neither a dependency of this project:
 
 Then put the output past `zpf.ConformanceChecker` and `zpf.check_coverage`.
 **Run this before a release, or after touching `stage.py`.**
+
+The compiled path is worth running over the same file, since both drive the same
+`stage.py` and should write the same one:
+
+```bash
+.venv/bin/kober compile examples/dns.yaml -o /tmp/dns.py --emit field
+.venv/bin/python -c "import sys; sys.path.insert(0, '/tmp'); import dns, kober; \
+    kober.run_compiled(dns, '/tmp/fuzz.zpf', '/tmp/compiled.zpf', \
+                       produced_by='kober', produced_at=0)"
+```
 
 - [`python-zipline-wire`](https://github.com/adamkjonsson/python-zipline-wire)
   converts real captures to `.zpf`. Its `tests/captures/` holds fourteen,

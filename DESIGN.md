@@ -2,8 +2,9 @@
 
 **Status:** implemented and exercised against real captures, not released.
 The spec model, expression language, checker, decode engine, emitter, stage
-driver, and all four CLI verbs exist. What is *not* built is marked as such:
-the `Pointer` construct (§3.2), and everything in §11 that is still a question.
+driver, all five CLI verbs, and the **compiler** (§14) exist. What is *not*
+built is marked as such: the `Pointer` construct (§3.2), and everything in §11
+that is still a question.
 
 **Sections marked [verified] were executed, not reasoned about** — against
 `zpf` by [`pressure_test.py`](pressure_test.py), and since revision 6 against
@@ -43,6 +44,14 @@ the code it tests, and each of the four findings was invisible to all of them:
 compression pointers, text-derived framing, a repeat named twice, and a seam
 rule that was too narrow. None needed a clever test. They needed input nobody
 had simplified first.
+
+Revision 7 adds the compiler (§14) — a second way to run a spec, alongside the
+interpreter rather than instead of it — and **restates §2.1**, which had claimed
+an impossibility that generated code ends. The cursor rule is now a property of
+one program rather than of the language, and what makes that defensible is that
+the two implementations are compared on every input the suite can produce. Which
+also produced the revision's other content: five bugs, four of them in the
+interpreter or in code both share.
 
 Claims below marked **[verified]** were executed, not reasoned about: against
 `zpf` 0.16 by the script in §10, and against real captures as recorded in §13.
@@ -139,6 +148,44 @@ It also names the invariant the decode loop must enforce when it is built: the
 cursor is the runtime's, advanced only by declarative constructs, and any
 future extension point (§11.5) gets values and returns values, never the
 position.
+
+#### What compiling changed about this — revision 7
+
+The rule above was true *by impossibility*: there was no author-supplied code,
+so nothing author-supplied could move the cursor. There is now. A compiled
+decoder (§14) keeps its read position in a local variable and reads the buffer
+by index, because that is worth about five times the arithmetic a cursor costs
+— and it is code generated from a spec, which is as author-supplied as anything
+here gets.
+
+So the invariant changes character rather than lapsing, and the change has to be
+argued rather than glossed:
+
+- **Interpreted, it remains an impossibility.** `kober.decoder` reaches the
+  bytes only through `kober.cursor.Cursor`, and a spec has no way to reach past
+  it. Nothing about that path is weakened by the existence of another.
+- **Compiled, it becomes a property of one program.** The generator emits the
+  position arithmetic, and a spec cannot influence *how* — only how many fields
+  of what widths. Every read it emits is preceded by the bounds check for that
+  read, every advance is by an amount that read consumed, and every byte the
+  position passes is cited by a record or named by a region. The spec decides
+  what to read; the generator still decides where.
+
+That is a weaker guarantee than an impossibility, and pretending otherwise
+would be the quiet falsehood this section exists to correct. What makes it
+defensible is not the argument but the check: **the two implementations are
+compared on every input the test suite can generate**, and they must produce the
+same values, the same byte ranges, the same records and the same undecoded
+regions. A generator that emitted a position error would have to make the
+interpreter make the same one, and the interpreter still cannot.
+
+The evidence that this is not wishful is which way the disagreements have gone.
+Four of the five bugs the comparison has found were in the **interpreter** or in
+code both share — two places a partial decode was discarded, a `switch` case
+that wrote no record, a computed value that raised out of the emitter — and one
+was in the compiler. The cursor rule survives as a claim about a *pair* of
+implementations that agree, which is a different and more testable thing than a
+claim about one.
 
 ## 3. Spec model
 
@@ -490,13 +537,33 @@ children, status). It is deliberately *not* written to the file — it is what
 it out of the file is what avoids inventing a parallel representation
 alongside `zpf`'s.
 
+The compiler's half of the same surface, added in revision 7 (§14):
+
+```python
+from kober import Plan, render_spec, run_compiled
+
+source = render_spec(spec, emit=Emit.FIELD)     # a module, as text
+Path("dns.py").write_text(source)
+
+import dns                                       # no kober loader, checker or
+message = dns.decode(payload)                    # spec model at decode time
+message.questions[0].qname.labels[0].text        # -> 'example'
+span(message, "qdcount")                         # -> (4, 6)
+
+run_compiled(dns, "raw.zpf", "decoded.zpf", produced_by="kober 0.1", produced_at=0)
+```
+
+A generated module imports :mod:`kober.runtime` and nothing else from here, so
+a decoder built from a spec ships without the machinery that built it.
+
 CLI, one verb per API entry point:
 
 ```
-kober run    SPEC IN.zpf -o OUT.zpf [--emit field|message]
-kober check  SPEC                      # validate + type expressions
-kober show   SPEC                      # human-readable field tree
-kober try    SPEC --hex 0a0b           # decode one buffer, print tree
+kober run     SPEC IN.zpf -o OUT.zpf [--emit field|message]
+kober check   SPEC                      # validate + type expressions
+kober show    SPEC                      # human-readable field tree
+kober try     SPEC --hex 0a0b           # decode one buffer, print tree
+kober compile SPEC -o dns.py            # write a decoder for it, as Python
 ```
 
 ## 7. Example spec
@@ -790,3 +857,136 @@ which is the argument for this phase existing.
 That last one also produced the phase's one reassuring result: across those 340
 adversarial datagrams the decoder **raised nothing**, which is the promise
 `kober.decoder` makes and the first time anything tried to break it.
+
+## 14. The compiler — a second way to run a spec
+
+Revision 7. `kober compile` turns a spec into a Python module with a typed API.
+The interpreter stays: it is what `try` should always use, it is where
+exploratory work belongs, and it is the reference implementation the generated
+code is checked against. Neither replaces the other, and the reason to have both
+is stronger than either.
+
+### 14.1 Why, and what the measurements said
+
+The proposal began as "make it faster" and the measurements changed what it was
+about. Interpreting `examples/dns.yaml` costs 91 µs a message, of which the
+largest single entry is `Node.__init__` — forty nodes per message, built so that
+a *generic* walker can rediscover at decode time what a compiler already knows:
+a field's path, its `prim:` token, its granularity, whether it is anonymous.
+
+So a generated decoder that still built a `Node` tree would recover about a
+quarter of the gap. **The typed API and the speed are the same win**, not two
+that arrive together: the typed objects are what replaces the tree, and the tree
+is where the time goes. A generic tree is a decoder's internal representation
+leaking into its public API, and the cost is that flaw measured in microseconds.
+
+Measured on the same query, at field granularity with every record written:
+**6.2 µs against the interpreter's 126.6**, or 20.6×. At message granularity,
+3.3 against 90.6. The full analysis is
+[`plans/CODEGEN-ANALYSIS.md`](plans/CODEGEN-ANALYSIS.md); what was actually
+built and what it cost is [`plans/COMPILER-PHASE-PLAN.md`](plans/COMPILER-PHASE-PLAN.md).
+
+### 14.2 The shape
+
+```
+  Spec ──→ Plan ──→ backend ──→ source text ──→ a module that imports
+        (kober.ops)  (kober.pygen)               kober.runtime and nothing else
+```
+
+The middle layer is **language-neutral**, and the rule that decides what belongs
+there is: it describes *what the format means*, a backend decides *how a
+language says it*. A field has a byte range and a value of some kind — meaning.
+Whether that range is a dunder, a parallel array or an accessor, and whether a
+name grows a trailing underscore to dodge a keyword, is a target's business. So
+a plan carries the spec's own names, unmapped: Rust reserves different words and
+mangles different characters, and a plan holding Python identifiers would hand a
+second backend a mapping made for the wrong language.
+
+It is **not** an intermediate representation and should not become one. It is
+the ordered description a backend walks, with the spec's indirections resolved
+and nothing invented — plus the analyses any backend would want and none should
+repeat: which repetitions provably make progress, which counts cannot be
+negative, which units can reach themselves, and which outer values each unit
+actually needs.
+
+Emitting Rust or C++ later means a second backend, not a second interpreter.
+That is the whole reason for the seam, and it cost one module to leave open.
+
+### 14.3 What a generated module is
+
+One `slots` dataclass per unit, with the annotations a consumer completes
+against: `int`, `str`, a class per unit, `list[…]` for a repeat, `| None` for a
+`condition`. Byte ranges live **beside** the values in one flat `__spans__`
+tuple per object — the object's own extent, then a pair per attribute — read
+back by `kober.runtime.span`. A wrapper per field would reintroduce exactly the
+allocation this exists to remove.
+
+Enums are **mappings, not `IntEnum` subclasses**. A value with no label is
+normal on the wire — DNS opcode 3 has none — and a decoder may not raise, so a
+labelled field stays an `int` and the labels are a lookup beside it.
+
+Emission is **direct**: the decoder calls a sink as it reads, with the field
+path, the content type, the `prim:` token and the payload encoding all baked in
+as literals. The sink's two calls are `Emission` and `Unclaimed` written as
+method signatures, so `plan()` gained a second producer rather than being
+replaced — and the two can be compared record for record, which is the whole
+argument for keeping both.
+
+**Granularity is a compile-time choice**, because it is a difference in the
+code and not in a flag: at `message` a decoder builds no field paths at all,
+and at `field` the path is threaded through every unit function.
+
+### 14.4 Names, and refusing rather than renaming
+
+Spec names are author-chosen and need not be valid Python. A unit becomes a
+`CamelCase` class, a field keeps its spec name, a Python keyword gets a trailing
+underscore, and **anything else is a `CompileError`** — a decoder whose field
+quietly changed name is worse than one that would not compile. Two names landing
+on one identifier is the same refusal, and every problem is reported at once.
+
+An anonymous field gets no attribute at all. It is read, cited, and spelled `_`
+in a path, but a field with no name is not something a caller can ask for, and
+inventing one would be the silent mangling the rule exists to refuse.
+
+The Python backend reserves every identifier beginning with an underscore, and
+nothing else — so `size`, `data` and `path` remain usable field names, which
+matters because they are ordinary names for a protocol field.
+
+### 14.5 The security posture, which is new
+
+Generating Python from a data file is a boundary this project did not have
+before. Names, enum labels and `doc:` strings all flow toward source text, and
+"a spec cannot run code" is partly a security property.
+
+The rule is that **nothing author-supplied is ever interpolated into source**.
+Identifiers are validated against a whitelist and everything else becomes an
+escaped literal or an escaped docstring; `render` then parses its own output
+before returning it, so a generator bug is a refusal rather than a broken
+module. It is tested as a property: a spec whose enum label is a
+docstring-closing `__import__` attempt still imports, still holds the label as
+data, and touches nothing.
+
+### 14.6 What it cost, and what it found
+
+One narrowing, and it belongs to the Python backend rather than to the language:
+a unit whose fields do not add up to a whole number of bytes is refused, because
+the generated code tracks a byte offset and cannot express a unit that starts or
+ends part-way through one. Such a spec is nearly always a fault already — the
+interpreter carries on mid-byte and then raises out of the decode at the next
+`bytes` field.
+
+And five bugs, four of them in the interpreter or in code both implementations
+share:
+
+- a nested unit that failed part-way was **discarded whole**, so the emitter
+  named bytes `truncated` that had been read and understood;
+- a repetition lost **every** element when any of them failed, for the same
+  reason one level down;
+- a `switch` with both a unit case and an integer case wrote no record for the
+  integer;
+- a computed value too wide for `prim:` raised `ValueError` out of the emitter;
+- and one in the compiler: a signed sub-byte field called a helper that was
+  never emitted.
+
+None had a failing test. They were found by writing a second implementation and
+insisting the two agree, which is what §2.1's restatement now rests on.
