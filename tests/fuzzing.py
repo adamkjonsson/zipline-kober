@@ -48,68 +48,17 @@ SEEDS: dict[str, bytes] = {"dns.yaml": DNS_QUERY, "http.yaml": HTTP_REQUEST}
 #: Its answer's owner name is ``c0 0c`` — the compression pointer of RFC 1035
 #: §4.1.4, and the reason `Pointer` exists. Inlined rather than read from the
 #: sibling checkout, so this suite still stands alone.
+#:
+#: It is fuzzed against ``examples/dns.yaml``, which follows pointers. The
+#: query in :data:`SEEDS` reaches none of that code, so this is the seed that
+#: does — mutating it lands offsets past the end, forward references, targets
+#: that are not names, and pointers at bytes that were never a pointer.
 DNS_RESPONSE = bytes.fromhex(
     "183e818000010001000000001c62726f777365722d696e74616b652d7573352d"
     "64617461646f67687103636f6d0000010001c00c000100010000009f00042295"
     "429a"
 )
 
-#: A pointer-bearing spec, and the reason it is not a shipped example: those
-#: gain pointers in their own change (stage 7 of the language phase), and until
-#: then the invariants a *pointer* can break have nothing to run on. Mutating
-#: real traffic against this reaches what no hand-written case list would think
-#: to enumerate — offsets past the end, forward references, targets that are
-#: not names, and pointers at bytes that were never a pointer.
-POINTER_SPEC = """
-name: dnsptr
-version: "1.0"
-entry: message
-units:
-  message:
-    fields:
-      - {name: id, type: {int: {bits: 16}}}
-      - {name: flags, type: {int: {bits: 16}}}
-      - {name: qdcount, type: {int: {bits: 16}}}
-      - {name: ancount, type: {int: {bits: 16}}}
-      - {name: nscount, type: {int: {bits: 16}}}
-      - {name: arcount, type: {int: {bits: 16}}}
-      - {name: questions, type: {unit: question}, repeat: {count: "qdcount"}}
-      - {name: answers, type: {unit: rr}, repeat: {count: "ancount"}}
-  question:
-    fields:
-      - {name: qname, type: {unit: name}}
-      - {name: qtype, type: {int: {bits: 16}}}
-      - {name: qclass, type: {int: {bits: 16}}}
-  rr:
-    fields:
-      - {name: name, type: {unit: name}}
-      - {name: type, type: {int: {bits: 16}}}
-      - {name: class, type: {int: {bits: 16}}}
-      - {name: ttl, type: {int: {bits: 32}}}
-      - {name: rdlength, type: {int: {bits: 16}}}
-      - {name: rdata, type: {bytes: {size: {expr: "rdlength"}}}}
-  name:
-    fields:
-      - name: labels
-        type: {unit: label}
-        repeat: {until: "labels.length == 0 or labels.length >= 192"}
-  label:
-    fields:
-      - {name: length, type: {int: {bits: 8}}}
-      - name: rest
-        type:
-          switch:
-            on: "length >> 6"
-            cases:
-              0: {string: {size: {expr: "length"}}}
-              3: {unit: {name: ptr, args: ["length"]}}
-  ptr:
-    params: [{name: hi, type: int}]
-    fields:
-      - {name: lo, type: {int: {bits: 8}}}
-      - name: target
-        type: {pointer: {at: "((hi & 63) << 8) | lo", type: {unit: name}}}
-"""
 
 
 def mutate(data: bytes, rng: random.Random) -> bytes:
@@ -186,7 +135,7 @@ def cases(name: str, seed: int) -> list[bytes]:
 
 
 def pointer_cases(seed: int) -> list[bytes]:
-    """Build one batch of variants of the real pointer-bearing response.
+    """Build one batch of variants of the real response, for ``dns.yaml``.
 
     Args:
         seed: Which batch.

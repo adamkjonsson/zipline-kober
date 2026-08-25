@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fuzzing import POINTER_SPEC, SEEDS, cases, pointer_cases
+from fuzzing import SEEDS, cases, pointer_cases
 
 from kober.cursor import Cursor
 from kober.decoder import Decoder
@@ -151,13 +151,13 @@ def test_empty_and_tiny_inputs():
 #
 # A pointer is the one construct that reads somewhere other than where the
 # cursor stands, so it is the one that can break coverage in a new way. These
-# run the same promises over mutated *real* traffic, against a spec that
-# follows compression pointers. Stage 7 makes `examples/dns.yaml` such a spec;
-# until then `fuzzing.POINTER_SPEC` is what there is to fuzz.
+# run the same promises over mutated *real* traffic, against the shipped DNS
+# spec — which follows pointers, so the query in `SEEDS` reaches none of this
+# and a real response is the seed that does.
 
 
 def pointer_spec() -> Spec:
-    return Spec.from_yaml(POINTER_SPEC)
+    return Spec.from_file(EXAMPLES / "dns.yaml")
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3, 4])

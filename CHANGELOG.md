@@ -568,6 +568,29 @@ installed from a checkout (see the README).
 
 ### Changed
 
+- **Breaking: `examples/dns.yaml` decodes a whole message.** The answer,
+  authority, and additional sections are decoded rather than marked `skipped`,
+  following compression pointers into names decoded earlier. All eight messages
+  in the real capture now decode with **no undecoded regions at all**, clean
+  through `ConformanceChecker` and `check_coverage` at both granularities.
+
+  Callers reading its output must expect the new shape: `message.answers`,
+  `message.authority` and `message.additional` replace the single
+  `resource_records` field, and a label's second field is `rest` — a switch
+  holding either text or the second half of a pointer — where it was `text`.
+  Record data stays opaque bytes, which is a choice rather than a limitation.
+
+- **Breaking: `examples/http.yaml` frames a chunked body into its chunks**,
+  using `to_int` on the hexadecimal size line. Both messages in the real
+  capture decode with no undecoded regions.
+
+  It **assumes** chunked framing rather than choosing it, and says so in its
+  own `doc:`. Choosing would mean asking whether any header said `chunked`, and
+  no expression can ask anything about a *repeated* field — there is no list
+  type. A body that is not chunk-formatted therefore comes back `truncated`,
+  which is hole-class and claims a gap the stream did not have. Callers reading
+  its output get `message.body` as a list of chunks where it was opaque bytes.
+
 - The `zpf` requirement is now `>=0.2.0,<0.3`, up from `>=0.2.0.dev0,<0.3`.
   The `.dev0` floor existed only so an unreleased local checkout could satisfy
   it, and `zpf` `0.2.0` is now released and tagged. Tightening it is also a

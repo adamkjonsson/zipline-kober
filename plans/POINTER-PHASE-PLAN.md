@@ -672,7 +672,7 @@ copies of that rule would be two things to keep in step. `lower` is inline.
 Measured on the real 66-byte response: **6.5 µs against the interpreter's 203,
 31× at 10 MB/s.**
 
-### Stage 7 — the examples finished
+### Stage 7 — the examples finished — **done for DNS, partly for HTTP**
 
 `examples/dns.yaml` decodes the answer, authority, and additional sections,
 and its `skipped` disclaimer is **deleted**. `examples/http.yaml` frames the
@@ -686,6 +686,43 @@ Everything above exists to earn it.
 A gzip body is still not decoded, and `examples/http.yaml` says so — the one
 disclaimer that survives, now naming a missing *transform* rather than a
 missing *language*.
+
+**DNS is done, and it is what the phase was for.** All eight messages in
+`dns_example.pcapng` decode with **no undecoded regions at all**, conformance-
+and coverage-clean at both granularities, and the compiled module resolves a
+pointer through its typed API. The `skipped` disclaimer is gone.
+
+**HTTP is half done, and the plan's premise for the other half was wrong.**
+
+The chunked half works: `to_int` on the size line frames the real body into its
+two chunks exactly, and both messages in the capture decode with nothing left
+over. (Two, not four — the count in the acceptance criterion was mine and it
+was wrong; the capture holds one message per direction.)
+
+**`Content-Length` framing is not reachable, and not for the reason §13.2
+gave.** That section diagnosed the gap as arithmetic on a header *value*, and
+this phase built the arithmetic. Two things it did not name:
+
+- **A header value cannot be extracted.** `to_int` reads a whole string field,
+  and a header is one line — `"Content-Length: 1234"` is not a number. Getting
+  at the value needs a substring, which the language does not have, and a
+  `":"`-terminated read cannot be bounded to the line.
+- **Worse, and the real blocker: nothing can ask a question about the set of
+  headers.** `headers` is a repeated field, and the checker refuses references
+  to those because there is no list type — so a body's framing cannot depend on
+  whether *any* header said `chunked`. Even with a substring builtin, the
+  choice between the two framings would still be unsayable.
+
+So the shipped spec **assumes** chunked framing and says so. The cost is
+stated in its `doc:` and asserted in a test: a body that is not chunk-formatted
+comes back `truncated`, which is hole-class and claims a gap the stream did not
+have. That is the least comfortable thing this phase ships, and it is written
+down rather than discovered later.
+
+**What §13.2 actually needs is a way to speak about a repetition** — an
+`any`/`count` over elements, or a way to name one by a key. That is a
+language question of a different size from three builtins, and it belongs to
+its own phase rather than to the end of this one.
 
 ### Stage 8 — documentation, and what has to be restated
 

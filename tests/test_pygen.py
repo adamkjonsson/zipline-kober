@@ -347,7 +347,7 @@ def test_a_generated_object_carries_its_spans(tmp_path: Path):
     module = imported(render_spec(load("dns.yaml")), tmp_path, "dns_spans")
     label = module.Label(3, "com", (20, 24, 20, 21, 21, 24))
     assert span(label) == (20, 24)
-    assert span(label, "text") == (21, 24)
+    assert span(label, "rest") == (21, 24)
 
 
 def test_a_generated_class_has_slots_and_no_dict(tmp_path: Path):
@@ -359,10 +359,24 @@ def test_a_generated_class_has_slots_and_no_dict(tmp_path: Path):
         label.surprise = 1
 
 
-def test_an_optional_field_is_optional_and_a_repeat_is_a_list():
-    source = render_model(Plan.from_spec(load("dns.yaml")))
-    assert "questions: list[Question]" in source
-    assert "resource_records: bytes | None" in source
+def test_a_repeat_is_a_list():
+    assert "questions: list[Question]" in render_model(Plan.from_spec(load("dns.yaml")))
+
+
+def test_an_optional_field_is_optional():
+    source = render_model(
+        plan_of("""
+            name: t
+            version: "1"
+            entry: m
+            units:
+              m:
+                fields:
+                  - {name: n, type: {int: {bits: 8}}}
+                  - {name: body, type: {bytes: {size: 2}}, condition: "n > 0"}
+        """)
+    )
+    assert "body: bytes | None" in source
 
 
 def test_a_switch_becomes_a_union():
@@ -396,12 +410,22 @@ def test_an_undocumented_field_is_described_from_its_type():
     """The generator knows more than the spec's silence does."""
     source = render_model(Plan.from_spec(load("dns.yaml")))
     assert "length: An 8-bit unsigned integer." in source
-    assert "text: Text, decoded as ``utf-8``." in source
     assert "qtype: A 16-bit unsigned integer. Labelled by :data:`RRTYPE`." in source
 
 
 def test_a_conditional_field_documents_when_it_is_there():
-    source = render_model(Plan.from_spec(load("dns.yaml")))
+    source = render_model(
+        plan_of("""
+            name: t
+            version: "1"
+            entry: m
+            units:
+              m:
+                fields:
+                  - {name: n, type: {int: {bits: 8}}}
+                  - {name: body, type: {bytes: {size: 2}}, condition: "n > 0"}
+        """)
+    )
     assert "Present only when" in source
 
 

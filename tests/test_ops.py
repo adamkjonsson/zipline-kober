@@ -36,7 +36,7 @@ def dns() -> Plan:
 def test_a_plan_carries_the_specs_own_identity():
     plan = dns()
     assert (plan.name, plan.version, plan.entry) == ("dns", "1.0", "message")
-    assert plan.doc == "DNS messages, header and question section."
+    assert plan.doc == "DNS messages, header, question section, and resource records."
 
 
 def test_units_keep_the_order_the_spec_declares_them_in():
@@ -45,8 +45,10 @@ def test_units_keep_the_order_the_spec_declares_them_in():
         "message",
         "flags",
         "question",
+        "rr",
         "name",
         "label",
+        "compressed",
     ]
 
 
@@ -92,9 +94,17 @@ def test_a_repeated_field_says_so():
 
 def test_a_conditional_field_carries_the_condition_not_a_flag():
     """A target may want to say *when* a field is present, not only that it may be absent."""
-    (field,) = [
-        item for item in dns().object("message").fields if item.name == "resource_records"
-    ]
+    spec = Spec.from_yaml("""
+name: c
+version: "1.0"
+entry: m
+units:
+  m:
+    fields:
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: body, type: {bytes: {size: 2}}, condition: "n > 0"}
+""")
+    (_, field) = Plan.from_spec(spec).object("m").fields
     assert field.optional
     assert field.condition is not None
 

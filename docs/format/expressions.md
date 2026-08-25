@@ -7,7 +7,7 @@ guard.
 ```yaml
 size: {expr: "header.length * 4"}
 condition: "flags.qr == 0"
-repeat: {until: "labels.length == 0"}
+repeat: {until: "labels.length == 0 or labels.length >= 192"}
 ```
 
 They are written as strings and parsed when the spec loads, so

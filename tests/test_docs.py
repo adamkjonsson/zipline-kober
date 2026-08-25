@@ -84,7 +84,7 @@ def test_the_undecoded_vocabulary_is_documented():
 def test_the_worked_example_is_the_shipped_one():
     """types.md quotes examples/dns.yaml; it must still say what it quotes."""
     shipped = (DOCS.parent / "examples" / "dns.yaml").read_text()
-    quoted = 'repeat: {until: "labels.length == 0"}'
+    quoted = 'repeat: {until: "labels.length == 0 or labels.length >= 192"}'
     assert quoted in shipped, "examples/dns.yaml no longer matches the doc's quote"
     assert quoted in (FORMAT / "types.md").read_text()
 

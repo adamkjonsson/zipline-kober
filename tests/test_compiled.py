@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import zpf
-from fuzzing import DNS_RESPONSE, POINTER_SPEC, SEEDS, cases, pointer_cases, variants
+from fuzzing import DNS_RESPONSE, SEEDS, cases, pointer_cases, variants
 from zpf.blocks import UNDECODED_REASONS, Record, Undecoded
 
 from kober.cli import main
@@ -663,11 +663,19 @@ def test_offsets_in_records_stay_absolute():
     writes(example("dns"), QUERY, Emit.FIELD, base=4096)
 
 
-def test_a_skipped_section_is_named_rather_than_claimed():
-    """`emit: none` on a conditional field: the answer section."""
-    records, regions = emitted(example("dns"), RESPONSE, Emit.FIELD)
-    assert regions == [Unclaimed(29, len(RESPONSE), "skipped")]
-    assert all(record.off_end <= 29 for record in records)
+def test_the_answer_section_is_decoded_rather_than_skipped():
+    """What this phase was for: nothing is left over, and both agree on it.
+
+    `examples/dns.yaml` used to mark everything past the question `skipped`,
+    because an owner name is usually a compression pointer and the language
+    could not follow one.
+    """
+    records, regions = emitted(example("dns"), DNS_RESPONSE, Emit.FIELD)
+    assert regions == []
+    paths = [record.comment for record in records]
+    assert "dns.answers[0].rdata" in paths
+    assert any("answers[0].name.labels[0].rest.target" in path for path in paths)
+    writes(example("dns"), DNS_RESPONSE, Emit.FIELD)
 
 
 def test_a_truncated_message_keeps_what_it_read_before_the_trouble():
@@ -1299,9 +1307,10 @@ def test_the_two_follow_a_pointer_the_same_way(seed: int, emit: Emit):
 
     The awkward-spec entry above is hand-built to reach the compiler's corners;
     this is the other kind of evidence — bytes nobody simplified first, and the
-    corpus every finding in this project has come from.
+    corpus every finding in this project has come from. Against the *shipped*
+    spec, so what it holds the two to is what a reader would actually run.
     """
-    spec = Spec.from_yaml(POINTER_SPEC)
+    spec = example("dns")
     for data in pointer_cases(seed):
         try:
             compare(spec, data)
@@ -1313,7 +1322,7 @@ def test_the_two_follow_a_pointer_the_same_way(seed: int, emit: Emit):
 
 def test_the_two_follow_the_real_response_the_same_way():
     """The unmutated capture, at both granularities."""
-    spec = Spec.from_yaml(POINTER_SPEC)
+    spec = example("dns")
     compare(spec, DNS_RESPONSE)
     for emit in (Emit.FIELD, Emit.MESSAGE):
         writes(spec, DNS_RESPONSE, emit)

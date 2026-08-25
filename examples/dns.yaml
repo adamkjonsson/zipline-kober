@@ -1,15 +1,18 @@
 # DNS over UDP or TCP, RFC 1035.
 #
-# Decodes the header and the question section in full. The answer, authority,
-# and additional sections are deliberately left undecoded: their owner names
-# may be compression pointers (RFC 1035 §4.1.4) — two bytes meaning "the name
-# at offset N" — and the spec language has no way to read at an absolute
-# earlier offset and return. See plans/REAL-CAPTURE-PHASE-PLAN.md.
+# Decodes a whole message: the header, the question section, and the answer,
+# authority, and additional sections. An owner name may be a compression
+# pointer (RFC 1035 §4.1.4) — two bytes meaning "the name at offset N" — which
+# the `pointer:` type follows.
+#
+# Record data stays opaque bytes. That is a choice rather than a limitation:
+# what is inside RDATA depends on the record type, and a switch over the
+# type registry would be most of this file for none of the point.
 name: dns
 version: "1.0"
 entry: message
 input: either
-doc: DNS messages, header and question section.
+doc: DNS messages, header, question section, and resource records.
 
 enums:
   opcode: {0: query, 1: iquery, 2: status, 4: notify, 5: update}
@@ -38,14 +41,15 @@ units:
       - name: questions
         type: {unit: question}
         repeat: {count: "qdcount"}
-      - name: resource_records
-        type: {bytes: {size: {remaining: true}}}
-        condition: "ancount + nscount + arcount > 0"
-        emit: none
-        doc: >
-          The answer, authority, and additional sections. Left undecoded on
-          purpose: an owner name here is usually a compression pointer, which
-          this language cannot follow. Marked skipped rather than claimed.
+      - name: answers
+        type: {unit: rr}
+        repeat: {count: "ancount"}
+      - name: authority
+        type: {unit: rr}
+        repeat: {count: "nscount"}
+      - name: additional
+        type: {unit: rr}
+        repeat: {count: "arcount"}
 
   flags:
     doc: The 16-bit flags word, MSB first.
@@ -65,14 +69,51 @@ units:
       - {name: qtype, type: {int: {bits: 16, enum: rrtype}}}
       - {name: qclass, type: {int: {bits: 16, enum: rrclass}}}
 
+  rr:
+    doc: One resource record, in the answer, authority, or additional section.
+    fields:
+      - {name: name, type: {unit: name}, doc: "The owner name, often a pointer."}
+      - {name: type, type: {int: {bits: 16, enum: rrtype}}}
+      - {name: class, type: {int: {bits: 16, enum: rrclass}}}
+      - {name: ttl, type: {int: {bits: 32}}}
+      - {name: rdlength, type: {int: {bits: 16}}}
+      - name: rdata
+        type: {bytes: {size: {expr: "rdlength"}}}
+        doc: Opaque here; what is inside depends on the record type.
+
   name:
-    doc: A sequence of length-prefixed labels ending in a zero-length one.
+    doc: >
+      A sequence of labels, ending either in a zero-length label or in a
+      compression pointer, which is always the last thing in a name.
     fields:
       - name: labels
         type: {unit: label}
-        repeat: {until: "labels.length == 0"}
+        repeat: {until: "labels.length == 0 or labels.length >= 192"}
 
   label:
+    doc: >
+      A length byte, then the rest of the label. The top two bits of the
+      length decide which: 00 means that many bytes of text, and 11 means the
+      byte is the high half of a compression pointer. 01 and 10 are reserved,
+      and there is no default, so a message using one is undecodable rather
+      than guessed at.
     fields:
       - {name: length, type: {int: {bits: 8}}}
-      - {name: text, type: {string: {size: {expr: "length"}}}}
+      - name: rest
+        type:
+          switch:
+            on: "length >> 6"
+            cases:
+              0: {string: {size: {expr: "length"}}}
+              3: {unit: {name: compressed, args: ["length"]}}
+
+  compressed:
+    doc: >
+      The second half of a compression pointer: the offset is the low 14 bits
+      of the two bytes, counted from the start of the message.
+    params: [{name: high, type: int}]
+    fields:
+      - {name: low, type: {int: {bits: 8}}}
+      - name: target
+        type: {pointer: {at: "((high & 63) << 8) | low", type: {unit: name}}}
+        doc: The name already at that offset, read there and returned from.

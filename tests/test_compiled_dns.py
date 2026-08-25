@@ -58,7 +58,7 @@ def test_a_real_query_decodes_into_typed_objects():
     assert message.qdcount == 1
     assert message.flags.rd == 1
     assert message.flags.qr == 0
-    assert [label.text for label in message.questions[0].qname.labels] == ["example", "com", ""]
+    assert [label.rest for label in message.questions[0].qname.labels] == ["example", "com", ""]
     assert message.questions[0].qtype == 1
 
 
@@ -71,13 +71,21 @@ def test_a_message_that_cannot_be_decoded_is_none():
     assert decode(QUERY[:5]) is None
 
 
-def test_an_absent_conditional_field_is_none_rather_than_empty():
+def test_an_absent_repeat_is_an_empty_list():
+    """A query has no answers, and the typed model says so without a `None`."""
     message = decode(QUERY)
     assert message is not None
-    assert message.resource_records is None
+    assert message.answers == []
+    assert message.authority == []
+
+
+def test_a_compression_pointer_resolves_through_the_typed_api():
+    """What the phase was for, reached from the compiled side."""
     message = decode(RESPONSE)
     assert message is not None
-    assert message.resource_records == ANSWER
+    (answer,) = message.answers
+    target = answer.name.labels[0].rest.target
+    assert [label.rest for label in target.labels] == ["example", "com", ""]
 
 
 def test_an_enum_is_a_lookup_rather_than_a_type():
@@ -109,7 +117,7 @@ def test_every_object_knows_which_bytes_it_came_from():
     question = message.questions[0]
     assert span(question) == (12, 29)
     assert span(question, "qtype") == (25, 27)
-    assert span(question.qname.labels[0], "text") == (13, 20)
+    assert span(question.qname.labels[0], "rest") == (13, 20)
 
 
 def test_a_sub_byte_field_cites_the_byte_holding_it():
@@ -121,11 +129,14 @@ def test_a_sub_byte_field_cites_the_byte_holding_it():
     assert span(message.flags, "rcode") == (3, 4)
 
 
-def test_an_absent_field_cites_nothing():
-    message = decode(QUERY)
+def test_a_pointed_at_range_is_cited_where_it_was_read():
+    """The answer's owner name cites the question's bytes, not its own."""
+    message = decode(RESPONSE)
     assert message is not None
-    start, end = span(message, "resource_records")
-    assert start == end == len(QUERY)
+    (answer,) = message.answers
+    compressed = answer.name.labels[0].rest
+    start, end = span(compressed, "target")
+    assert (start, end) < span(message, "answers"), "the target is behind the answer"
 
 
 def test_offsets_are_absolute():
