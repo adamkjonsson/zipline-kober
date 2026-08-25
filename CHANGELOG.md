@@ -743,6 +743,28 @@ installed from a checkout (see the README).
 
 ### Documentation
 
+- `DESIGN.md` **revision 8**: `Pointer` as built rather than decided (§3.2),
+  §2.1 restated for a second cursor, §13.1 closed, §13.2 corrected, §11
+  question 5's line re-drawn, and a new question 6.
+
+  §13.2 is the one worth reading. It had been the record of what real HTTP
+  needed and it was wrong: it named arithmetic on a header value, this release
+  built that arithmetic, and the boundary did not close. What actually blocks
+  HTTP is being unable to say anything about a *repeated* field, which is now
+  question 6 rather than a surprise waiting in a test.
+
+  §2.1's restatement is the second in two releases. Compiling made the cursor
+  rule a property of one program; a pointer adds a position that reads
+  elsewhere. It holds because the spec names an *offset* and the runtime does
+  the seeking, under bounds the runtime applies: backwards only, inside the
+  message, with each hop landing strictly earlier than the last.
+
+- `docs/dev/architecture.md` describes the **redirect seam** — what
+  `Cursor.view` is, that `Pointer` is its only caller, and what a byte
+  transform would supply instead. Written so the next phase inherits a decision
+  rather than re-deriving one, with the test that it was drawn in the right
+  place stated in advance.
+
 - `DESIGN.md` §3.3 no longer says the language has no calls, because it now
   has two. The restatement is a narrowing of the rule's scope rather than an
   exception to it: what the whitelist bought was no author-supplied code and no

@@ -1,7 +1,7 @@
 # Phase plan: the language
 
-**State: stage 1 done, stages 2–8 not started.** Written after the compiler
-phase landed
+**State: done.** All eight stages landed on `pointer_phase`. Written after
+the compiler phase landed
 ([`COMPILER-PHASE-PLAN.md`](COMPILER-PHASE-PLAN.md)), against `DESIGN.md`
 revision 7 and `zpf` 0.2.x.
 
@@ -724,9 +724,23 @@ down rather than discovered later.
 language question of a different size from three builtins, and it belongs to
 its own phase rather than to the end of this one.
 
-### Stage 8 — documentation, and what has to be restated
+### Stage 8 — documentation, and what has to be restated — **done**
 
 Covered below; it is a stage because it is work, not a formality.
+
+Landed as `DESIGN.md` **revision 8**. Two of the restatements had already been
+made where they were needed rather than deferred here — §2's tiling retirement
+in stage 4, and §3.3's "no calls" in stage 5 — because a normative document
+that lies in the interim is worse than one polished late. What this stage added
+is §2.1 with a second cursor, §3.2 as built rather than decided, §13.1 closed,
+§13.2 **corrected**, §11.5's line re-drawn, a new §11.6, and the seam note in
+`docs/dev/architecture.md`.
+
+The §13.2 rewrite is the one that matters. That section had been the record of
+what real HTTP needed, and it was wrong: it named text arithmetic, this phase
+built text arithmetic, and the boundary did not close. Leaving it as a status
+change would have preserved a bad diagnosis in the one document that is
+supposed to be right about such things.
 
 ## What has to be restated, not just extended
 

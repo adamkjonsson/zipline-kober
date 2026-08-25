@@ -89,6 +89,36 @@ It does no I/O.
 **Write.** The driver writes them, attaching a seam where a hole-class region
 lies between two records, and accounts for whatever the tree did not reach.
 
+## The redirect seam, and what it is not yet used for
+
+{meth}`kober.cursor.Cursor.view` hands out a second read position over the same
+run: its own bytes, its own base so the spans it reports stay absolute, and its
+own end so a sub-decode cannot see a byte the caller did not give it. It does
+not move the cursor it came from, because handing out a position claims
+nothing.
+
+`Pointer` is its only caller, and supplies the run's own bytes — so the
+citation a sub-decode reports *is* the range it read. That is the identity
+case.
+
+**It was built with one more caller in mind, and that caller does not exist
+yet.** A byte transform — decompressing a `Content-Encoding: gzip` body,
+decrypting a TLS record — is the same shape with one variable changed: the
+bytes come from somewhere else, and what a record cites is the input region it
+was *computed from* rather than a region holding it. The Zipline format already
+allows exactly that: a decoder MAY emit bytes that appear nowhere in its input,
+and `spans` asserts correspondence rather than identity.
+
+So the seam takes the bytes to read, the offset they start at, and the offset
+it may not read past. What a transform would add is not a fourth parameter but
+a *vocabulary*: which codec, with what configuration, supplied by a registry
+rather than by the spec file (`DESIGN.md` §11.5). Nothing here anticipates that
+beyond the shape, and it should not — one caller exists.
+
+The test that the seam was drawn in the right place is stated so it can be
+checked later: adding a transform should touch the byte source and the spec
+vocabulary, and **not** {mod}`kober.decoder`'s field or unit loops.
+
 ## Design invariants
 
 These shape the whole codebase. A change that breaks one is almost certainly
@@ -104,8 +134,8 @@ claimed. How that is guaranteed differs between the two implementations, and
 **Interpreted, it is an impossibility.** Every advance goes through a
 {class}`kober.cursor.Cursor` method, a spec has no way to reach past it, and
 `Cursor.read_bytes` refuses a half-consumed byte rather than aligning past bits
-nobody accounted for. The planned `Pointer` construct will name an offset for
-the runtime to read at rather than being handed the position.
+nobody accounted for. `Pointer` names an offset for the runtime to read at
+rather than being handed the position — see the seam below.
 
 **Compiled, it is a property of one program.** A generated decoder keeps a byte
 offset in a local and reads the buffer by index, because that is worth about
