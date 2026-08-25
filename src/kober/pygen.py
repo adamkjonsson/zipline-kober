@@ -35,7 +35,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from kober.decoder import MAX_DEPTH
+from kober.decoder import MAX_DEPTH, MAX_POINTER_HOPS
 from kober.errors import CompileError, SpecError
 from kober.expr import (
     MAX_SHIFT,
@@ -102,6 +102,7 @@ RESERVED_MODULE = frozenset(
         "Spanned",
         "shift_left",
         "shift_right",
+        "to_int",
         "TEXT_CONTENT_TYPE",
         "TYPE_CHECKING",
         "TruncatedRead",
@@ -135,6 +136,7 @@ RUNTIME_NAMES = frozenset(
         "read_int_le",
         "shift_left",
         "shift_right",
+        "to_int",
     }
 )
 
@@ -158,6 +160,20 @@ ELEMENT_LOCAL = "_element"
 #: property of this generator, which only emits patterns that claim what they
 #: read and hands the position back when the message is done.
 ANCHOR = "_at"
+
+#: Where the message being decoded starts, as an index into ``_data``. The
+#: space a pointer offset is measured in (``DESIGN.md`` §3.2), and a *third*
+#: one: neither the run's base nor the stream's origin, because a run holds
+#: many messages.
+MESSAGE_ORIGIN = "_origin"
+
+#: Exclusive ceiling on what a pointer may target, or ``-1`` before the first
+#: hop. Every hop lowers it to its own target, so a chain's offsets strictly
+#: decrease and a cycle cannot be built.
+POINTER_LIMIT = "_limit"
+
+#: How many pointer hops the chain has taken. Bounds recursion, not cycles.
+POINTER_HOPS = "_hops"
 
 #: The local holding ``_base + _at``, so a byte range is an addition rather than
 #: a translation. Reset wherever the anchor is.
@@ -678,15 +694,23 @@ def _expr(expr: Expr, binding: Binding, limit: int) -> str:
         right = _expr(expr.right, binding, level + 1)
         return _group(f"{left} {expr.op} {right}", level, limit)
     if isinstance(expr, Call):
-        # Valid, and it evaluates under the interpreter — the backend simply
-        # has no rendering for it yet. `CompileError` is what says that: the
-        # spec is fine and only this compilation is impossible.
-        msg = (
-            f"the compiler cannot yet render {expr.name}(); "
-            f"use the interpreter for this spec"
-        )
-        raise CompileError(msg)
+        return _builtin(expr, binding)
     return _binary(expr, binding, limit)
+
+
+def _builtin(expr: Call, binding: Binding) -> str:
+    """Render a builtin. A call is an atom and never needs grouping.
+
+    ``to_int`` goes through :func:`kober.runtime.to_int`, which **is** the
+    function the interpreter evaluates — one implementation of a conversion
+    that is deliberately stricter than Python's, so the two cannot drift and
+    the differential has nothing to find here. ``lower`` is a method call on a
+    value the checker has already typed as text.
+    """
+    arguments = [_expr(argument, binding, 0) for argument in expr.args]
+    if expr.name == "lower":
+        return f"{arguments[0]}.lower()"
+    return f"to_int({', '.join(arguments)})"
 
 
 def _binary(expr: BinOp, binding: Binding, limit: int) -> str:
@@ -1015,6 +1039,14 @@ class _Function:
         )
         if self.plan.recursive:
             parameters.append("_depth: int")
+        if self.plan.pointers:
+            parameters.extend(
+                [
+                    f"{MESSAGE_ORIGIN}: int",
+                    f"{POINTER_LIMIT}: int",
+                    f"{POINTER_HOPS}: int",
+                ]
+            )
         return parameters
 
     def threaded(self) -> tuple[str, ...]:
@@ -1073,6 +1105,26 @@ class _Function:
         if self.plan.recursive:
             lines.extend(
                 _wrap("_depth: How many units deep this decode already is.", 8, hang=4)
+            )
+        if self.plan.pointers:
+            lines.extend(
+                _wrap(
+                    f"{MESSAGE_ORIGIN}: Where the message starts, as an index into "
+                    "``_data``. A pointer offset is measured from here.",
+                    8,
+                    hang=4,
+                )
+            )
+            lines.extend(
+                _wrap(
+                    f"{POINTER_LIMIT}: What a pointer may not reach, or ``-1`` "
+                    "before the first hop.",
+                    8,
+                    hang=4,
+                )
+            )
+            lines.extend(
+                _wrap(f"{POINTER_HOPS}: How many hops the chain has taken.", 8, hang=4)
             )
         lines.extend(
             [
@@ -1257,8 +1309,16 @@ class _Function:
             self.emit("        pass")
 
     def segment(self, item: FieldPlan, index: int) -> str:
-        """Return the path segment one field adds, as a Python expression."""
-        name = "_" if item.name is None else self.names.attribute_of(self.obj.unit, item.name)
+        """Return the path segment one field adds, as a Python expression.
+
+        **The spec's name, not this backend's identifier for it.** A field
+        called ``class`` is a Python keyword, so the attribute holding it is
+        ``class_`` — but the path is what a *consumer* reads out of the file,
+        and the two implementations have to agree on it. The interpreter has
+        only the spec's spelling to offer, and it is the right one: a path is
+        about the protocol, not about the language the decoder was written in.
+        """
+        name = "_" if item.name is None else item.name
         return f"_path + {_literal('.' + name)}"
 
     def account(
@@ -1279,16 +1339,24 @@ class _Function:
             return
         if not self.emits(item):
             return
-        self.emit(f"{pad}if _sink is not None:")
         if item.selector is None:
+            self.emit(f"{pad}if _sink is not None:")
             self.record(index, item.types[0], target, comment, start, end, indent + 4)
             return
         # A switch decides which type the payload is, so the record does too. The
         # selector is still in hand, which is cheaper than asking the value.
+        # A nested unit writes its own records, so its branch contributes none;
+        # where exactly one branch is left, the two tests fold into one, which
+        # is both what a reader would write and what `ruff` insists on.
+        writing = [branch for branch in item.branches if branch.type.kind is not Kind.OBJECT]
+        if len(writing) == 1 and writing[0].case is not None:
+            test = f"_selector == {_literal(writing[0].case)}"
+            self.emit(f"{pad}if _sink is not None and {test}:")
+            self.record(index, writing[0].type, target, comment, start, end, indent + 4)
+            return
+        self.emit(f"{pad}if _sink is not None:")
         keyword = "if"
-        for branch in item.branches:
-            if branch.type.kind is Kind.OBJECT:
-                continue
+        for branch in writing:
             test = (
                 "else" if branch.case is None else f"{keyword} _selector == {_literal(branch.case)}"
             )
@@ -1376,6 +1444,9 @@ class _Function:
     def present(self, index: int, item: FieldPlan, target: str | None, indent: int) -> None:
         """Emit a field's read, at whatever indentation its condition left."""
         pad = " " * indent
+        if self.redirected(item):
+            self.pointer(index, item, target, indent)
+            return
         if target is None:
             self.emit(f"{pad}# Anonymous: read and accounted for, but never named.")
         if target is not None:
@@ -1400,6 +1471,116 @@ class _Function:
                 f"_e_{target}",
                 indent,
             )
+
+    def redirected(self, item: FieldPlan) -> bool:
+        """Whether this field is read at an offset rather than where it stands.
+
+        All of its alternatives or none of them: a ``switch`` mixing a
+        back-reference with an ordinary read would need the position swapped on
+        some branches and not others, and the ranges written down before the
+        branch is chosen. It decodes under the interpreter; only this
+        compilation is refused, and saying so beats generating something subtly
+        different from what the interpreter does.
+        """
+        redirected = [value.at is not None for value in item.types]
+        if any(redirected) and not all(redirected):
+            msg = (
+                f"unit {self.obj.unit!r}, field {item.name!r}: the compiler cannot "
+                f"express a switch with a pointer in only some cases; make every "
+                f"case a pointer, or use the interpreter"
+            )
+            raise CompileError(msg)
+        if any(redirected) and item.repeat is not None:
+            msg = (
+                f"unit {self.obj.unit!r}, field {item.name!r}: the compiler cannot "
+                f"express a repeated pointer; a pointer reads no input, so a repeat "
+                f"of one cannot make progress"
+            )
+            raise CompileError(msg)
+        return bool(redirected) and all(redirected)
+
+    def pointer(self, index: int, item: FieldPlan, target: str | None, indent: int) -> None:
+        """Emit a back-reference: read elsewhere, and carry on where we were.
+
+        §2.1 holds here the same way it holds in the interpreter — the spec
+        *names* an offset and the generated code does the seeking, on a
+        position it puts back before anything else runs.
+
+        The read itself is the ordinary one. What surrounds it is a swap: the
+        anchor moves to the target and ``_size`` to the ceiling, so every bound
+        the existing machinery emits is measured against what this message has
+        already decoded rather than against the run.
+        """
+        pad = " " * indent
+        self.index_of = index
+        self.settle(indent)
+        offset = self.evaluate(item.types[0].at, indent)
+        self.emit(f"{pad}_p_at = {offset}")
+        # The ceiling is the position now, lowered by every hop already taken.
+        # Inside a hop the position is never below the previous target, so the
+        # two cases do not overlap and no `min` is needed.
+        self.emit(f"{pad}_p_end = {ANCHOR} if {POINTER_LIMIT} < 0 else {POINTER_LIMIT}")
+        self.emit(f"{pad}_p_to = {MESSAGE_ORIGIN} + _p_at")
+        self.emit(f"{pad}if _p_at < 0 or _p_to >= _p_end:")
+        self.emit(
+            f'{pad}    raise Undecodable(f"pointer target {{_p_at}} is outside the '
+            f'bytes already decoded", {self.stopped()})'
+        )
+        self.emit(f"{pad}if {POINTER_HOPS} >= {MAX_POINTER_HOPS}:")
+        self.emit(
+            f'{pad}    raise Undecodable("pointer chain passed {MAX_POINTER_HOPS} '
+            f'hops", {self.stopped()})'
+        )
+        self.emit(f"{pad}_p_at, _p_size = {ANCHOR}, _size")
+        self.emit(f"{pad}{ANCHOR}, _size = _p_to, _p_end")
+        self.emit(f"{pad}{ORIGIN} = _base + {ANCHOR}")
+        if target is not None:
+            self.emit(f"{pad}_s_{target} = {ORIGIN}")
+        self.emit(f"{pad}try:")
+        self.follow(index, item, target, indent + 4)
+        self.settle(indent + 4)
+        self.emit(f"{pad}except TruncatedRead as _exc:")
+        # A short read *inside* a target is not a short input. `truncated` is
+        # hole-class, and leaving it would put a false stream-gap in the file.
+        # `_p_at` rather than the anchor: the anchor is inside the target by
+        # now, and where the *message* stopped is where the pointer stood.
+        self.emit(
+            f'{pad}    raise Undecodable(f"pointer target does not decode: {{_exc}}", '
+            f"_p_at) from _exc"
+        )
+        # An `Undecodable` from inside the target keeps its own reason — the
+        # interpreter propagates the child's detail unchanged — but not its
+        # position, which is in the target's part of the run.
+        self.emit(f"{pad}except Undecodable as _exc:")
+        self.emit(f"{pad}    raise Undecodable(str(_exc), _p_at) from _exc")
+        if target is not None:
+            self.emit(f"{pad}_e_{target} = {ORIGIN}")
+        self.emit(f"{pad}{ANCHOR}, _size = _p_at, _p_size")
+        self.emit(f"{pad}{ORIGIN} = _base + {ANCHOR}")
+        self.delta = 0
+        if target is not None and not self.container(item):
+            self.account(
+                index,
+                item,
+                target,
+                self.segment(item, index),
+                f"_s_{target}",
+                f"_e_{target}",
+                indent,
+            )
+
+    def follow(self, index: int, item: FieldPlan, target: str | None, indent: int) -> None:
+        """Emit the read a pointer redirects to, with the hop counted."""
+        value = item.types[0]
+        if value.kind is Kind.OBJECT:
+            call = self.call(index, value, self.segment(item, index))
+            hopped = call.replace(
+                f"{POINTER_LIMIT}, {POINTER_HOPS})", f"_p_to, {POINTER_HOPS} + 1)"
+            )
+            self.statement(hopped, f"{target or '_ignored'}, {ANCHOR}", indent)
+            self.rebase(ANCHOR, indent)
+            return
+        self.read(index, value, target, indent, self.segment(item, index))
 
     def repetition(self, index: int, item: FieldPlan, target: str | None, indent: int) -> None:
         """Emit a repeated field's loop.
@@ -1457,8 +1638,11 @@ class _Function:
             self.emit(f"{inner}_index += 1")
 
     def element_path(self, item: FieldPlan) -> str:
-        """Return the path expression for one element of a repeated field."""
-        name = "_" if item.name is None else self.names.attribute_of(self.obj.unit, item.name)
+        """Return the path expression for one element of a repeated field.
+
+        The spec's name, for the reason :meth:`segment` gives.
+        """
+        name = "_" if item.name is None else item.name
         return 'f"{_path}.' + name + '[{_index}]"'
 
 
@@ -1679,6 +1863,8 @@ class _Function:
         arguments.extend(self.outer(index, target))
         if self.plan.recursive:
             arguments.append("_depth + 1")
+        if self.plan.pointers:
+            arguments.extend([MESSAGE_ORIGIN, POINTER_LIMIT, POINTER_HOPS])
         return f"{self.names.function_of(unit)}({', '.join(arguments)})"
 
     def outer(self, index: int, target: ObjectPlan) -> list[str]:
@@ -1705,11 +1891,19 @@ class _Function:
 def _fallible(rendered: str) -> bool:
     """Whether a rendered expression can fail for some input.
 
-    Integer division, modulo, and a bounded shift. Everything else in this
-    language answers for every value it can be handed, which is what makes
-    checking worth the two lines it costs.
+    Integer division, modulo, a bounded shift, and reading text as a number.
+    Everything else in this language answers for every value it can be handed,
+    which is what makes checking worth the two lines it costs.
+
+    ``to_int`` is here because the differential put it here: text that is not a
+    number raises, and without the wrapper a generated decoder let `EvalError`
+    escape — breaking the promise that a decode never raises, on input the
+    interpreter had already turned into an undecodable region.
     """
-    return any(token in rendered for token in ("//", " % ", "shift_left(", "shift_right("))
+    return any(
+        token in rendered
+        for token in ("//", " % ", "shift_left(", "shift_right(", "to_int(")
+    )
 
 
 def _split_arguments(text: str) -> list[str]:
@@ -1837,6 +2031,9 @@ def render_entry(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.ME
         arguments.extend(["sink", "NAME"])
     if plan.recursive:
         arguments.append("0")
+    if plan.pointers:
+        # The origin is where *this* message starts, not where the run does.
+        arguments.extend(["_start", "-1", "0"])
     call = f"{names.function_of(plan.entry)}({', '.join(arguments)})"
     lines.extend(
         [

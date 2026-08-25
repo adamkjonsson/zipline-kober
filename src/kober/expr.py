@@ -717,10 +717,10 @@ def _eval_call(expr: Call, env: Environment) -> ExprValue:
     if expr.name == "lower":
         return _as_str(values[0], "lower()").lower()
     base = 10 if len(values) == 1 else _as_int(values[1], "to_int()")
-    return _to_int(_as_str(values[0], "to_int()"), base)
+    return to_int(_as_str(values[0], "to_int()"), base)
 
 
-def _to_int(text: str, base: int) -> int:
+def to_int(text: str, base: int = 10) -> int:
     """Read ``text`` as an integer in ``base``, refusing anything else.
 
     **Deliberately stricter than Python's :func:`int`**, which accepts

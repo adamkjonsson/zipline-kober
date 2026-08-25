@@ -622,7 +622,7 @@ A normative document that lies in the interim is worse than one polished late.
 `test_docs.py` gained a check that every `BUILTINS` row is documented, matching
 what it already does for loader keys.
 
-### Stage 6 — both, in the compiler
+### Stage 6 — both, in the compiler — **done**
 
 - [`ops.py`](../src/kober/ops.py): a pointer read in the neutral plan, carrying
   the spec's own names and no Python decisions — the layer rule from its
@@ -638,6 +638,39 @@ what it already does for loader keys.
 The differential is the acceptance test for this stage. It found five bugs in
 the last phase, four of them in the *older* implementation; expect the same
 distribution and treat an interpreter bug found here as the stage working.
+
+**The distribution was different this time: four bugs, all four in the
+compiler**, and three of them in code that predates the constructs that exposed
+them. A field path carried the backend's identifier rather than the spec's, so
+a field named `class` was `class_` in every record the compiled decoder wrote.
+A unit reachable only through a pointer was dropped from the plan, and the
+module then called a decode function it had not generated — the checker had
+been taught to walk a pointer's target in stage 2, and the compiler's own
+reachability walk had not. A generated decoder let `EvalError` escape, because
+the backend's list of expressions that can fail did not know about `to_int`.
+And a `switch` mixing a nested unit with a scalar generated nested `if`s that
+`ruff` refuses, so such a module failed the project's own lint.
+
+**The seam held.** `at` on `ValueType` is the whole of the neutral change: a
+pointer adds no kind of its own, so the plan describes the target and stamps
+*where* on it. No Python decision leaked in — the offset arithmetic, the
+save-and-restore of the read position, and the hop bound are all the backend's.
+
+**Threading is a whole-plan decision, like `recursive`.** A module whose plan
+has no pointer is generated exactly as before, down to the byte, which is what
+keeps `tests/compiled_dns.py` a stable fixture and costs pointer-free specs
+nothing. Where there is one, every decode function takes the message origin,
+the chain's ceiling and the hop count.
+
+**One deviation from the plan, and not for the reason it anticipated.** The
+plan asked for builtins inline rather than as helper calls unless a measurement
+said otherwise. `to_int` compiles to a call on `kober.runtime.to_int`, which
+*is* the function the interpreter evaluates — the reason is correctness rather
+than speed. The conversion is deliberately stricter than Python's, and two
+copies of that rule would be two things to keep in step. `lower` is inline.
+
+Measured on the real 66-byte response: **6.5 µs against the interpreter's 203,
+31× at 10 MB/s.**
 
 ### Stage 7 — the examples finished
 

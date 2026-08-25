@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from kober.cursor import Cursor
 from kober.errors import EvalError, Stopped, TruncatedRead, Undecodable
-from kober.expr import shift_left, shift_right
+from kober.expr import shift_left, shift_right, to_int
 from kober.spec import Endian
 
 if TYPE_CHECKING:
@@ -64,6 +64,7 @@ __all__ = [
     "read_int_le",
     "shift_left",
     "shift_right",
+    "to_int",
     "span",
 ]
 

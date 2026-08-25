@@ -29,7 +29,7 @@ is the spec's, not Python's, and every backend needs the same tree.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -109,6 +109,11 @@ class ValueType:
         args: Arguments bound to an ``OBJECT``'s parameters, positionally.
         expr: The expression a computed value comes from. It reads nothing, so
             it is the one kind whose value is not on the wire at all.
+        at: Where to read this, for a back-reference — an integer expression
+            in the **message's** offset space, per ``DESIGN.md`` §3.2. ``None``
+            means the ordinary case: read it where the position stands. A
+            value with an ``at`` never advances the position, so ``consumes``
+            is always false alongside it.
         consumes: Whether reading this provably advances the read position.
             What lets a backend drop the runtime check that a repetition is
             making progress — see :func:`consumes`.
@@ -125,6 +130,7 @@ class ValueType:
     size: SizeSpec | None = None
     args: tuple[Expr, ...] = ()
     expr: Expr | None = None
+    at: Expr | None = None
     consumes: bool = False
 
 
@@ -390,6 +396,23 @@ class Plan:
         """
         return any(obj.recursive for obj in self.objects)
 
+    @property
+    def pointers(self) -> bool:
+        """Whether any field is read at an offset rather than where it stands.
+
+        A **whole-plan** answer, like :attr:`recursive`, and for the same
+        reason: a back-reference needs the message's origin and the ceiling of
+        the chain so far threaded through every decode that could contain one,
+        and threading it into only some of them would put the bound somewhere
+        the interpreter does not. A plan with no pointer pays nothing.
+        """
+        return any(
+            value.at is not None
+            for obj in self.objects
+            for item in obj.fields
+            for value in item.types
+        )
+
     def object(self, unit: str) -> ObjectPlan:
         """Return one unit's shape by name.
 
@@ -459,6 +482,25 @@ def nonnegative(plan: Plan, unit: str, expr: Expr) -> bool:
     return value.kind is Kind.INT and not value.signed and value.bits is not None
 
 
+def _referenced(kind: FieldType) -> Iterator[str]:
+    """Yield every unit one field type can decode, at any depth inside it.
+
+    Through a ``switch``'s cases and **through a pointer's target**, which is
+    the one that is easy to miss: a unit reached only by a back-reference is
+    still decoded, and dropping it leaves the plan without a decoder its own
+    generated code calls.
+    """
+    if isinstance(kind, UnitRef):
+        yield kind.unit
+    elif isinstance(kind, Switch):
+        for case in kind.cases.values():
+            yield from _referenced(case)
+        if kind.default is not None:
+            yield from _referenced(kind.default)
+    elif isinstance(kind, Pointer):
+        yield from _referenced(kind.type)
+
+
 def _reachable(spec: Spec) -> set[str]:
     """Return every unit reachable from the entry unit, the entry included.
 
@@ -474,9 +516,7 @@ def _reachable(spec: Spec) -> set[str]:
             continue
         found.add(name)
         for item in spec.unit(name).fields:
-            for kind in _types(item.type):
-                if isinstance(kind, UnitRef):
-                    pending.append(kind.unit)
+            pending.extend(_referenced(item.type))
     return found
 
 
@@ -562,6 +602,9 @@ def _kind_exprs(kind: FieldType) -> Iterator[Expr]:
     """Yield the expressions one field type evaluates."""
     if isinstance(kind, Computed):
         yield kind.expr
+    elif isinstance(kind, Pointer):
+        yield kind.at
+        yield from _kind_exprs(kind.type)
     elif isinstance(kind, UnitRef):
         yield from kind.args
     else:
@@ -576,9 +619,9 @@ def _calls(spec: Spec, unit: str) -> tuple[str, ...]:
     if unit not in spec.units:
         return ()
     for item in spec.unit(unit).fields:
-        for kind in _types(item.type):
-            if isinstance(kind, UnitRef) and kind.unit not in found:
-                found.append(kind.unit)
+        for name in _referenced(item.type):
+            if name not in found:
+                found.append(name)
     return tuple(found)
 
 
@@ -698,16 +741,44 @@ def _value(spec: Spec, unit: str, index: int, kind: FieldType) -> ValueType:
         inferred = infer_type(kind.expr, scope, unparse(kind.expr))
         return ValueType(kind=KINDS[inferred], expr=kind.expr)
     if isinstance(kind, Pointer):
-        # Valid, and it runs under the interpreter — the neutral plan simply
-        # has no operation for it yet. That is what `CompileError` is for, and
-        # it is a better answer than a traceback from a spec `check` accepted.
-        msg = (
-            f"unit {unit!r}: the compiler cannot yet express a pointer; "
-            f"use the interpreter for this spec"
-        )
-        raise CompileError(msg)
+        return _pointer(spec, unit, index, kind)
     msg = f"unsupported field type {type(kind).__name__} in unit {unit!r}"
     raise TypeError(msg)
+
+
+def _pointer(spec: Spec, unit: str, index: int, kind: Pointer) -> ValueType:
+    """Describe a back-reference: what is there, and where to read it.
+
+    The value is whatever the target is — a pointer adds no kind of its own —
+    so this describes the target and stamps ``at`` on it. ``consumes`` is
+    forced false whatever the target would say: a pointer reads elsewhere and
+    leaves the position alone, which is what makes a repetition of them
+    terminate on its own progress check rather than looping.
+
+    Args:
+        spec: The spec being planned.
+        unit: The unit the pointer is written in.
+        index: The field's position, for scoping a computed target.
+        kind: The pointer.
+
+    Returns:
+        The target's value type, with ``at`` set.
+
+    Raises:
+        CompileError: If the target is a ``switch``. A plan describes one
+            alternative per :class:`ValueType` and carries the selector on the
+            *field*, so a switch **under** a pointer has nowhere to put its
+            selector. It decodes under the interpreter; only this compilation
+            is impossible.
+
+    """
+    if isinstance(kind.type, Switch):
+        msg = (
+            f"unit {unit!r}: the compiler cannot express a switch under a pointer; "
+            f"put the pointer inside the switch's cases, or use the interpreter"
+        )
+        raise CompileError(msg)
+    return replace(_value(spec, unit, index, kind.type), at=kind.at, consumes=False)
 
 
 def _size_consumes(size: SizeSpec) -> bool:
@@ -764,6 +835,8 @@ def _kind_consumes(
         return _size_consumes(kind.size)
     if isinstance(kind, UnitRef):
         return _unit_consumes(spec, kind.unit, seen)
+    # A pointer reads elsewhere, so it never advances the position — which is
+    # exactly why a unit whose only field is one cannot terminate a repeat.
     return False
 
 

@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import zpf
-from fuzzing import SEEDS, cases, variants
+from fuzzing import DNS_RESPONSE, POINTER_SPEC, SEEDS, cases, pointer_cases, variants
 from zpf.blocks import UNDECODED_REASONS, Record, Undecoded
 
 from kober.cli import main
@@ -944,8 +944,8 @@ def imported(path: Path) -> ModuleType:
 #: Specs chosen to reach the parts of the compiler an example does not. Between
 #: them: bitfields that end on a byte and bitfields that do not divide one, a
 #: word split across two bytes, a switch whose cases differ in width, a repeat
-#: by count and one to the end, a computed value, a conditional field, and every
-#: size a spec can write.
+#: by count and one to the end, a computed value, a conditional field, every
+#: size a spec can write, a back-reference, and the two functions.
 AWKWARD: dict[str, str] = {
     "bitfields": """
         name: bits
@@ -1065,6 +1065,38 @@ AWKWARD: dict[str, str] = {
 
 #: What each awkward spec is fuzzed from. Long enough that a truncation lands
 #: somewhere different every time.
+AWKWARD["back-reference"] = """
+    name: ptr
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - {name: blob, type: {bytes: {size: 4}}}
+          - {name: pos, type: {int: {bits: 8}}}
+          - {name: seen, type: {pointer: {at: "pos", type: {int: {bits: 16}}}}}
+          - {name: deep, type: {pointer: {at: "pos", type: {unit: inner}}}}
+          - {name: rest, type: {bytes: {size: {remaining: true}}}}
+      inner:
+        fields:
+          - {name: a, type: {int: {bits: 8}}}
+          - {name: back, type: {pointer: {at: "0", type: {int: {bits: 8}}}}}
+"""
+
+AWKWARD["text arithmetic"] = """
+    name: text
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - {name: size, type: {string: {size: {terminated: {delimiter: "\\r\\n"}}}}}
+          - {name: body, type: {bytes: {size: {expr: "to_int(size, 16)"}}}}
+          - name: tail
+            type: {bytes: {size: {remaining: true}}}
+            condition: "lower(size) == size"
+"""
+
 AWKWARD_SEEDS: dict[str, bytes] = {
     "bitfields": bytes(range(1, 12)),
     "signed and wide": bytes(range(0x80, 0x90)),
@@ -1073,6 +1105,10 @@ AWKWARD_SEEDS: dict[str, bytes] = {
     "repeats": bytes([3, 0, 1, 0, 2, 0, 3, 7, 7, 7, 7]),
     "sizes": b"\x03abcdefline\r\nloose\nrest",
     "computed and conditional": bytes([2, *range(20)]),
+    # `pos` is 1, so both pointers land inside `blob` — the partial overlap a
+    # real owner name makes when it points into an earlier record's rdata.
+    "back-reference": bytes([0xAA, 0xBB, 0xCC, 0xDD, 1, 9, 9, 9]),
+    "text arithmetic": b"1a\r\n" + b"x" * 26 + b"rest",
 }
 
 
@@ -1251,3 +1287,124 @@ def test_a_fuzzed_stream_with_a_hole_in_it_decodes_the_same_way(tmp_path: Path, 
     )
     assert blocks(from_compiler) == blocks(from_interpreter)
     assert_conformant(from_compiler, source)
+
+
+# --- back-references --------------------------------------------------------
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_the_two_follow_a_pointer_the_same_way(seed: int, emit: Emit):
+    """Mutated *real* traffic, against a spec that follows compression pointers.
+
+    The awkward-spec entry above is hand-built to reach the compiler's corners;
+    this is the other kind of evidence — bytes nobody simplified first, and the
+    corpus every finding in this project has come from.
+    """
+    spec = Spec.from_yaml(POINTER_SPEC)
+    for data in pointer_cases(seed):
+        try:
+            compare(spec, data)
+            writes(spec, data, emit)
+        except AssertionError as exc:
+            exc.add_note(f"disagreed: pointers {emit.value} seed={seed} on {data!r}")
+            raise
+
+
+def test_the_two_follow_the_real_response_the_same_way():
+    """The unmutated capture, at both granularities."""
+    spec = Spec.from_yaml(POINTER_SPEC)
+    compare(spec, DNS_RESPONSE)
+    for emit in (Emit.FIELD, Emit.MESSAGE):
+        writes(spec, DNS_RESPONSE, emit)
+
+
+def test_a_field_path_carries_the_specs_own_name_not_the_backends():
+    """Found by the differential, and it was the compiler that was wrong.
+
+    ``class`` is a Python keyword, so the attribute holding it is ``class_``.
+    The *path* is what a consumer reads out of the file, and the interpreter
+    has only the spec's spelling to offer — so the two disagreed on every
+    record for that field until the backend stopped using its own identifier.
+    """
+    spec = inline("""
+        name: k
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: class, type: {int: {bits: 8}}}
+    """)
+    records, _ = emitted(spec, b"\x01", Emit.FIELD)
+    assert [record.comment for record in records] == ["k.class"]
+    writes(spec, b"\x01", Emit.FIELD)
+
+
+@pytest.mark.parametrize(
+    ("fragment", "source"),
+    [
+        (
+            "switch under a pointer",
+            """
+            name: a
+            version: "1"
+            entry: m
+            units:
+              m:
+                fields:
+                  - {name: p, type: {int: {bits: 8}}}
+                  - name: t
+                    type:
+                      pointer:
+                        at: "p"
+                        type: {switch: {on: "p", cases: {0: {int: {bits: 8}}}}}
+            """,
+        ),
+        (
+            "pointer in only some cases",
+            """
+            name: b
+            version: "1"
+            entry: m
+            units:
+              m:
+                fields:
+                  - {name: p, type: {int: {bits: 8}}}
+                  - name: t
+                    type:
+                      switch:
+                        on: "p"
+                        cases:
+                          0: {int: {bits: 8}}
+                          1: {pointer: {at: "0", type: {int: {bits: 8}}}}
+            """,
+        ),
+        (
+            "repeated pointer",
+            """
+            name: c
+            version: "1"
+            entry: m
+            units:
+              m:
+                fields:
+                  - {name: p, type: {int: {bits: 8}}}
+                  - name: t
+                    type: {pointer: {at: "0", type: {int: {bits: 8}}}}
+                    repeat: {count: "p"}
+            """,
+        ),
+    ],
+)
+def test_the_shapes_the_backend_refuses_say_so(fragment: str, source: str):
+    """Each decodes under the interpreter; only the compilation is refused.
+
+    A `CompileError` naming the shape beats generating something subtly
+    different from what the interpreter does, which is the one outcome the
+    differential could not catch — it would never see the spec.
+    """
+    spec = inline(source)
+    assert Decoder(spec) is not None
+    with pytest.raises(CompileError, match=fragment):
+        compiled(spec)

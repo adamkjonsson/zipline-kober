@@ -15,6 +15,7 @@ import pytest
 
 from kober.check import check
 from kober.errors import CompileError, SpecError
+from kober.expr import unparse
 from kober.ops import Kind, Plan
 from kober.spec import Spec
 
@@ -283,8 +284,8 @@ def test_asking_for_a_unit_that_is_not_there_says_what_is():
         dns().object("nonesuch")
 
 
-def test_a_pointer_is_refused_as_a_compile_error_not_a_traceback():
-    """`check` accepts the spec, so the compiler owes a real message."""
+def test_a_pointer_plans_as_its_target_read_elsewhere():
+    """A pointer adds no kind of its own: the value is whatever is there."""
     spec = Spec.from_yaml("""
 name: p
 version: "1.0"
@@ -296,5 +297,53 @@ units:
       - {name: t, type: {pointer: {at: "lo", type: {int: {bits: 8}}}}}
 """)
     assert check(spec) == ()
-    with pytest.raises(CompileError, match="cannot yet express a pointer"):
+    (_, pointer) = Plan.from_spec(spec).object("message").fields
+    (value,) = pointer.types
+    assert value.kind is Kind.INT
+    assert value.bits == 8
+    assert unparse(value.at) == "lo"
+
+
+def test_a_pointer_never_counts_as_consuming():
+    """It reads elsewhere, so a repeat of them must keep its progress check."""
+    spec = Spec.from_yaml("""
+name: p
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: lo, type: {int: {bits: 8}}}
+      - {name: t, type: {pointer: {at: "lo", type: {unit: inner}}}}
+  inner:
+    fields:
+      - {name: x, type: {int: {bits: 8}}}
+""")
+    (_, pointer) = Plan.from_spec(spec).object("message").fields
+    assert pointer.types[0].consumes is False
+    assert pointer.consumes is False
+
+
+def test_a_switch_under_a_pointer_is_refused_with_a_real_message():
+    """The plan carries a selector on the field, so it has nowhere to put one."""
+    spec = Spec.from_yaml("""
+name: p
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: lo, type: {int: {bits: 8}}}
+      - name: t
+        type:
+          pointer:
+            at: "lo"
+            type:
+              switch:
+                on: "lo"
+                cases:
+                  0: {int: {bits: 8}}
+""")
+    assert check(spec) == ()
+    with pytest.raises(CompileError, match="switch under a pointer"):
         Plan.from_spec(spec)

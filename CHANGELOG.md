@@ -49,10 +49,17 @@ installed from a checkout (see the README).
   each hop must land strictly earlier than the last, so a cycle cannot be
   constructed.
 
-  The model, the loader schema, the checker, and the **interpreter** land
-  here; the compiler follows. `kober compile` reports a `CompileError` naming
-  the limitation rather than failing with a traceback, since `kober check`
-  accepts such a spec.
+  The model, the loader schema, the checker, the interpreter, **and the
+  compiler**. A generated decoder follows a pointer at 10 MB/s against the real
+  DNS response — 31× the interpreter — and a spec with no pointer is generated
+  exactly as before, because the message origin and the chain's ceiling are
+  threaded only into a plan that has one.
+
+  The backend refuses three shapes rather than approximating them: a `switch`
+  under a pointer, a `switch` with a pointer in only some cases, and a repeated
+  pointer. Each decodes under the interpreter, and each refusal names the shape
+  — which beats generating something subtly different from what the
+  interpreter does, the one divergence the differential could never catch.
 
 - **Two functions in the expression language**, `to_int` and `lower`, and the
   `Call` node and closed `BUILTINS` table behind them. `to_int(s)` and
@@ -70,8 +77,11 @@ installed from a checkout (see the README).
 
   **The table is closed and matched by name.** An unknown function is a
   load-time error naming what does exist, so "a spec cannot run code" still
-  holds now that calls parse at all. `kober compile` reports a `CompileError`
-  naming the limitation until the backend renders them.
+  holds now that calls parse at all.
+
+  Generated code calls `kober.runtime.to_int`, which **is** the function the
+  interpreter evaluates. One implementation of a conversion that is
+  deliberately stricter than Python's means the two cannot drift.
 
 - `kober.cursor.Cursor.view` and `Cursor.seek_to` — the seam a redirect reads
   through. `view(off_start, off_end)` hands out a second position over the same
@@ -589,6 +599,29 @@ installed from a checkout (see the README).
   field.
 
 ### Fixed
+
+- **A field path in a compiled decoder carried the backend's identifier, not
+  the spec's.** A field named `class` is a Python keyword, so the attribute
+  holding it is `class_` — and that spelling reached the record's field path,
+  where the interpreter wrote `class`. A path is what a consumer reads out of
+  the file and the two implementations have to agree on it. Found by the
+  differential, in code that predates the construct that exposed it.
+
+- **A unit reachable only through a pointer was dropped from a compiled
+  module**, which then called a decode function it had not generated. The
+  checker had been taught to walk a pointer's target; the compiler's own
+  reachability walk had not.
+
+- **A generated decoder could raise `EvalError`** where the interpreter
+  recorded an undecodable region: the backend wraps an expression that can fail
+  so the failure can say *where* it happened, and it did not know that reading
+  text as a number is a fourth way to fail. A decode that raises leaves its
+  input unaccounted for, which is the promise the module makes.
+
+- **A generated `switch` mixing a nested unit with a scalar produced nested
+  `if` statements** that `ruff` refuses, so such a module failed the project's
+  own lint. Where exactly one branch writes a record, the two tests now fold
+  into one.
 
 - **A computed value too wide for `prim:` raised out of the emitter.** `prim:`
   stops at 64 bits and a computed value does not: `1 << n` with `n` off the wire

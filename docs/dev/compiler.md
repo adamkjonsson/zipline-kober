@@ -108,7 +108,7 @@ implementation of them is one place for them to be wrong.
 
 ## What the Python backend refuses
 
-Two things, both deliberate, both with a message naming the spec's own words:
+All deliberate, each with a message naming the spec's own words:
 
 - **A name it will not rename** — not an identifier, colliding with another, or
   inside the underscore namespace.
@@ -117,6 +117,18 @@ Two things, both deliberate, both with a message naming the spec's own words:
   ends part-way through one. Such a spec is nearly always a fault already: the
   interpreter carries on mid-byte and then raises out of the decode at the next
   `bytes` field.
+- **A `switch` under a `pointer`.** A plan describes one alternative per value
+  type and carries the selector on the *field*, so a switch beneath a pointer
+  has nowhere to put its selector. Putting the pointer inside the switch's
+  cases says the same thing and does compile.
+- **A `switch` with a pointer in only some cases**, which would need the read
+  position swapped on some branches and not others, with the byte ranges
+  written down before the branch is chosen.
+- **A repeated pointer.** A pointer reads no input where it stands, so a repeat
+  of one cannot make progress.
 
-Both are narrower than what the interpreter accepts. That is the honest cost of
-compiling, and it is stated rather than worked around.
+Each is narrower than what the interpreter accepts. That is the honest cost of
+compiling, and it is stated rather than worked around — a refusal naming the
+shape beats generating something subtly different from what the interpreter
+does, which is the one divergence the differential could never catch, because
+it would never see the spec.
