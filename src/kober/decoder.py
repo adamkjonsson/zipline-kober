@@ -38,6 +38,7 @@ from kober.spec import (
     Fixed,
     FromExpr,
     IntType,
+    Pointer,
     Remaining,
     StringType,
     Switch,
@@ -60,6 +61,45 @@ if TYPE_CHECKING:
 #: stack, and a `RecursionError` escaping a decode is the failure this module
 #: promises never to have.
 MAX_DEPTH = 64
+
+#: How many pointer hops one chain may take before the decode is abandoned.
+#: Separate from :data:`MAX_DEPTH` because a deep unit tree and a long pointer
+#: chain are different pathologies with different natural limits, and one
+#: shared constant would make tuning for one protocol move the other's
+#: threshold.
+#:
+#: It is **not** what stops a cycle. A chain's offsets strictly decrease, so a
+#: cycle cannot be constructed at all; this bounds *recursion*, since a large
+#: message admits a legal chain long enough to exhaust the interpreter stack.
+MAX_POINTER_HOPS = 16
+
+
+@dataclass(frozen=True)
+class _Read:
+    """Where a decode is, and how far it is still allowed to reach.
+
+    Threaded through the decode in place of a bare depth counter. What it
+    carries is the whole of what a redirect needs in order to be safe, and it
+    is the shape a byte transform would reuse: the bytes themselves come from
+    the cursor, and this says what they are measured from and how far back a
+    reference may reach.
+
+    Attributes:
+        origin: Stream offset of the message being decoded. A pointer offset
+            is measured from here, which is the only space it can mean, since
+            a run holds many messages.
+        limit: Exclusive ceiling on what a pointer may target, or ``None``
+            before the first hop. Each hop lowers it to its own target, so a
+            chain's offsets strictly decrease.
+        depth: Unit nesting so far.
+        hops: Pointer hops taken so far.
+
+    """
+
+    origin: int
+    limit: int | None = None
+    depth: int = 0
+    hops: int = 0
 
 
 def _indexed(name: str | None, elements: list[Node]) -> list[Node]:
@@ -219,7 +259,7 @@ class Decoder:
 
         """
         entry = self.spec.unit(self.spec.entry)
-        return self._unit(entry, (), None, cursor, depth=0)
+        return self._unit(entry, (), None, cursor, _Read(origin=cursor.byte_offset()))
 
     # The stage driver imports this module, so these import it back lazily —
     # the same trade as `Spec.from_file`. It keeps every `zpf` import in one
@@ -289,11 +329,11 @@ class Decoder:
         args: Sequence[ExprValue],
         parent: _Frame | None,
         cursor: Cursor,
-        depth: int,
+        read: _Read,
     ) -> Node:
         """Decode one instance of ``unit``."""
         mark = cursor.tell()
-        if depth > MAX_DEPTH:
+        if read.depth > MAX_DEPTH:
             detail = f"unit nesting passed {MAX_DEPTH} levels at {unit.name!r}"
             start, end = cursor.span(mark)
             return Node(
@@ -312,7 +352,7 @@ class Decoder:
         status, detail = NodeStatus.OK, None
         try:
             for item in unit.fields:
-                child = self._field(item, frame, cursor, depth)
+                child = self._field(item, frame, cursor, read)
                 if child is None:
                     continue
                 children.append(child)
@@ -364,7 +404,7 @@ class Decoder:
 
     # --- fields ------------------------------------------------------------
 
-    def _field(self, item: Field, frame: _Frame, cursor: Cursor, depth: int) -> Node | None:
+    def _field(self, item: Field, frame: _Frame, cursor: Cursor, read: _Read) -> Node | None:
         """Decode one field, or return ``None`` if its condition excluded it."""
         env = _Environment(frame)
         if item.condition is not None:
@@ -377,17 +417,17 @@ class Decoder:
                 # nothing and gets no node, so it creates no empty span.
                 return None
         if item.repeat is not None:
-            return self._repeat(item, frame, cursor, depth)
-        return self._one(item, item.type, frame, cursor, depth)
+            return self._repeat(item, frame, cursor, read)
+        return self._one(item, item.type, frame, cursor, read)
 
-    def _repeat(self, item: Field, frame: _Frame, cursor: Cursor, depth: int) -> Node:
+    def _repeat(self, item: Field, frame: _Frame, cursor: Cursor, read: _Read) -> Node:
         """Decode a repeated field into a container node."""
         mark = cursor.tell()
         repeat = item.repeat
         elements: list[Node] = []
         status, detail = NodeStatus.OK, None
         try:
-            for element in self._elements(item, repeat, frame, cursor, depth):
+            for element in self._elements(item, repeat, frame, cursor, read):
                 elements.append(element)
         except _Stop as stop:
             status, detail = stop.status, stop.detail
@@ -404,7 +444,7 @@ class Decoder:
         )
 
     def _elements(
-        self, item: Field, repeat: Repeat, frame: _Frame, cursor: Cursor, depth: int
+        self, item: Field, repeat: Repeat, frame: _Frame, cursor: Cursor, read: _Read
     ) -> Iterator[Node]:
         """Decode a repetition's elements, guarding against a loop that cannot end.
 
@@ -428,7 +468,7 @@ class Decoder:
             if isinstance(repeat, ToEnd) and cursor.at_end():
                 return
             before = cursor.tell()
-            element = self._one(item, item.type, frame, cursor, depth)
+            element = self._one(item, item.type, frame, cursor, read)
             yield element
             count += 1
             if element.status is not NodeStatus.OK:
@@ -450,13 +490,13 @@ class Decoder:
     # --- values ------------------------------------------------------------
 
     def _one(
-        self, item: Field, kind: FieldType, frame: _Frame, cursor: Cursor, depth: int
+        self, item: Field, kind: FieldType, frame: _Frame, cursor: Cursor, read: _Read
     ) -> Node:
         """Decode one value of ``kind``."""
         env = _Environment(frame)
         mark = cursor.tell()
         try:
-            return self._value(item, kind, frame, cursor, depth, mark, env)
+            return self._value(item, kind, frame, cursor, read, mark, env)
         except TruncatedRead as exc:
             start, end = cursor.span(mark)
             return Node(
@@ -486,24 +526,111 @@ class Decoder:
         kind: FieldType,
         frame: _Frame,
         cursor: Cursor,
-        depth: int,
+        read: _Read,
         mark: int,
         env: _Environment,
     ) -> Node:
         """Decode one value, having already marked the start."""
         if isinstance(kind, Switch):
-            return self._switch(item, kind, frame, cursor, depth, env)
+            return self._switch(item, kind, frame, cursor, read, env)
         if isinstance(kind, UnitRef):
-            return self._unit_ref(item, kind, frame, cursor, depth, env)
+            return self._unit_ref(item, kind, frame, cursor, read, env)
         if isinstance(kind, Computed):
             value = evaluate(kind.expr, env)
             start, end = cursor.span(mark)
             return self._leaf(item, kind, value, start, end)
+        if isinstance(kind, Pointer):
+            return self._pointer(item, kind, frame, cursor, read, env)
         if isinstance(kind, IntType):
             value = cursor.read_int(kind.bits, signed=kind.signed, endian=kind.endian)
             start, end = cursor.span(mark)
             return self._leaf(item, kind, value, start, end)
         return self._sized(item, kind, cursor, mark, env)
+
+    def _pointer(
+        self,
+        item: Field,
+        kind: Pointer,
+        frame: _Frame,
+        cursor: Cursor,
+        read: _Read,
+        env: _Environment,
+    ) -> Node:
+        """Read ``kind.type`` at ``kind.at``, leaving ``cursor`` where it is.
+
+        §2.1 survives this. The spec *names* an offset and the runtime does the
+        seeking, on a second cursor from :meth:`Cursor.view`, so the reading
+        position never moves and coverage stays provable. That is the whole
+        reason ``DESIGN.md`` §3.2 chose a construct over a hook.
+
+        The node cites the region it read — one contiguous range, because a
+        pointer consumes nothing where it stands and the bytes encoding the
+        reference were read by ordinary fields.
+        """
+        offset = self._int(kind.at, env, "pointer offset")
+        target = read.origin + offset
+        # The ceiling is the message's high-water mark, lowered by every hop
+        # already taken. Bounding at the *run* instead would make a message's
+        # decode depend on the bytes that happen to follow it, which is not a
+        # theory: the same message given three different neighbours decoded
+        # three ways before this rule replaced it.
+        ceiling = cursor.byte_offset()
+        if read.limit is not None:
+            ceiling = min(ceiling, read.limit)
+        if offset < 0 or target < read.origin or target >= ceiling:
+            return self._unreadable(
+                item,
+                kind,
+                cursor,
+                f"pointer target {offset} is outside the bytes already decoded",
+            )
+        if read.hops >= MAX_POINTER_HOPS:
+            return self._unreadable(
+                item, kind, cursor, f"pointer chain passed {MAX_POINTER_HOPS} hops"
+            )
+
+        # The window is the message *so far*, not the target onward: a further
+        # hop has to reach back past this one, since each lands strictly
+        # earlier. Bounding it at both ends is also what stops a pointer
+        # reading into a neighbouring message that shares the run.
+        second = cursor.view(read.origin, ceiling)
+        second.seek_to(target)
+        node = self._one(
+            item,
+            kind.type,
+            frame,
+            second,
+            replace(read, limit=target, hops=read.hops + 1),
+        )
+        if node.status is NodeStatus.TRUNCATED:
+            # A short read *inside a pointer target* is not a short input.
+            # `truncated` is hole-class (§5), so leaving it would declare a
+            # seam and say those bytes never existed — a lie about input that
+            # arrived intact, when what happened is that the spec aimed badly.
+            return replace(
+                node,
+                status=NodeStatus.UNDECODABLE,
+                detail=f"pointer target does not decode: {node.detail}",
+            )
+        return node
+
+    def _unreadable(self, item: Field, kind: FieldType, cursor: Cursor, detail: str) -> Node:
+        """Build the node for a pointer that cannot be followed.
+
+        Undecodable rather than a hole, and zero width because the reference
+        bytes belong to the fields that read them; this node is about the
+        region it could not reach.
+        """
+        start, end = cursor.span(cursor.tell())
+        return Node(
+            name=item.name,
+            off_start=start,
+            off_end=end,
+            status=NodeStatus.UNDECODABLE,
+            detail=detail,
+            spec_field=item,
+            resolved_type=kind,
+        )
 
     def _leaf(
         self,
@@ -585,7 +712,7 @@ class Decoder:
         kind: Switch,
         frame: _Frame,
         cursor: Cursor,
-        depth: int,
+        read: _Read,
         env: _Environment,
     ) -> Node:
         """Dispatch on a value, or mark the region undecodable."""
@@ -599,7 +726,7 @@ class Decoder:
                 NodeStatus.UNDECODABLE,
                 f"no case for {selector!r} and no default",
             )
-        return self._one(item, chosen, frame, cursor, depth)
+        return self._one(item, chosen, frame, cursor, read)
 
     def _unit_ref(
         self,
@@ -607,7 +734,7 @@ class Decoder:
         kind: UnitRef,
         frame: _Frame,
         cursor: Cursor,
-        depth: int,
+        read: _Read,
         env: _Environment,
     ) -> Node:
         """Decode a nested unit instance.
@@ -622,7 +749,7 @@ class Decoder:
         """
         target = self.spec.unit(kind.unit)
         args = [evaluate(argument, env) for argument in kind.args]
-        node = self._unit(target, args, frame, cursor, depth + 1)
+        node = self._unit(target, args, frame, cursor, replace(read, depth=read.depth + 1))
         # Keep the field's name, not the unit's: `header: {unit: header_v4}`
         # is referenced as `header`.
         return Node(

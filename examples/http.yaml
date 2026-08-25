@@ -1,15 +1,18 @@
 # HTTP/1.1 over TCP, RFC 7230.
 #
-# Decodes the start line and every header. The body is claimed as opaque bytes
-# rather than framed, because framing it needs arithmetic on a *header value*:
-# Content-Length is a decimal string and a chunk size is a hexadecimal one, and
-# the expression language has no string-to-integer conversion, no substring,
-# and no case-insensitive compare. See plans/REAL-CAPTURE-PHASE-PLAN.md.
+# Decodes the start line, every header, and a chunked body down to its chunks.
+#
+# What it does not do is choose its framing. Deciding between Content-Length
+# and chunked encoding means asking a question about the *set* of headers, and
+# the expression language cannot: `headers` is a repeated field, and there is
+# no list type, so nothing can ask whether any of them said `chunked`. This
+# spec assumes chunked framing, which is what the capture it was written
+# against uses. See the body's own doc.
 name: http
 version: "1.0"
 entry: message
 input: stream
-doc: HTTP/1.1 messages, start line and headers.
+doc: HTTP/1.1 messages, start line, headers, and a chunked body.
 
 units:
   message:
@@ -26,13 +29,45 @@ units:
           blank line is kept as the last element rather than dropped: it is
           input, and every byte has to be accounted for.
       - name: body
-        type: {bytes: {size: {remaining: true}}}
+        type: {unit: chunk}
+        repeat: {to_end: true}
         doc: >
-          Everything after the headers, undecoded. Correct for this capture
-          and wrong in general: with a real Content-Length or chunked framing
-          this would end at the message boundary, not the end of the run.
+          The body, read as chunked-encoding chunks. A message with no body
+          decodes zero of them, which is why this needs no condition — there
+          is nothing to ask, and asking would need a list type the language
+          does not have.
+
+          Two things this gets wrong, both stated rather than left to be
+          found. A body that is not chunk-formatted has no size line, so the
+          read for one comes back `truncated` — a hole-class reason, which
+          says the stream had a gap when it did not. And a run holding two
+          messages has the second swallowed by `to_end`.
+
+          Both follow from *assuming* a framing instead of choosing one, which
+          is the part HTTP still needs and this language cannot yet say.
 
   header:
     fields:
       - name: line
         type: {string: {size: {terminated: {delimiter: "\r\n"}}}}
+
+  chunk:
+    doc: >
+      One chunk: a hexadecimal size line, that many bytes, and the CRLF after
+      them. The last chunk of a body has size zero and no data.
+    fields:
+      - name: size
+        type: {string: {size: {terminated: {delimiter: "\r\n"}}}}
+        doc: The size in hexadecimal, as text — this is what `to_int` is for.
+      - name: length
+        type: {computed: "to_int(size, 16)"}
+        doc: The same number, converted once and named.
+      - name: data
+        type: {bytes: {size: {expr: "length"}}}
+        doc: >
+          Opaque. This capture's body is `Content-Encoding: gzip`, and
+          decompressing it is a byte transform the language cannot express —
+          a gap of a different kind from the one this spec's framing closed.
+      - name: null
+        type: {bytes: {size: 2}}
+        doc: The CRLF after the data.

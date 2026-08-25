@@ -31,6 +31,65 @@ installed from a checkout (see the README).
 
 ### Added
 
+- `kober.spec.Pointer` and the `pointer:` spec key — a back-reference:
+  *read this type at that offset, and carry on where you were*
+  (`DESIGN.md` §3.2). Real DNS needs it; without it the answer section of
+  nearly every response is undecodable.
+
+  `at` is an integer expression giving an offset **from the start of the
+  message**, which is the only space it can mean — a run holds many messages,
+  and a stream-absolute reading would work on a run's first message and
+  silently misread every later one. Because `at` is an expression, a pointer
+  reads nothing where it stands: the bytes encoding the reference are read by
+  ordinary fields, so a pointer cites one contiguous range and never two.
+
+  A pointer may target only bytes the message has already decoded. Anything
+  else — past the end, forward, or a target that does not decode — makes the
+  region `undecodable` and never raises. That rule is also what bounds chains:
+  each hop must land strictly earlier than the last, so a cycle cannot be
+  constructed.
+
+  The model, the loader schema, the checker, the interpreter, **and the
+  compiler**. A generated decoder follows a pointer at 10 MB/s against the real
+  DNS response — 31× the interpreter — and a spec with no pointer is generated
+  exactly as before, because the message origin and the chain's ceiling are
+  threaded only into a plan that has one.
+
+  The backend refuses three shapes rather than approximating them: a `switch`
+  under a pointer, a `switch` with a pointer in only some cases, and a repeated
+  pointer. Each decodes under the interpreter, and each refusal names the shape
+  — which beats generating something subtly different from what the
+  interpreter does, the one divergence the differential could never catch.
+
+- **Two functions in the expression language**, `to_int` and `lower`, and the
+  `Call` node and closed `BUILTINS` table behind them. `to_int(s)` and
+  `to_int(s, base)` read text as an integer; `lower(s)` lower-cases it for a
+  case-insensitive comparison. They are what real HTTP framing needs and
+  nothing more: a `Content-Length` is a decimal string, a chunk size a
+  hexadecimal one, and whether chunked framing applies depends on a header
+  value whose case varies (`DESIGN.md` §13.2).
+
+  `to_int` is stricter than a typical conversion — surrounding whitespace is
+  allowed, a digit separator or radix prefix is not — because reading `1_0` as
+  ten turns a malformed wire length into a plausible one. Text that is not a
+  number makes the field `undecodable` rather than raising, on the path a size
+  expression that cannot be evaluated already takes.
+
+  **The table is closed and matched by name.** An unknown function is a
+  load-time error naming what does exist, so "a spec cannot run code" still
+  holds now that calls parse at all.
+
+  Generated code calls `kober.runtime.to_int`, which **is** the function the
+  interpreter evaluates. One implementation of a conversion that is
+  deliberately stricter than Python's means the two cannot drift.
+
+- `kober.cursor.Cursor.view` and `Cursor.seek_to` — the seam a redirect reads
+  through. `view(off_start, off_end)` hands out a second position over the same
+  run, with its own base so spans stay absolute and its own end so a sub-decode
+  cannot see a byte the caller did not give it. It does not move the cursor it
+  came from, which is what keeps §2.1 true of a construct that reads elsewhere.
+  `seek_to` is `seek`'s byte-offset counterpart, in the stream's own space.
+
 - `pyproject.toml`, packaging `kober` with a `kober` console script and an
   optional `yaml` extra for spec authoring.
 - `DESIGN.md` — draft design: the spec model, decode semantics, emission
@@ -509,6 +568,29 @@ installed from a checkout (see the README).
 
 ### Changed
 
+- **Breaking: `examples/dns.yaml` decodes a whole message.** The answer,
+  authority, and additional sections are decoded rather than marked `skipped`,
+  following compression pointers into names decoded earlier. All eight messages
+  in the real capture now decode with **no undecoded regions at all**, clean
+  through `ConformanceChecker` and `check_coverage` at both granularities.
+
+  Callers reading its output must expect the new shape: `message.answers`,
+  `message.authority` and `message.additional` replace the single
+  `resource_records` field, and a label's second field is `rest` — a switch
+  holding either text or the second half of a pointer — where it was `text`.
+  Record data stays opaque bytes, which is a choice rather than a limitation.
+
+- **Breaking: `examples/http.yaml` frames a chunked body into its chunks**,
+  using `to_int` on the hexadecimal size line. Both messages in the real
+  capture decode with no undecoded regions.
+
+  It **assumes** chunked framing rather than choosing it, and says so in its
+  own `doc:`. Choosing would mean asking whether any header said `chunked`, and
+  no expression can ask anything about a *repeated* field — there is no list
+  type. A body that is not chunk-formatted therefore comes back `truncated`,
+  which is hole-class and claims a gap the stream did not have. Callers reading
+  its output get `message.body` as a list of chunks where it was opaque bytes.
+
 - The `zpf` requirement is now `>=0.2.0,<0.3`, up from `>=0.2.0.dev0,<0.3`.
   The `.dev0` floor existed only so an unreleased local checkout could satisfy
   it, and `zpf` `0.2.0` is now released and tagged. Tightening it is also a
@@ -540,6 +622,29 @@ installed from a checkout (see the README).
   field.
 
 ### Fixed
+
+- **A field path in a compiled decoder carried the backend's identifier, not
+  the spec's.** A field named `class` is a Python keyword, so the attribute
+  holding it is `class_` — and that spelling reached the record's field path,
+  where the interpreter wrote `class`. A path is what a consumer reads out of
+  the file and the two implementations have to agree on it. Found by the
+  differential, in code that predates the construct that exposed it.
+
+- **A unit reachable only through a pointer was dropped from a compiled
+  module**, which then called a decode function it had not generated. The
+  checker had been taught to walk a pointer's target; the compiler's own
+  reachability walk had not.
+
+- **A generated decoder could raise `EvalError`** where the interpreter
+  recorded an undecodable region: the backend wraps an expression that can fail
+  so the failure can say *where* it happened, and it did not know that reading
+  text as a number is a fourth way to fail. A decode that raises leaves its
+  input unaccounted for, which is the promise the module makes.
+
+- **A generated `switch` mixing a nested unit with a scalar produced nested
+  `if` statements** that `ruff` refuses, so such a module failed the project's
+  own lint. Where exactly one branch writes a record, the two tests now fold
+  into one.
 
 - **A computed value too wide for `prim:` raised out of the emitter.** `prim:`
   stops at 64 bits and a computed value does not: `1 << n` with `n` off the wire
@@ -637,6 +742,45 @@ installed from a checkout (see the README).
   asked for a committed example and had only test fixtures.
 
 ### Documentation
+
+- `DESIGN.md` **revision 8**: `Pointer` as built rather than decided (§3.2),
+  §2.1 restated for a second cursor, §13.1 closed, §13.2 corrected, §11
+  question 5's line re-drawn, and a new question 6.
+
+  §13.2 is the one worth reading. It had been the record of what real HTTP
+  needed and it was wrong: it named arithmetic on a header value, this release
+  built that arithmetic, and the boundary did not close. What actually blocks
+  HTTP is being unable to say anything about a *repeated* field, which is now
+  question 6 rather than a surprise waiting in a test.
+
+  §2.1's restatement is the second in two releases. Compiling made the cursor
+  rule a property of one program; a pointer adds a position that reads
+  elsewhere. It holds because the spec names an *offset* and the runtime does
+  the seeking, under bounds the runtime applies: backwards only, inside the
+  message, with each hop landing strictly earlier than the last.
+
+- `docs/dev/architecture.md` describes the **redirect seam** — what
+  `Cursor.view` is, that `Pointer` is its only caller, and what a byte
+  transform would supply instead. Written so the next phase inherits a decision
+  rather than re-deriving one, with the test that it was drawn in the right
+  place stated in advance.
+
+- `DESIGN.md` §3.3 no longer says the language has no calls, because it now
+  has two. The restatement is a narrowing of the rule's scope rather than an
+  exception to it: what the whitelist bought was no author-supplied code and no
+  unbounded work, and a closed table of total functions costs neither. It also
+  records what the table is *not* for — a byte transform maps bytes to bytes
+  and feeds a sub-decode, and routing one through expressions would cost
+  `check` its static answer.
+
+- `DESIGN.md` §2 now says what the coverage guarantee is **not**: leaves do not
+  tile the input. Until `Pointer`, every leaf covered a distinct range and
+  "tiling" and "covered" were the same statement, so the emitter was built on
+  the stronger one and a test asserted it. A region decoded in place and then
+  reached again by reference is cited twice, which `zpf` permits in as many
+  words. What survives is the guarantee itself — every byte cited or named, and
+  never both — which pointers leave untouched, since a pointed-at region is
+  cited, and cited is what "not undecoded" means.
 
 - `DESIGN.md` **revision 7**: the compiler as §14, and a restatement of §2.1.
   The cursor rule was true by impossibility — there was no author-supplied code,

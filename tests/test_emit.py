@@ -484,3 +484,50 @@ def test_emission_is_frozen():
     record = Emission(b"", "prim:u8", 0, 1)
     with pytest.raises(AttributeError):
         record.payload = b"x"  # type: ignore[misc]
+
+
+# --- pointers --------------------------------------------------------------
+
+POINTER_OVERLAP_SPEC = """
+name: p
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: blob, type: {bytes: {size: 4}}}
+      - {name: pos, type: {int: {bits: 8}}}
+      - {name: seen, type: {pointer: {at: "pos", type: {int: {bits: 16}}}}}
+"""
+
+
+def overlap_plan(emit: Emit = Emit.FIELD):
+    spec = Spec.from_yaml(POINTER_OVERLAP_SPEC)
+    data = b"\xaa\xbb\xcc\xdd\x01"
+    tree = Decoder(spec).decode_bytes(data)
+    return data, plan(spec, tree, data, emit=emit)
+
+
+def test_a_pointer_partially_overlapping_a_field_leaves_no_hole():
+    """The hard case for `_holes`: a citation *inside* another citation.
+
+    Real DNS does exactly this — an owner name pointing into the middle of an
+    earlier record's rdata — and interval subtraction is where it would go
+    wrong.
+    """
+    data, (emissions, unclaimed) = overlap_plan()
+    assert unclaimed == [], f"spurious holes: {unclaimed}"
+    cited: set[int] = set()
+    for record in emissions:
+        cited.update(range(record.off_start, record.off_end))
+    assert cited == set(range(len(data)))
+
+
+def test_the_overlap_is_really_there():
+    """Guards the test above: without overlap it would prove nothing."""
+    _, (emissions, _) = overlap_plan()
+    (inner,) = [e for e in emissions if e.comment == "p.seen"]
+    (blob,) = [e for e in emissions if e.comment == "p.blob"]
+    assert (inner.off_start, inner.off_end) == (1, 3)
+    assert (blob.off_start, blob.off_end) == (0, 4)
+    assert blob.off_start < inner.off_start and inner.off_end < blob.off_end

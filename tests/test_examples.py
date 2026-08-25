@@ -78,7 +78,7 @@ def test_dns_decodes_a_name_as_labels():
     tree = Decoder(spec).decode_bytes(DNS_QUERY)
     question = tree.find("questions").children[0]
     labels = question.find("qname").find("labels").children
-    assert [label.find("text").value for label in labels] == ["example", "com", ""]
+    assert [label.find("rest").value for label in labels] == ["example", "com", ""]
 
 
 def test_dns_field_paths_are_readable():
@@ -88,7 +88,7 @@ def test_dns_field_paths_are_readable():
     emissions, _ = plan(spec, tree, DNS_QUERY, emit=Emit.FIELD)
     paths = [record.comment for record in emissions]
     assert "dns.flags.qr" in paths
-    assert "dns.questions[0].qname.labels[0].text" in paths
+    assert "dns.questions[0].qname.labels[0].rest" in paths
     assert not any("questions.questions" in path for path in paths)
 
 
@@ -122,8 +122,33 @@ def test_http_reads_headers_up_to_the_blank_line():
     assert lines == ["Host: httpforever.com", "Accept: */*", ""]
 
 
-def test_http_body_is_whatever_remains():
-    """Honest for this shape, and wrong in general — see the spec's own doc."""
+def test_http_frames_a_chunked_body():
+    """§13.2's boundary, as far as the language reaches: `to_int` on a size line."""
+    spec = load("http.yaml")
+    body = b"1a\r\n" + b"x" * 0x1A + b"\r\n" + b"0\r\n\r\n"
+    tree = Decoder(spec).decode_bytes(HTTP_REQUEST + body)
+    assert tree.status is NodeStatus.OK
+    chunks = tree.find("body").children
+    assert [chunk.find("length").value for chunk in chunks] == [0x1A, 0]
+    assert chunks[0].find("data").value == b"x" * 0x1A
+
+
+def test_http_decodes_no_chunks_when_there_is_no_body():
+    """Which is why the body needs no condition — there is nothing to ask."""
+    spec = load("http.yaml")
+    tree = Decoder(spec).decode_bytes(HTTP_REQUEST)
+    assert tree.status is NodeStatus.OK
+    assert tree.find("body").children == ()
+
+
+def test_http_misreads_a_body_that_is_not_chunked():
+    """The cost of assuming a framing, asserted so it is not discovered later.
+
+    A body that is not chunk-formatted has no size line, so the read for one
+    ends up `truncated` — a **hole**-class reason, which says the stream had a
+    gap when it did not. The spec's own doc names this; it is the reason
+    choosing the framing, rather than assuming it, is what HTTP still needs.
+    """
     spec = load("http.yaml")
     tree = Decoder(spec).decode_bytes(HTTP_REQUEST + b"leftover")
-    assert tree.find("body").value == b"leftover"
+    assert tree.status is NodeStatus.TRUNCATED

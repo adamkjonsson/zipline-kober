@@ -303,7 +303,43 @@ class Computed:
     expr: Expr
 
 
-FieldType = IntType | BytesType | StringType | UnitRef | Switch | Computed
+@dataclass(frozen=True)
+class Pointer:
+    """A back-reference: read ``type`` at ``at``, and carry on where you were.
+
+    Real DNS demanded it — an answer record's owner name is usually two bytes
+    meaning "the name at offset 12" (RFC 1035 §4.1.4) — and without it the
+    answer section of nearly every real response is undecodable
+    (``DESIGN.md`` §13.1).
+
+    **It does not break §2.1's cursor rule, and that is why it was chosen over
+    a hook.** The spec *names* an offset and the runtime does the seeking, so
+    the reading position never moves and coverage stays provable. A hook would
+    solve the same problem by handing an author the position, which is the one
+    thing §2.1 reserves.
+
+    ``at`` is an expression, so a pointer reads **nothing** where it stands:
+    the bytes encoding the reference are read by ordinary fields, whose
+    citations already cover them. The shape is :class:`Computed`'s — zero
+    width at the cursor, evidence about somewhere else — which is why one
+    field never needs to cite two disjoint ranges.
+
+    Offsets are **message-relative**, the only space the construct has: a run
+    holds many messages, and a pointer that meant stream-absolute would work
+    on a run's first message and silently misread every later one.
+
+    Attributes:
+        at: An integer expression giving the offset to read at, measured from
+            the start of the message being decoded.
+        type: What is there.
+
+    """
+
+    at: Expr
+    type: FieldType
+
+
+FieldType = IntType | BytesType | StringType | UnitRef | Switch | Computed | Pointer
 
 
 # --- units and specs -------------------------------------------------------

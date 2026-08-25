@@ -44,6 +44,22 @@ HTTP_REQUEST = b"GET / HTTP/1.1\r\nHost: httpforever.com\r\nAccept: */*\r\n\r\n"
 #: The seed input each shipped example is fuzzed from.
 SEEDS: dict[str, bytes] = {"dns.yaml": DNS_QUERY, "http.yaml": HTTP_REQUEST}
 
+#: A real DNS response, from `python-zipline-wire`'s ``dns_example.pcapng``.
+#: Its answer's owner name is ``c0 0c`` — the compression pointer of RFC 1035
+#: §4.1.4, and the reason `Pointer` exists. Inlined rather than read from the
+#: sibling checkout, so this suite still stands alone.
+#:
+#: It is fuzzed against ``examples/dns.yaml``, which follows pointers. The
+#: query in :data:`SEEDS` reaches none of that code, so this is the seed that
+#: does — mutating it lands offsets past the end, forward references, targets
+#: that are not names, and pointers at bytes that were never a pointer.
+DNS_RESPONSE = bytes.fromhex(
+    "183e818000010001000000001c62726f777365722d696e74616b652d7573352d"
+    "64617461646f67687103636f6d0000010001c00c000100010000009f00042295"
+    "429a"
+)
+
+
 
 def mutate(data: bytes, rng: random.Random) -> bytes:
     """Return one adversarial variant of ``data``.
@@ -116,3 +132,16 @@ def cases(name: str, seed: int) -> list[bytes]:
 
     """
     return variants(SEEDS[name], seed)
+
+
+def pointer_cases(seed: int) -> list[bytes]:
+    """Build one batch of variants of the real response, for ``dns.yaml``.
+
+    Args:
+        seed: Which batch.
+
+    Returns:
+        The batch.
+
+    """
+    return variants(DNS_RESPONSE, seed)

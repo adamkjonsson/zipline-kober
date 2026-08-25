@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 from kober.errors import SpecError
@@ -17,6 +19,7 @@ from kober.spec import (
     InputShape,
     IntType,
     Param,
+    Pointer,
     Remaining,
     Spec,
     StringType,
@@ -250,3 +253,16 @@ def test_a_realistic_spec_assembles():
     )
     assert spec.unit("flags").emit is Emit.FIELD
     assert spec.unit("message").field("body").condition is not None
+
+
+def test_pointer_is_a_field_type():
+    kind = Pointer(at=parse("n"), type=IntType(bits=8))
+    assert kind.type == IntType(bits=8)
+    with pytest.raises(FrozenInstanceError):
+        kind.at = parse("0")  # type: ignore[misc]
+
+
+def test_pointer_nests_a_whole_type():
+    """The target is any field type, a unit included — §3.2."""
+    kind = Pointer(at=parse("0"), type=UnitRef(unit="name"))
+    assert kind.type == UnitRef(unit="name")

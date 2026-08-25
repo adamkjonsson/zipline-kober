@@ -13,7 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from kober.errors import SpecError
+from kober.check import check
+from kober.errors import CompileError, SpecError
+from kober.expr import unparse
 from kober.ops import Kind, Plan
 from kober.spec import Spec
 
@@ -34,7 +36,7 @@ def dns() -> Plan:
 def test_a_plan_carries_the_specs_own_identity():
     plan = dns()
     assert (plan.name, plan.version, plan.entry) == ("dns", "1.0", "message")
-    assert plan.doc == "DNS messages, header and question section."
+    assert plan.doc == "DNS messages, header, question section, and resource records."
 
 
 def test_units_keep_the_order_the_spec_declares_them_in():
@@ -43,8 +45,10 @@ def test_units_keep_the_order_the_spec_declares_them_in():
         "message",
         "flags",
         "question",
+        "rr",
         "name",
         "label",
+        "compressed",
     ]
 
 
@@ -90,9 +94,17 @@ def test_a_repeated_field_says_so():
 
 def test_a_conditional_field_carries_the_condition_not_a_flag():
     """A target may want to say *when* a field is present, not only that it may be absent."""
-    (field,) = [
-        item for item in dns().object("message").fields if item.name == "resource_records"
-    ]
+    spec = Spec.from_yaml("""
+name: c
+version: "1.0"
+entry: m
+units:
+  m:
+    fields:
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: body, type: {bytes: {size: 2}}, condition: "n > 0"}
+""")
+    (_, field) = Plan.from_spec(spec).object("m").fields
     assert field.optional
     assert field.condition is not None
 
@@ -280,3 +292,68 @@ def test_checking_can_be_skipped_by_a_caller_that_already_did_it():
 def test_asking_for_a_unit_that_is_not_there_says_what_is():
     with pytest.raises(KeyError, match="label"):
         dns().object("nonesuch")
+
+
+def test_a_pointer_plans_as_its_target_read_elsewhere():
+    """A pointer adds no kind of its own: the value is whatever is there."""
+    spec = Spec.from_yaml("""
+name: p
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: lo, type: {int: {bits: 8}}}
+      - {name: t, type: {pointer: {at: "lo", type: {int: {bits: 8}}}}}
+""")
+    assert check(spec) == ()
+    (_, pointer) = Plan.from_spec(spec).object("message").fields
+    (value,) = pointer.types
+    assert value.kind is Kind.INT
+    assert value.bits == 8
+    assert unparse(value.at) == "lo"
+
+
+def test_a_pointer_never_counts_as_consuming():
+    """It reads elsewhere, so a repeat of them must keep its progress check."""
+    spec = Spec.from_yaml("""
+name: p
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: lo, type: {int: {bits: 8}}}
+      - {name: t, type: {pointer: {at: "lo", type: {unit: inner}}}}
+  inner:
+    fields:
+      - {name: x, type: {int: {bits: 8}}}
+""")
+    (_, pointer) = Plan.from_spec(spec).object("message").fields
+    assert pointer.types[0].consumes is False
+    assert pointer.consumes is False
+
+
+def test_a_switch_under_a_pointer_is_refused_with_a_real_message():
+    """The plan carries a selector on the field, so it has nowhere to put one."""
+    spec = Spec.from_yaml("""
+name: p
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: lo, type: {int: {bits: 8}}}
+      - name: t
+        type:
+          pointer:
+            at: "lo"
+            type:
+              switch:
+                on: "lo"
+                cases:
+                  0: {int: {bits: 8}}
+""")
+    assert check(spec) == ()
+    with pytest.raises(CompileError, match="switch under a pointer"):
+        Plan.from_spec(spec)

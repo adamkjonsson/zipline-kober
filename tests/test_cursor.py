@@ -279,3 +279,54 @@ def test_negative_counts_are_refused():
         Cursor(b"abc").read_bytes(-1)
     with pytest.raises(ValueError, match="negative"):
         Cursor(b"abc").read_bits(-1)
+
+
+# --- view, the redirect seam -----------------------------------------------
+
+
+def test_view_reads_the_range_it_was_given():
+    cursor = Cursor(b"abcdef", base=100)
+    view = cursor.view(102, 105)
+    assert view.read_bytes(3) == b"cde"
+
+
+def test_view_reports_absolute_spans():
+    """A sub-decode's citations have to land in the stream's own space."""
+    view = Cursor(b"abcdef", base=100).view(102, 105)
+    mark = view.tell()
+    view.read_bytes(2)
+    assert view.span(mark) == (102, 104)
+
+
+def test_view_cannot_see_past_its_end():
+    """The ceiling is what makes a redirect deterministic."""
+    view = Cursor(b"abcdef", base=100).view(102, 104)
+    assert view.remaining_bytes() == 2
+    with pytest.raises(TruncatedRead):
+        view.read_bytes(3)
+
+
+def test_view_does_not_move_the_cursor_it_came_from():
+    """§2.1: handing out a second position claims nothing."""
+    cursor = Cursor(b"abcdef", base=100)
+    cursor.read_bytes(1)
+    cursor.view(100, 103).read_bytes(3)
+    assert cursor.tell() == 8
+
+
+@pytest.mark.parametrize("bounds", [(99, 103), (100, 107), (104, 102)])
+def test_view_refuses_a_range_outside_the_run(bounds: tuple[int, int]):
+    with pytest.raises(ValueError, match="outside the run"):
+        Cursor(b"abcdef", base=100).view(*bounds)
+
+
+def test_seek_to_takes_an_absolute_offset():
+    cursor = Cursor(b"abcdef", base=100)
+    cursor.seek_to(103)
+    assert cursor.byte_offset() == 103
+    assert cursor.read_bytes(1) == b"d"
+
+
+def test_seek_to_refuses_an_offset_outside_the_run():
+    with pytest.raises(ValueError, match="outside the run"):
+        Cursor(b"abcdef", base=100).seek_to(107)

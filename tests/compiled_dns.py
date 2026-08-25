@@ -1,6 +1,6 @@
 """Decoder for the ``dns`` specification, version 1.0.
 
-DNS messages, header and question section.
+DNS messages, header, question section, and resource records.
 
 Generated from a specification by kober. Do not edit: change the spec and
 compile it again.
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar
 
-from kober.runtime import Cursor, Sink, Stopped, TruncatedRead
+from kober.runtime import Cursor, Sink, Stopped, TruncatedRead, Undecodable
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -66,11 +66,9 @@ class Message:
         nscount: A 16-bit unsigned integer.
         arcount: A 16-bit unsigned integer.
         questions: Each element is one :class:`Question`.
-        resource_records: The answer, authority, and additional sections. Left
-            undecoded on purpose: an owner name here is usually a compression
-            pointer, which this language cannot follow. Marked skipped rather
-            than claimed. Present only when ``ancount + nscount + arcount >
-            0``.
+        answers: Each element is one :class:`Rr`.
+        authority: Each element is one :class:`Rr`.
+        additional: Each element is one :class:`Rr`.
         __spans__: Byte ranges: this object's own extent first, then one pair
             per attribute above, in order.
 
@@ -83,7 +81,9 @@ class Message:
     nscount: int
     arcount: int
     questions: list[Question]
-    resource_records: bytes | None
+    answers: list[Rr]
+    authority: list[Rr]
+    additional: list[Rr]
     __spans__: tuple[int, ...]
 
     __span_index__: ClassVar[Mapping[str, int]] = MappingProxyType(
@@ -95,7 +95,9 @@ class Message:
             "nscount": 4,
             "arcount": 5,
             "questions": 6,
-            "resource_records": 7,
+            "answers": 7,
+            "authority": 8,
+            "additional": 9,
         }
     )
 
@@ -159,8 +161,40 @@ class Question:
 
 
 @dataclass(slots=True)
+class Rr:
+    """One resource record, in the answer, authority, or additional section.
+
+    Attributes:
+        name: The owner name, often a pointer.
+        type: A 16-bit unsigned integer. Labelled by :data:`RRTYPE`.
+        class_: A 16-bit unsigned integer. Labelled by :data:`RRCLASS`.
+        ttl: A 32-bit unsigned integer.
+        rdlength: A 16-bit unsigned integer.
+        rdata: Opaque here; what is inside depends on the record type.
+        __spans__: Byte ranges: this object's own extent first, then one pair
+            per attribute above, in order.
+
+    """
+
+    name: Name
+    type: int
+    class_: int
+    ttl: int
+    rdlength: int
+    rdata: bytes
+    __spans__: tuple[int, ...]
+
+    __span_index__: ClassVar[Mapping[str, int]] = MappingProxyType(
+        {"name": 0, "type": 1, "class_": 2, "ttl": 3, "rdlength": 4, "rdata": 5}
+    )
+
+
+@dataclass(slots=True)
 class Name:
-    """A sequence of length-prefixed labels ending in a zero-length one.
+    """One decoded ``name``.
+
+    A sequence of labels, ending either in a zero-length label or in a
+    compression pointer, which is always the last thing in a name.
 
     Attributes:
         labels: Each element is one :class:`Label`.
@@ -179,19 +213,47 @@ class Name:
 class Label:
     """One decoded ``label``.
 
+    A length byte, then the rest of the label. The top two bits of the length
+    decide which: 00 means that many bytes of text, and 11 means the byte is
+    the high half of a compression pointer. 01 and 10 are reserved, and there
+    is no default, so a message using one is undecodable rather than guessed
+    at.
+
     Attributes:
         length: An 8-bit unsigned integer.
-        text: Text, decoded as ``utf-8``.
+        rest: Text, decoded as ``utf-8`` or one :class:`Compressed`.
         __spans__: Byte ranges: this object's own extent first, then one pair
             per attribute above, in order.
 
     """
 
     length: int
-    text: str
+    rest: str | Compressed
     __spans__: tuple[int, ...]
 
-    __span_index__: ClassVar[Mapping[str, int]] = MappingProxyType({"length": 0, "text": 1})
+    __span_index__: ClassVar[Mapping[str, int]] = MappingProxyType({"length": 0, "rest": 1})
+
+
+@dataclass(slots=True)
+class Compressed:
+    """One decoded ``compressed``.
+
+    The second half of a compression pointer: the offset is the low 14 bits of
+    the two bytes, counted from the start of the message.
+
+    Attributes:
+        low: An 8-bit unsigned integer.
+        target: The name already at that offset, read there and returned from.
+        __spans__: Byte ranges: this object's own extent first, then one pair
+            per attribute above, in order.
+
+    """
+
+    low: int
+    target: Name
+    __spans__: tuple[int, ...]
+
+    __span_index__: ClassVar[Mapping[str, int]] = MappingProxyType({"low": 0, "target": 1})
 
 
 # --- the decoder -----------------------------------------------------------
@@ -204,6 +266,10 @@ def _decode_message(
     _base: int,
     _sink: Sink | None,
     _path: str,
+    _depth: int,
+    _origin: int,
+    _limit: int,
+    _hops: int,
 ) -> tuple[Message, int]:
     """Decode one ``message``.
 
@@ -215,6 +281,11 @@ def _decode_message(
         _sink: Where records go, or ``None`` to decode without
             emitting anything.
         _path: This instance's field path, which its records carry.
+        _depth: How many units deep this decode already is.
+        _origin: Where the message starts, as an index into ``_data``. A
+            pointer offset is measured from here.
+        _limit: What a pointer may not reach, or ``-1`` before the first hop.
+        _hops: How many hops the chain has taken.
 
     Returns:
         The decoded ``message``, and the byte offset
@@ -222,8 +293,12 @@ def _decode_message(
 
     Raises:
         TruncatedRead: If the input ends inside it.
+        Undecodable: If the input is not what this unit describes.
 
     """
+    if _depth > 64:
+        raise Undecodable("unit nesting passed 64 levels", _at)
+
     _b = _base + _at
     _extent = _b
 
@@ -236,7 +311,9 @@ def _decode_message(
         _sink.record(id.to_bytes(2, "little"), "prim:u16", _s_id, _e_id, _path + ".id")
 
     _s_flags = _b + 2
-    flags, _at = _decode_flags(_data, _size, _at + 2, _base, _sink, _path + ".flags")
+    flags, _at = _decode_flags(
+        _data, _size, _at + 2, _base, _sink, _path + ".flags", _depth + 1, _origin, _limit, _hops
+    )
     _b = _base + _at
     _e_flags = _b
 
@@ -286,24 +363,77 @@ def _decode_message(
     questions: list[Question] = []
     for _index in range(qdcount):
         _element, _at = _decode_question(
-            _data, _size, _at, _base, _sink, f"{_path}.questions[{_index}]"
+            _data,
+            _size,
+            _at,
+            _base,
+            _sink,
+            f"{_path}.questions[{_index}]",
+            _depth + 1,
+            _origin,
+            _limit,
+            _hops,
         )
         _b = _base + _at
         questions.append(_element)
     _e_questions = _b
 
-    if ancount + nscount + arcount > 0:
-        _s_resource_records = _b
-        resource_records = _data[_at:]
-        _at = _size
+    _s_answers = _b
+    answers: list[Rr] = []
+    for _index in range(ancount):
+        _element, _at = _decode_rr(
+            _data,
+            _size,
+            _at,
+            _base,
+            _sink,
+            f"{_path}.answers[{_index}]",
+            _depth + 1,
+            _origin,
+            _limit,
+            _hops,
+        )
         _b = _base + _at
-        _e_resource_records = _b
-        if _sink is not None and _e_resource_records > _s_resource_records:
-            _sink.undecoded(_s_resource_records, _e_resource_records, "skipped")
-    else:
-        # Absent, not empty: it read nothing, so it cites nothing.
-        resource_records = None
-        _s_resource_records = _e_resource_records = _b
+        answers.append(_element)
+    _e_answers = _b
+
+    _s_authority = _b
+    authority: list[Rr] = []
+    for _index in range(nscount):
+        _element, _at = _decode_rr(
+            _data,
+            _size,
+            _at,
+            _base,
+            _sink,
+            f"{_path}.authority[{_index}]",
+            _depth + 1,
+            _origin,
+            _limit,
+            _hops,
+        )
+        _b = _base + _at
+        authority.append(_element)
+    _e_authority = _b
+
+    _s_additional = _b
+    additional: list[Rr] = []
+    for _index in range(arcount):
+        _element, _at = _decode_rr(
+            _data,
+            _size,
+            _at,
+            _base,
+            _sink,
+            f"{_path}.additional[{_index}]",
+            _depth + 1,
+            _origin,
+            _limit,
+            _hops,
+        )
+        _b = _base + _at
+        additional.append(_element)
+    _e_additional = _b
 
     _s, _e = _extent, _b
     return Message(
@@ -314,7 +444,9 @@ def _decode_message(
         nscount,
         arcount,
         questions,
-        resource_records,
+        answers,
+        authority,
+        additional,
         (
             _s,
             _e,
@@ -332,8 +464,12 @@ def _decode_message(
             _e_arcount,
             _s_questions,
             _e_questions,
-            _s_resource_records,
-            _e_resource_records,
+            _s_answers,
+            _e_answers,
+            _s_authority,
+            _e_authority,
+            _s_additional,
+            _e_additional,
         ),
     ), _at
 
@@ -345,6 +481,10 @@ def _decode_flags(
     _base: int,
     _sink: Sink | None,
     _path: str,
+    _depth: int,
+    _origin: int,
+    _limit: int,
+    _hops: int,
 ) -> tuple[Flags, int]:
     """Decode one ``flags``.
 
@@ -356,6 +496,11 @@ def _decode_flags(
         _sink: Where records go, or ``None`` to decode without
             emitting anything.
         _path: This instance's field path, which its records carry.
+        _depth: How many units deep this decode already is.
+        _origin: Where the message starts, as an index into ``_data``. A
+            pointer offset is measured from here.
+        _limit: What a pointer may not reach, or ``-1`` before the first hop.
+        _hops: How many hops the chain has taken.
 
     Returns:
         The decoded ``flags``, and the byte offset
@@ -363,8 +508,12 @@ def _decode_flags(
 
     Raises:
         TruncatedRead: If the input ends inside it.
+        Undecodable: If the input is not what this unit describes.
 
     """
+    if _depth > 64:
+        raise Undecodable("unit nesting passed 64 levels", _at)
+
     _b = _base + _at
     _extent = _b
 
@@ -471,6 +620,10 @@ def _decode_question(
     _base: int,
     _sink: Sink | None,
     _path: str,
+    _depth: int,
+    _origin: int,
+    _limit: int,
+    _hops: int,
 ) -> tuple[Question, int]:
     """Decode one ``question``.
 
@@ -482,6 +635,11 @@ def _decode_question(
         _sink: Where records go, or ``None`` to decode without
             emitting anything.
         _path: This instance's field path, which its records carry.
+        _depth: How many units deep this decode already is.
+        _origin: Where the message starts, as an index into ``_data``. A
+            pointer offset is measured from here.
+        _limit: What a pointer may not reach, or ``-1`` before the first hop.
+        _hops: How many hops the chain has taken.
 
     Returns:
         The decoded ``question``, and the byte offset
@@ -489,13 +647,19 @@ def _decode_question(
 
     Raises:
         TruncatedRead: If the input ends inside it.
+        Undecodable: If the input is not what this unit describes.
 
     """
+    if _depth > 64:
+        raise Undecodable("unit nesting passed 64 levels", _at)
+
     _b = _base + _at
     _extent = _b
 
     _s_qname = _b
-    qname, _at = _decode_name(_data, _size, _at, _base, _sink, _path + ".qname")
+    qname, _at = _decode_name(
+        _data, _size, _at, _base, _sink, _path + ".qname", _depth + 1, _origin, _limit, _hops
+    )
     _b = _base + _at
     _e_qname = _b
 
@@ -526,6 +690,134 @@ def _decode_question(
     ), _at + 4
 
 
+def _decode_rr(
+    _data: bytes,
+    _size: int,
+    _at: int,
+    _base: int,
+    _sink: Sink | None,
+    _path: str,
+    _depth: int,
+    _origin: int,
+    _limit: int,
+    _hops: int,
+) -> tuple[Rr, int]:
+    """Decode one ``rr``.
+
+    Args:
+        _data: The run being decoded.
+        _size: Its length, passed rather than measured again here.
+        _at: Where in it to start, as a byte offset.
+        _base: Stream offset of ``_data[0]``, so byte ranges are absolute.
+        _sink: Where records go, or ``None`` to decode without
+            emitting anything.
+        _path: This instance's field path, which its records carry.
+        _depth: How many units deep this decode already is.
+        _origin: Where the message starts, as an index into ``_data``. A
+            pointer offset is measured from here.
+        _limit: What a pointer may not reach, or ``-1`` before the first hop.
+        _hops: How many hops the chain has taken.
+
+    Returns:
+        The decoded ``rr``, and the byte offset
+        after it.
+
+    Raises:
+        TruncatedRead: If the input ends inside it.
+        Undecodable: If the input is not what this unit describes.
+
+    """
+    if _depth > 64:
+        raise Undecodable("unit nesting passed 64 levels", _at)
+
+    _b = _base + _at
+    _extent = _b
+
+    _s_name = _b
+    name, _at = _decode_name(
+        _data, _size, _at, _base, _sink, _path + ".name", _depth + 1, _origin, _limit, _hops
+    )
+    _b = _base + _at
+    _e_name = _b
+
+    _s_type = _b
+    if _size - _at < 2:
+        raise TruncatedRead("truncated", _at)
+    type = int.from_bytes(_data[_at:_at + 2], "big")
+    _e_type = _b + 2
+    if _sink is not None:
+        _sink.record(type.to_bytes(2, "little"), "prim:u16", _s_type, _e_type, _path + ".type")
+
+    _s_class_ = _b + 2
+    if _size - _at < 4:
+        raise TruncatedRead("truncated", _at + 2)
+    class_ = int.from_bytes(_data[_at + 2:_at + 4], "big")
+    _e_class_ = _b + 4
+    if _sink is not None:
+        _sink.record(
+            class_.to_bytes(2, "little"), "prim:u16", _s_class_, _e_class_, _path + ".class"
+        )
+
+    _s_ttl = _b + 4
+    if _size - _at < 8:
+        raise TruncatedRead("truncated", _at + 4)
+    ttl = int.from_bytes(_data[_at + 4:_at + 8], "big")
+    _e_ttl = _b + 8
+    if _sink is not None:
+        _sink.record(ttl.to_bytes(4, "little"), "prim:u32", _s_ttl, _e_ttl, _path + ".ttl")
+
+    _s_rdlength = _b + 8
+    if _size - _at < 10:
+        raise TruncatedRead("truncated", _at + 8)
+    rdlength = int.from_bytes(_data[_at + 8:_at + 10], "big")
+    _e_rdlength = _b + 10
+    if _sink is not None:
+        _sink.record(
+            rdlength.to_bytes(2, "little"),
+            "prim:u16",
+            _s_rdlength,
+            _e_rdlength,
+            _path + ".rdlength",
+        )
+
+    _s_rdata = _b + 10
+    _want = rdlength
+    if _size - (_at + 10) < _want:
+        raise TruncatedRead("truncated", _at + 10)
+    rdata = _data[_at + 10:_at + 10 + _want]
+    _at = _at + 10 + _want
+    _b = _base + _at
+    _e_rdata = _b
+    if _sink is not None:
+        _sink.record(rdata, "prim:bytes", _s_rdata, _e_rdata, _path + ".rdata")
+
+    _s, _e = _extent, _b
+    return Rr(
+        name,
+        type,
+        class_,
+        ttl,
+        rdlength,
+        rdata,
+        (
+            _s,
+            _e,
+            _s_name,
+            _e_name,
+            _s_type,
+            _e_type,
+            _s_class_,
+            _e_class_,
+            _s_ttl,
+            _e_ttl,
+            _s_rdlength,
+            _e_rdlength,
+            _s_rdata,
+            _e_rdata,
+        ),
+    ), _at
+
+
 def _decode_name(
     _data: bytes,
     _size: int,
@@ -533,6 +825,10 @@ def _decode_name(
     _base: int,
     _sink: Sink | None,
     _path: str,
+    _depth: int,
+    _origin: int,
+    _limit: int,
+    _hops: int,
 ) -> tuple[Name, int]:
     """Decode one ``name``.
 
@@ -544,6 +840,11 @@ def _decode_name(
         _sink: Where records go, or ``None`` to decode without
             emitting anything.
         _path: This instance's field path, which its records carry.
+        _depth: How many units deep this decode already is.
+        _origin: Where the message starts, as an index into ``_data``. A
+            pointer offset is measured from here.
+        _limit: What a pointer may not reach, or ``-1`` before the first hop.
+        _hops: How many hops the chain has taken.
 
     Returns:
         The decoded ``name``, and the byte offset
@@ -551,8 +852,12 @@ def _decode_name(
 
     Raises:
         TruncatedRead: If the input ends inside it.
+        Undecodable: If the input is not what this unit describes.
 
     """
+    if _depth > 64:
+        raise Undecodable("unit nesting passed 64 levels", _at)
+
     _b = _base + _at
     _extent = _b
 
@@ -560,10 +865,21 @@ def _decode_name(
     labels: list[Label] = []
     _index = 0
     while True:
-        _element, _at = _decode_label(_data, _size, _at, _base, _sink, f"{_path}.labels[{_index}]")
+        _element, _at = _decode_label(
+            _data,
+            _size,
+            _at,
+            _base,
+            _sink,
+            f"{_path}.labels[{_index}]",
+            _depth + 1,
+            _origin,
+            _limit,
+            _hops,
+        )
         _b = _base + _at
         labels.append(_element)
-        if _element.length == 0:
+        if _element.length == 0 or _element.length >= 192:
             break
         _index += 1
     _e_labels = _b
@@ -579,6 +895,10 @@ def _decode_label(
     _base: int,
     _sink: Sink | None,
     _path: str,
+    _depth: int,
+    _origin: int,
+    _limit: int,
+    _hops: int,
 ) -> tuple[Label, int]:
     """Decode one ``label``.
 
@@ -590,6 +910,11 @@ def _decode_label(
         _sink: Where records go, or ``None`` to decode without
             emitting anything.
         _path: This instance's field path, which its records carry.
+        _depth: How many units deep this decode already is.
+        _origin: Where the message starts, as an index into ``_data``. A
+            pointer offset is measured from here.
+        _limit: What a pointer may not reach, or ``-1`` before the first hop.
+        _hops: How many hops the chain has taken.
 
     Returns:
         The decoded ``label``, and the byte offset
@@ -597,8 +922,12 @@ def _decode_label(
 
     Raises:
         TruncatedRead: If the input ends inside it.
+        Undecodable: If the input is not what this unit describes.
 
     """
+    if _depth > 64:
+        raise Undecodable("unit nesting passed 64 levels", _at)
+
     _b = _base + _at
     _extent = _b
 
@@ -612,32 +941,143 @@ def _decode_label(
             length.to_bytes(1, "little"), "prim:u8", _s_length, _e_length, _path + ".length"
         )
 
-    _s_text = _b + 1
-    _want = length
-    if _size - (_at + 1) < _want:
-        raise TruncatedRead("truncated", _at + 1)
-    _raw = _data[_at + 1:_at + 1 + _want]
-    _at = _at + 1 + _want
-    _b = _base + _at
-    try:
-        text = _raw.decode("utf-8")
-    except UnicodeDecodeError:
-        # A malformed string is a fact about the input, not a
-        # failure of the decoder: §3.2. The bytes are accounted
-        # for either way, so the region stays decoded.
-        text = _raw.decode("utf-8", errors="replace")
-    _e_text = _b
-    if _sink is not None:
+    _s_rest = _b + 1
+    _selector = length >> 6
+    if _selector == 0:
+        _want = length
+        if _size - (_at + 1) < _want:
+            raise TruncatedRead("truncated", _at + 1)
+        _raw = _data[_at + 1:_at + 1 + _want]
+        _at = _at + 1 + _want
+        _b = _base + _at
+        try:
+            rest = _raw.decode("utf-8")
+        except UnicodeDecodeError:
+            # A malformed string is a fact about the input, not a
+            # failure of the decoder: §3.2. The bytes are accounted
+            # for either way, so the region stays decoded.
+            rest = _raw.decode("utf-8", errors="replace")
+    elif _selector == 3:
+        rest, _at = _decode_compressed(
+            _data,
+            _size,
+            _at + 1,
+            _base,
+            _sink,
+            _path + ".rest",
+            length,
+            _depth + 1,
+            _origin,
+            _limit,
+            _hops,
+        )
+        _b = _base + _at
+    else:
+        raise Undecodable(f"no case for {_selector!r} and no default", _at + 1)
+    _e_rest = _b
+    if _sink is not None and _selector == 0:
         _sink.record(
-            text.encode("utf-8", errors="replace"),
+            rest.encode("utf-8", errors="replace"),
             "mime:text/plain; charset=utf-8",
-            _s_text,
-            _e_text,
-            _path + ".text",
+            _s_rest,
+            _e_rest,
+            _path + ".rest",
         )
 
     _s, _e = _extent, _b
-    return Label(length, text, (_s, _e, _s_length, _e_length, _s_text, _e_text)), _at
+    return Label(length, rest, (_s, _e, _s_length, _e_length, _s_rest, _e_rest)), _at
+
+
+def _decode_compressed(
+    _data: bytes,
+    _size: int,
+    _at: int,
+    _base: int,
+    _sink: Sink | None,
+    _path: str,
+    high: int,
+    _depth: int,
+    _origin: int,
+    _limit: int,
+    _hops: int,
+) -> tuple[Compressed, int]:
+    """Decode one ``compressed``.
+
+    Args:
+        _data: The run being decoded.
+        _size: Its length, passed rather than measured again here.
+        _at: Where in it to start, as a byte offset.
+        _base: Stream offset of ``_data[0]``, so byte ranges are absolute.
+        _sink: Where records go, or ``None`` to decode without
+            emitting anything.
+        _path: This instance's field path, which its records carry.
+        high: The ``high`` its caller supplies.
+        _depth: How many units deep this decode already is.
+        _origin: Where the message starts, as an index into ``_data``. A
+            pointer offset is measured from here.
+        _limit: What a pointer may not reach, or ``-1`` before the first hop.
+        _hops: How many hops the chain has taken.
+
+    Returns:
+        The decoded ``compressed``, and the byte offset
+        after it.
+
+    Raises:
+        TruncatedRead: If the input ends inside it.
+        Undecodable: If the input is not what this unit describes.
+
+    """
+    if _depth > 64:
+        raise Undecodable("unit nesting passed 64 levels", _at)
+
+    _b = _base + _at
+    _extent = _b
+
+    _s_low = _b
+    if _size - _at < 1:
+        raise TruncatedRead("truncated", _at)
+    low = _data[_at]
+    _e_low = _b + 1
+    if _sink is not None:
+        _sink.record(low.to_bytes(1, "little"), "prim:u8", _s_low, _e_low, _path + ".low")
+
+    _at = _at + 1
+    _b = _base + _at
+    _p_at = (high & 63) << 8 | low
+    _p_end = _at if _limit < 0 else _limit
+    _p_to = _origin + _p_at
+    if _p_at < 0 or _p_to >= _p_end:
+        raise Undecodable(f"pointer target {_p_at} is outside the bytes already decoded", _at)
+    if _hops >= 16:
+        raise Undecodable("pointer chain passed 16 hops", _at)
+    _p_at, _p_size = _at, _size
+    _at, _size = _p_to, _p_end
+    _b = _base + _at
+    _s_target = _b
+    try:
+        target, _at = _decode_name(
+            _data,
+            _size,
+            _at,
+            _base,
+            _sink,
+            _path + ".target",
+            _depth + 1,
+            _origin,
+            _p_to,
+            _hops + 1,
+        )
+        _b = _base + _at
+    except TruncatedRead as _exc:
+        raise Undecodable(f"pointer target does not decode: {_exc}", _p_at) from _exc
+    except Undecodable as _exc:
+        raise Undecodable(str(_exc), _p_at) from _exc
+    _e_target = _b
+    _at, _size = _p_at, _p_size
+    _b = _base + _at
+
+    _s, _e = _extent, _b
+    return Compressed(low, target, (_s, _e, _s_low, _e_low, _s_target, _e_target)), _at
 
 
 # --- entry points ----------------------------------------------------------
@@ -672,7 +1112,7 @@ def decode_from(cur: Cursor, sink: Sink | None = None) -> Message:
     _start = cur.tell() >> 3
     _at = _start
     try:
-        _message, _at = _decode_message(_data, _size, _at, cur.base, sink, NAME)
+        _message, _at = _decode_message(_data, _size, _at, cur.base, sink, NAME, 0, _start, -1, 0)
     except Stopped as _exc:
         _at = _start if _exc.at is None else _exc.at
         cur.seek(_at << 3)

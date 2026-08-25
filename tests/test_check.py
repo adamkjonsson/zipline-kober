@@ -12,10 +12,12 @@ from kober.spec import (
     Count,
     EnumDef,
     Field,
+    FieldType,
     Fixed,
     FromExpr,
     IntType,
     Param,
+    Pointer,
     Remaining,
     Spec,
     StringType,
@@ -597,3 +599,152 @@ def test_finding_renders_readably():
 @pytest.mark.parametrize("severity", list(Severity))
 def test_severity_values(severity: Severity):
     assert severity.value in {"error", "warning"}
+
+
+# --- pointer ---------------------------------------------------------------
+
+
+def pointer_spec(at: str = "lo", *, target: str = "name") -> Spec:
+    """Build a spec whose `ptr` unit reads an offset and reads a name there."""
+    return build(
+        [
+            Unit(name="message", fields=[Field(name="p", type=UnitRef(unit="ptr"))]),
+            Unit(
+                name="ptr",
+                fields=[
+                    Field(name="lo", type=IntType(bits=8)),
+                    Field(name="target", type=Pointer(at=parse(at), type=UnitRef(unit=target))),
+                ],
+            ),
+            Unit(name="name", fields=[Field(name="length", type=IntType(bits=8))]),
+        ]
+    )
+
+
+def test_a_valid_pointer_has_no_findings():
+    assert check(pointer_spec()) == ()
+
+
+def test_pointer_offset_must_be_an_integer():
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="s", type=StringType(size=Fixed(2))),
+                    Field(
+                        name="target",
+                        type=Pointer(at=parse("s"), type=IntType(bits=8)),
+                    ),
+                ],
+            )
+        ]
+    )
+    assert any("pointer at" in message for message in errors(spec))
+
+
+def test_pointer_offset_cannot_read_a_later_field():
+    """The forward-reference rule applies to `at` as it does to a size."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="target", type=Pointer(at=parse("lo"), type=IntType(bits=8))),
+                    Field(name="lo", type=IntType(bits=8)),
+                ],
+            )
+        ]
+    )
+    assert any("lo" in message for message in errors(spec))
+
+
+def test_pointer_target_unit_must_exist():
+    assert any("nowhere" in message for message in errors(pointer_spec(target="nowhere")))
+
+
+def test_a_unit_reached_only_through_a_pointer_is_reachable():
+    """`name` is referenced from nowhere but a pointer, and is still reached."""
+    assert warnings(pointer_spec()) == []
+
+
+def test_parent_inside_a_pointer_target_resolves_at_the_pointing_site():
+    """A pointer does not create a new parent: the site is where it stands."""
+    spec = build(
+        [
+            Unit(name="message", fields=[Field(name="p", type=UnitRef(unit="ptr"))]),
+            Unit(
+                name="ptr",
+                fields=[
+                    Field(name="lo", type=IntType(bits=8)),
+                    Field(name="target", type=Pointer(at=parse("lo"), type=UnitRef(unit="name"))),
+                ],
+            ),
+            Unit(
+                name="name",
+                fields=[Field(name="n", type=BytesType(size=FromExpr(parse("parent.lo"))))],
+            ),
+        ]
+    )
+    assert errors(spec) == []
+
+
+def test_a_pointer_to_its_own_unit_is_not_left_recursion():
+    """It terminates by the offset rule: each hop lands strictly earlier."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[Field(name="t", type=Pointer(at=parse("0"), type=UnitRef(unit="message")))],
+            )
+        ]
+    )
+    assert errors(spec) == []
+
+
+# --- builtins --------------------------------------------------------------
+
+
+def sized_by(expr: str, *, first: FieldType | None = None) -> Spec:
+    """Build a two-field unit whose second field's size comes from ``expr``."""
+    head = first if first is not None else StringType(size=Fixed(4))
+    return build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="head", type=head),
+                    Field(name="body", type=BytesType(size=FromExpr(parse(expr)))),
+                ],
+            )
+        ]
+    )
+
+
+def test_a_builtin_types_as_its_table_row_says():
+    assert check(sized_by("to_int(head, 16)")) == ()
+
+
+def test_a_builtin_on_the_wrong_type_is_an_error():
+    spec = sized_by("to_int(head)", first=IntType(bits=8))
+    assert any("argument 1 of to_int()" in message for message in errors(spec))
+
+
+def test_a_builtin_returning_text_cannot_size_a_field():
+    assert any("size must be int" in message for message in errors(sized_by("lower(head)")))
+
+
+def test_a_builtin_cannot_reach_a_later_field():
+    """The forward-reference rule has to see through an argument."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="body", type=BytesType(size=FromExpr(parse("to_int(tail)")))),
+                    Field(name="tail", type=StringType(size=Fixed(2))),
+                ],
+            )
+        ]
+    )
+    assert any("tail" in message for message in errors(spec))

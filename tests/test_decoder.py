@@ -6,7 +6,7 @@ import struct
 
 import pytest
 
-from kober.decoder import MAX_DEPTH, Decoder
+from kober.decoder import MAX_DEPTH, MAX_POINTER_HOPS, Decoder
 from kober.errors import SpecError
 from kober.node import Node, NodeStatus
 from kober.spec import Spec
@@ -567,9 +567,259 @@ def test_the_pressure_tests_dns_query_decodes_whole():
 
 
 def test_every_byte_is_covered_by_a_leaf():
-    """The property the emitter will depend on: leaves tile the input."""
+    """The property the emitter depends on: every byte covered *at least* once.
+
+    This used to assert that leaves **tile** the input — covered exactly once,
+    set equality both ways. `Pointer` retired that: a region decoded in place
+    and reached again by reference is cited twice, which `zpf` permits and
+    §2 now says so explicitly. What the emitter actually needs, and what the
+    coverage guarantee actually is, is coverage without contradiction.
+    """
     tree = Decoder(Spec.from_yaml(DNS_SPEC)).decode_bytes(DNS_QUERY)
     covered: set[int] = set()
     for leaf in tree.leaves():
         covered.update(range(leaf.off_start, leaf.off_end))
-    assert covered == set(range(len(DNS_QUERY)))
+    assert covered >= set(range(len(DNS_QUERY)))
+
+
+# --- pointers --------------------------------------------------------------
+
+#: A message whose second field points back at the first: `at` is read from
+#: `off`, and the target is the byte at that message-relative offset.
+POINTER_FIELDS = """\
+      - {name: pad, type: {int: {bits: 8}}}
+      - {name: pos, type: {int: {bits: 8}}}
+      - {name: seen, type: {pointer: {at: "pos", type: {int: {bits: 8}}}}}
+"""
+
+
+def pointer_tree(data: bytes) -> Node:
+    return decode(POINTER_FIELDS, data)
+
+
+def test_a_pointer_reads_at_the_offset_it_names():
+    tree = pointer_tree(b"\xaa\x00\xff")
+    assert tree.find("seen").value == 0xAA
+
+
+def test_a_pointer_does_not_move_the_enclosing_cursor():
+    """§2.1: the runtime seeks, the reading position does not move."""
+    tree = pointer_tree(b"\xaa\x00\xff")
+    assert tree.off_end == 2, "the pointer must consume nothing"
+
+
+def test_a_pointer_cites_the_region_it_read():
+    """One contiguous range — the target, not the bytes naming it."""
+    seen = pointer_tree(b"\xaa\x00\xff").find("seen")
+    assert (seen.off_start, seen.off_end) == (0, 1)
+
+
+@pytest.mark.parametrize(
+    ("label", "data"),
+    [
+        ("past the end", b"\xaa\x7f"),
+        ("forward, not yet decoded", b"\xaa\x05\x00\x00\x00\x00"),
+        ("at the pointer itself", b"\xaa\x02"),
+    ],
+)
+def test_an_unreachable_target_is_undecodable_and_never_raises(label: str, data: bytes):
+    tree = pointer_tree(data)
+    assert tree.status is NodeStatus.UNDECODABLE, label
+    assert "outside the bytes already decoded" in (tree.detail or "")
+
+
+def test_a_pointer_target_that_does_not_decode_is_undecodable_not_truncated():
+    """`truncated` is hole-class: it would claim the input had a gap.
+
+    The input arrived intact — the spec aimed at bytes that do not decode as
+    what it asked for — so the honest reason is `undecodable`, which owes no
+    seam under §5.
+    """
+    tree = decode(
+        """\
+      - {name: pad, type: {int: {bits: 8}}}
+      - {name: pos, type: {int: {bits: 8}}}
+      - {name: seen, type: {pointer: {at: "pos", type: {int: {bits: 32}}}}}
+""",
+        b"\xaa\x00",
+    )
+    assert tree.status is NodeStatus.UNDECODABLE
+    assert "does not decode" in (tree.detail or "")
+
+
+def test_a_pointer_chain_resolves_while_it_goes_backwards():
+    """Two hops, each landing strictly earlier than the last."""
+    tree = decode(
+        """\
+      - {name: value, type: {int: {bits: 8}}}
+      - {name: mid, type: {int: {bits: 8}}}
+      - {name: hop, type: {int: {bits: 8}}}
+      - {name: second, type: {pointer: {at: "hop", type: {unit: inner}}}}
+""",
+        b"\xaa\xbb\x01",
+        extra_units="""\
+  inner:
+    fields:
+      - {name: again, type: {pointer: {at: "0", type: {int: {bits: 8}}}}}
+""",
+    )
+    assert tree.status is NodeStatus.OK
+    assert tree.find("second").find("again").value == 0xAA
+
+
+def test_a_chain_may_not_hop_sideways():
+    """Two hops to the same offset is a hop that did not go back."""
+    tree = decode(
+        """\
+      - {name: value, type: {int: {bits: 8}}}
+      - {name: hop, type: {int: {bits: 8}}}
+      - {name: second, type: {pointer: {at: "hop", type: {unit: inner}}}}
+""",
+        b"\xaa\x00",
+        extra_units="""\
+  inner:
+    fields:
+      - {name: again, type: {pointer: {at: "0", type: {int: {bits: 8}}}}}
+""",
+    )
+    assert tree.status is NodeStatus.UNDECODABLE
+
+
+def test_a_self_pointer_terminates_rather_than_looping():
+    """It cannot even start: each hop must land strictly earlier than the last."""
+    tree = decode(
+        """\
+      - {name: pos, type: {int: {bits: 8}}}
+      - {name: loop, type: {pointer: {at: "pos", type: {unit: inner}}}}
+""",
+        b"\x00\x00",
+        extra_units="""\
+  inner:
+    fields:
+      - {name: again, type: {pointer: {at: "0", type: {int: {bits: 8}}}}}
+""",
+    )
+    assert tree.status is NodeStatus.UNDECODABLE
+
+
+def test_the_offset_is_relative_to_the_message_not_the_run():
+    """A run holds many messages; offset 0 means *this* message's first byte."""
+    from kober.cursor import Cursor
+
+    decoder = Decoder(build(POINTER_FIELDS))
+    # Two messages of two bytes each: a pointer consumes nothing, so each
+    # message is exactly its `pad` and `pos`.
+    cursor = Cursor(b"\xaa\x00" + b"\xbb\x00", 0)
+    first = decoder.decode_one(cursor)
+    second = decoder.decode_one(cursor)
+    assert first.find("seen").value == 0xAA
+    assert second.find("seen").value == 0xBB, "the second message read the first's bytes"
+    assert (second.find("seen").off_start, second.find("seen").off_end) == (2, 3)
+
+
+def test_a_decode_does_not_depend_on_what_follows_it():
+    """The ceiling is the message's high-water mark, not the run's end."""
+    message = b"\xaa\x02"
+    results = [
+        pointer_tree(message + trailing)
+        for trailing in (b"", bytes(80), b"\xaa\x00\xff")
+    ]
+    assert {(t.status, t.detail) for t in results} == {(results[0].status, results[0].detail)}
+
+
+def test_a_long_chain_stops_at_the_hop_bound():
+    """The bound guards recursion depth, not cycles — those cannot be built.
+
+    Each hop lands one byte earlier, so this chain is legal all the way down
+    and would simply be deep. `MAX_POINTER_HOPS` is what stops it.
+    """
+    tree = decode(
+        """\
+      - {name: filler, type: {bytes: {size: 24}}}
+      - name: start
+        type:
+          pointer:
+            at: "20"
+            type: {unit: {name: chain, args: ["19"]}}
+""",
+        bytes(24),
+        extra_units="""\
+  chain:
+    params: [{name: n, type: int}]
+    fields:
+      - name: down
+        type:
+          pointer:
+            at: "n"
+            type: {unit: {name: chain, args: ["n - 1"]}}
+""",
+    )
+    assert tree.status is NodeStatus.UNDECODABLE
+    assert f"passed {MAX_POINTER_HOPS} hops" in (tree.detail or "")
+
+
+def test_a_cycle_is_refused_structurally_rather_than_merely_bounded():
+    """A target that reads on, then points back at itself, is the real cycle.
+
+    Each hop's ceiling is the previous hop's *target*, so the second hop is
+    refused for landing no earlier — not caught later by the hop bound. The
+    detail is the assertion: `MAX_POINTER_HOPS` never gets involved.
+    """
+    tree = decode(
+        """\
+      - {name: pos, type: {int: {bits: 8}}}
+      - {name: loop, type: {pointer: {at: "pos", type: {unit: inner}}}}
+""",
+        b"\x00\x00",
+        extra_units="""\
+  inner:
+    fields:
+      - {name: first, type: {int: {bits: 8}}}
+      - {name: back, type: {pointer: {at: "0", type: {unit: inner}}}}
+""",
+    )
+    assert tree.status is NodeStatus.UNDECODABLE
+    assert "outside the bytes already decoded" in (tree.detail or "")
+    assert "hops" not in (tree.detail or "")
+
+
+# --- builtins --------------------------------------------------------------
+
+CHUNK_FIELDS = """\
+      - {name: size, type: {string: {size: {terminated: {delimiter: "\\r\\n"}}}}}
+      - {name: body, type: {bytes: {size: {expr: "to_int(size, 16)"}}}}
+"""
+
+
+def test_a_builtin_sizes_a_field_from_text():
+    """§13.2's case: a chunk header is a hexadecimal string, not an integer."""
+    tree = decode(CHUNK_FIELDS, b"1a\r\n" + b"x" * 0x1A)
+    assert tree.find("size").value == "1a"
+    assert tree.find("body").value == b"x" * 0x1A
+    assert tree.status is NodeStatus.OK
+
+
+def test_text_that_is_not_a_number_is_undecodable_not_a_raise():
+    """Partial at the value level, total at the decode level.
+
+    The same path a size expression that cannot be evaluated already takes —
+    the builtin adds no new failure mode, which is the whole of what makes
+    admitting it cheap.
+    """
+    tree = decode(CHUNK_FIELDS, b"chunked\r\nbody")
+    assert tree.status is NodeStatus.UNDECODABLE
+    assert "cannot read" in (tree.detail or "")
+
+
+def test_a_builtin_makes_a_case_insensitive_match_expressible():
+    """The other half of §13.2: `Transfer-Encoding` values vary in case."""
+    fields = """\
+      - {name: value, type: {string: {size: 7}}}
+      - name: body
+        type: {bytes: {size: {remaining: true}}}
+        condition: "lower(value) == 'chunked'"
+"""
+    for text in (b"chunked", b"CHUNKED", b"Chunked"):
+        tree = decode(fields, text + b"rest")
+        assert tree.find("body") is not None, text
+        assert tree.find("body").value == b"rest"

@@ -2,15 +2,15 @@
 
 **Status:** implemented and exercised against real captures, not released.
 The spec model, expression language, checker, decode engine, emitter, stage
-driver, all five CLI verbs, and the **compiler** (§14) exist. What is *not*
-built is marked as such: the `Pointer` construct (§3.2), and everything in §11
-that is still a question.
+driver, all five CLI verbs, the **compiler** (§14), and the `Pointer` construct
+(§3.2) exist, in both implementations. What is *not* built is marked as such:
+everything in §11 that is still a question.
 
 **Sections marked [verified] were executed, not reasoned about** — against
 `zpf` by [`pressure_test.py`](pressure_test.py), and since revision 6 against
 real captures too.
 
-Revision 6. Revision 1 was written blind and got the layer wrong — it invented
+Revision 8. Revision 1 was written blind and got the layer wrong — it invented
 reassembly, gaps, and provenance that `zpf` already provides. Revision 2 fixed
 that against the source. Revision 3 added the results of an executable pressure
 test (§10) and treated this project as what it is: **a load test of `zpf`, where
@@ -52,6 +52,20 @@ one program rather than of the language, and what makes that defensible is that
 the two implementations are compared on every input the suite can produce. Which
 also produced the revision's other content: five bugs, four of them in the
 interpreter or in code both share.
+
+Revision 8 closes the two things §13 left open, or tries to. `Pointer` (§3.2)
+is built, in both implementations, and §13.1 is closed: a whole DNS message
+decodes with nothing left over. The expression language gained two functions
+(§3.3), and §13.2 is **half** closed — which is the revision's real content,
+because the diagnosis that section carried was wrong. Text arithmetic was not
+what stood between HTTP and its body framing; being unable to say anything at
+all about a *repeated* field was, and that is now question 6 of §11.
+
+Two rules changed character rather than lapsing, and both are argued where they
+are stated: §2 gives up "leaves tile the input", since a pointed-at region is
+cited twice, and §2.1 admits a second cursor. The pattern from revision 7 held
+again — the guarantee stays, the impossibility does not, and what replaces it
+is a bound the runtime applies rather than a promise the spec makes.
 
 Claims below marked **[verified]** were executed, not reasoned about: against
 `zpf` 0.16 by the script in §10, and against real captures as recorded in §13.
@@ -108,6 +122,22 @@ when this doesn't match":
 - a length field pointing past the end of the segment → `reason="truncated"`
 - a field landing inside a `Gap` → `reason="gap"`
 - a region the spec deliberately ignores (padding, encrypted body) → `reason="skipped"`
+
+**What the guarantee is not: leaves do not tile the input.** Until `Pointer`
+(§3.2) existed, every leaf covered a distinct range and the leaves together
+covered the message exactly once, so "tiling" and "covered" were the same
+statement and the emitter was built on the stronger one. A pointer breaks it —
+a region decoded in place and then reached again by reference is cited twice —
+and that is legal: `zpf` requires every offset to be covered **at least** once,
+and says in as many words that two records MAY cite the same input region.
+
+The retirement is worth stating rather than performing, because tiling is the
+property a reader would assume and it is the one a test asserted. What survives
+is exactly the guarantee: every byte cited or named, and **never both**. That
+second half is untouched by pointers, since a pointed-at region is cited, and
+cited is precisely what "not undecoded" means. Overlap is duplication, not
+contradiction; the contradiction the format forbids is a byte that is both
+spoken for and disclaimed.
 
 ### 2.1 The cursor rule
 
@@ -186,6 +216,45 @@ that wrote no record, a computed value that raised out of the emitter — and on
 was in the compiler. The cursor rule survives as a claim about a *pair* of
 implementations that agree, which is a different and more testable thing than a
 claim about one.
+
+#### What a second cursor changed about it — revision 8
+
+`Pointer` (§3.2) reads somewhere other than where the position stands. That is
+the first construct in the language that reads at all out of order, and the
+rule has to say why it is still the same rule.
+
+**It is, and the reason is that the spec names an offset rather than a
+position.** `Pointer.at` is an expression over fields already decoded; the
+runtime resolves it, opens a *second* cursor over the bytes, and reads there.
+The enclosing position never moves — that is asserted in both implementations,
+and a repeat of pointers terminates on its own progress check precisely because
+a pointer consumes nothing. A hook would have solved the same problem by
+handing an author the position, which is the one thing this section reserves,
+and that is why §3.2 chose a construct instead.
+
+Three things make the second cursor safe rather than merely narrow, and each is
+a bound the runtime applies, not a promise the spec makes:
+
+1. **It can only look backwards, inside its own message.** The window is
+   `[message origin, position)`. A target before the origin would reach into a
+   neighbouring message sharing the run; a target at or past the position would
+   make a decode depend on bytes it has not claimed — which is not theory: the
+   same message given three different neighbours decoded three different ways
+   before the ceiling replaced a run-wide bound.
+2. **A chain's offsets strictly decrease**, because each hop lowers the ceiling
+   to its own target. A cycle cannot be constructed, so nothing has to detect
+   one. The hop bound that remains guards recursion depth, not looping.
+3. **Failure is `undecodable`, never a hole.** A target that does not decode is
+   a wrong claim about input that arrived, not input that never did. A short
+   read *inside* a target is therefore converted rather than propagated, since
+   `truncated` is hole-class (§5) and would declare a break that the stream
+   never had.
+
+**What the guarantee costs here is stated in §2: leaves no longer tile.** A
+region decoded in place and reached again by reference is cited twice. Nothing
+about *coverage* weakens — every byte is still cited or named, and never both —
+and the compiled implementation agrees with the interpreter on all of it,
+including which bytes a pointer cites and where a failed one stopped.
 
 ## 3. Spec model
 
@@ -302,7 +371,7 @@ SizeSpec = Fixed | FromExpr | Terminated | Remaining
 Repeat = Count | Until | ToEnd
 ```
 
-#### `Pointer` — decided, not yet built
+#### `Pointer` — built
 
 ```python
 @dataclass(frozen=True)
@@ -323,19 +392,31 @@ second cursor, so the reading position never moves and coverage stays
 provable. A hook would solve the same problem by handing an author the
 position, which is the one thing §2.1 reserves.
 
-Three things it needs that nothing else in the model does:
+Three things it needed that nothing else in the model does, and how each was
+answered. **[verified]** against all eight messages of `dns_example.pcapng`,
+and against the pathologies no capture holds.
 
 - **An offset space.** DNS pointers are message-relative; the cursor holds
-  run-relative positions. The expression means the *message's* space, and the
-  runtime translates.
-- **A bound.** Pointer chains are legal in DNS and can loop, so they need
-  limiting the way `MAX_DEPTH` limits unit nesting — a decoder that follows a
-  cycle forever is the failure §2 exists to prevent, arrived at from a new
-  direction.
-- **A note on coverage.** A region reached *only* through a pointer is cited
-  without ever having been walked. That is legal — overlapping citations are
-  **[verified]** — but it retires the "leaves tile the input" property some
-  tests currently assert.
+  run-relative positions. The expression means the *message's* space and the
+  runtime translates — and that space exists nowhere else, since a run holds
+  many messages: it is fixed once per message, where the entry unit starts.
+  There is deliberately no way for a spec to mean another one, so there is
+  nothing to mean by accident.
+- **A bound**, which turned out to be the *second* line of defence. A target
+  must lie at or after the message origin and strictly before the position,
+  and each hop lowers that ceiling to its own target — so a chain's offsets
+  strictly decrease and a cycle cannot be constructed at all. The hop bound
+  that remains is a guard against recursion depth, since a large message
+  admits a legal chain long enough to exhaust a stack.
+- **A note on coverage**, now §2's: leaves no longer tile the input. A region
+  reached through a pointer is cited a second time, which the format permits
+  in as many words. What is untouched is the guarantee itself — cited or
+  named, never both.
+
+Out-of-range, cyclic, forward and garbage targets all produce `undecodable`
+regions and none of them raise. A short read *inside* a target is converted to
+`undecodable` rather than propagated as `truncated`, because `truncated` is
+hole-class (§5) and would claim the stream had a gap it did not have.
 
 `Terminated(delimiter, consume, required)` and `Remaining()` both need a
 truncation answer: in `STREAM` shape, a missing terminator at the end of the
@@ -345,14 +426,15 @@ in a segment we don't have. That is a normal outcome, not an error.
 ### 3.3 Expressions
 
 Small, total, side-effect free: arithmetic, comparison, boolean ops, field
-references, literals. No calls, no loops. Authored as strings
+references, literals, and **calls to a closed table of two functions**. No
+loops, and nothing an author can add to. Authored as strings
 (`size: "header.length * 4"`), parsed to an AST at load time so `check` can
 type them and scope them against the spec before any data exists.
 
 Scoping follows Kaitai: `this`, `parent`, `root`, plus unit param names. A
 reference to a not-yet-decoded field is a load-time error.
 
-Read "no calls, no loops" as **a choice about taste and cost, not a safety
+Read the smallness as **a choice about taste and cost, not a safety
 requirement.** Per §2.1, an expression cannot move the cursor whatever it
 contains, so no amount of arithmetic here threatens the coverage guarantee.
 The language is small because a small one is cheap to check, cheap to explain,
@@ -360,18 +442,38 @@ and portable to a non-Python reader — not because a bigger one would be
 dangerous. Growing it is §11 question 5, and the parser is built from a
 whitelist precisely so that growing it is a list change.
 
-**Real HTTP is the first thing that needed it grown** (§13.2). The language
-has no string-to-integer conversion, no substring, no case folding, and no
-search: it compares strings for equality and stops. That is enough for every
-*binary* protocol tried so far and not enough for a text one, because HTTP
-frames its body from a header **value** — `Content-Length` is a decimal
-string, a chunk size is a hexadecimal one, and whether chunked framing applies
-depends on matching a header case-insensitively.
+**Real HTTP is the first thing that needed it grown** (§13.2), and it is what
+the two functions are for. HTTP frames its body from a header **value**:
+`Content-Length` is a decimal string, a chunk size is a hexadecimal one, and
+whether chunked framing applies depends on matching a header
+case-insensitively. Those three needs are the table:
 
-Three total builtins would close it — `to_int(s, base)`, `starts_with(s, p)`,
-`lower(s)` — and none of them can move the cursor, so §2.1 has nothing to say
-about them. This is the "richer expressions" branch of question 5, and it now
-has the concrete case that question asked for.
+| Call | Result |
+| --- | --- |
+| `to_int(s)`, `to_int(s, base)` | int |
+| `lower(s)` | str |
+
+`to_int` is deliberately stricter than a typical library conversion: leading
+and trailing whitespace is allowed, because an HTTP field value carries
+optional whitespace by rule, but a digit separator or a radix prefix is not.
+Reading `1_0` as ten would turn a malformed wire length into a plausible one.
+Text that is not a number makes the field `undecodable` on the path a size
+expression that cannot be evaluated already takes — **partial at the value
+level, total at the decode level**.
+
+**What admitting calls did not open.** The whitelist never bought "no
+functions"; it bought no author-supplied code and no unbounded work, and a
+closed table of total functions costs neither. A *transform* — decompression,
+decryption — is not a candidate for the table: a function here maps a value to
+a value, where a transform maps bytes to bytes and feeds a sub-decode with its
+own offset space. Routing one through this language would also cost `check`
+its static answer, since a spec's validity would come to depend on what a
+caller had registered. That extension point is question 5's *hooks* branch, and
+the shape it wants is the spec **naming** a transform while a registry supplies
+it — the spec file staying data, which is also what keeps a non-Python backend
+possible.
+
+This is the "richer expressions" branch of question 5, taken.
 
 ## 4. Emission granularity, and the one thing `zpf` cannot express
 
@@ -767,6 +869,54 @@ Q5 a per-field record can carry its name — via `comment=`, with §4.1's caveat
    the language was under-built rather than that the approach was wrong.
    Hooks stay deferred, and now have a reason rather than only a lack of one.
 
+   **The branch was taken, and here is where the line sits now — revision 8.**
+   *Richer expressions* is no longer a proposal: the language has `to_int` and
+   `lower`, in a closed table an author cannot add to (§3.3). Two things that
+   move the line are worth separating from two that do not.
+
+   On the near side, and taken: a **fixed table of total functions**. What the
+   parser's whitelist bought was never "no functions" — it was no
+   author-supplied code and no unbounded work — and a closed table costs
+   neither. `check` still types every expression before any data exists, which
+   is the property that would have been lost by letting a caller register one:
+   a spec would be valid in one process and invalid in another.
+
+   On the near side, and still owed: **speaking about a repetition** (§11.6).
+   That is more declarative language, not less, and it is what §13.2 turns out
+   to need.
+
+   On the far side, and still deferred: **hooks**. But their concrete case has
+   arrived after all, and it is not the one this question expected. Byte
+   transforms — decompression, decryption — cannot come from a closed table,
+   because nobody can ship every proprietary codec. What they want is the shape
+   this question already described for hooks: *the spec names a transform, a
+   registry supplies it*, kober shipping the well-known set and a caller
+   registering its own. The spec file stays data, which is what keeps `check`
+   static and a non-Python backend possible.
+
+   The distinction that matters, and the reason a transform is not a third row
+   in §3.3's table: **a function maps a value to a value; a transform maps
+   bytes to bytes and feeds a sub-decode with its own offset space.** They are
+   different layers, and merging them would cost `check` its static answer for
+   the sake of a syntax.
+
+   Still on the far side and still refused: **specs are Python**. Nothing here
+   moved it.
+
+6. **How does a spec say anything about a repeated field?** It cannot, and that
+   is what stops HTTP choosing its own framing (§13.2). `headers` is a repeat,
+   the checker refuses references to repeated fields because there is no list
+   type, and so no expression can ask whether *any* element said something.
+
+   Three shapes suggest themselves and none is obviously right: a total
+   quantifier (`any(headers, lower(this.line) == 'transfer-encoding: chunked')`),
+   a count, or naming an element by a key. All three widen the expression
+   language in a way the two builtins did not — they need a binding form, and
+   `check` has to type it — so this is a phase rather than a table entry.
+
+   It also has to stay total: whatever is added must terminate on any input and
+   must not reach the cursor, or §2.1 has a new hole in it.
+
 ## 12. Prior art
 
 - **Kaitai Struct** — spec vocabulary, expression scoping, `switch-on`.
@@ -784,7 +934,7 @@ Both boundaries below are about **what the language can say**, and neither is
 about coverage. That distinction is the useful one: the guarantee §2 rests on
 survived contact with real traffic unchanged, while the vocabulary did not.
 
-### 13.1 DNS name compression — a boundary, being closed
+### 13.1 DNS name compression — closed
 
 `dns_example.pcapng`, first response, last bytes of the answer record:
 
@@ -798,23 +948,51 @@ or a pointer, which `Switch` expresses; the pointed-at bytes may be cited
 twice, which is legal. What could not be said was **read there and return** —
 answered by `Pointer` (§3.2).
 
-`examples/dns.yaml` therefore decodes the header and question section and
-marks the rest `skipped`, saying so in its own `doc:`. **[verified]**
-conformance and coverage clean over all four real query/response pairs, at
-both granularities.
+`examples/dns.yaml` now decodes a **whole message** — the answer, authority and
+additional sections included, following a pointer into a name decoded earlier.
+**[verified]** over all eight messages of the capture, with *no undecoded
+regions at all*, conformance and coverage clean at both granularities, and the
+compiled decoder resolving the same pointer through its typed API.
 
-### 13.2 HTTP body framing — a boundary, open
+Record data stays opaque bytes, which is a choice rather than a boundary: what
+is inside RDATA depends on the record type, and a switch over the type registry
+would be most of that file for none of the point.
+
+### 13.2 HTTP body framing — half closed, and the diagnosis was wrong
 
 `http_example.pcapng` carries `Transfer-Encoding: chunked` *and* a gzip body,
-so both of HTTP's framing mechanisms appear in one exchange. Both need
-arithmetic on a header **value**: a decimal string, a hexadecimal string, and a
-case-insensitive match. The language has none (§3.3).
+so both of HTTP's framing mechanisms appear in one exchange.
 
-`examples/http.yaml` decodes the start line and every header — `Terminated` on
-`\r\n` and `until` on the blank line express HTTP's line framing exactly — and
-claims the body as opaque `remaining` bytes. **[verified]** conformance and
-coverage clean; correct for one message per direction and wrong for two, which
-the spec's `doc:` states rather than leaves to be discovered.
+**What this section used to say was that both need arithmetic on a header
+value** — a decimal string, a hexadecimal string, and a case-insensitive match
+— and that the language had none. The language has that arithmetic now (§3.3),
+and the boundary did not close. The diagnosis was incomplete in two ways, and
+the second is larger than anything it named.
+
+- **A header value cannot be extracted.** `to_int` reads a whole string field,
+  and a header is one line: `"Content-Length: 1234"` is not a number. Reaching
+  the value needs a substring, and a `":"`-terminated read cannot be bounded to
+  the line it is in.
+- **Nothing can ask a question about the *set* of headers.** `headers` is a
+  repeated field and the checker refuses references to those, because the
+  language has no list type — so a body's framing cannot depend on whether
+  *any* header said `chunked`. Even with a substring builtin, choosing between
+  the two framings would still be unsayable.
+
+So the chunked half is closed and the choosing is not. `examples/http.yaml`
+frames a chunked body into its chunks with `to_int` on the hexadecimal size
+line, and **[verified]** decodes both messages of the capture with nothing left
+over, conformance and coverage clean at both granularities.
+
+It **assumes** chunked framing rather than choosing it, and the cost is stated
+in its own `doc:` and asserted in a test: a body that is not chunk-formatted
+comes back `truncated`, which is hole-class (§5) and claims a gap the stream
+did not have. That is the least comfortable thing this design currently ships,
+and it is written where a reader meets it rather than left to be discovered.
+
+**What is actually owed here is a way to speak about a repetition** — an
+`any`/`count` over its elements, or naming one by a key. That is a language
+question of a different size from three builtins, and it is question 6 of §11.
 
 ### 13.3 Gaps at scale — the design held
 

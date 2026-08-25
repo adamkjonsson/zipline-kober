@@ -110,6 +110,38 @@ rather than multiplied by four in every expression that wants bytes.
 At field granularity it cites the fields its expression read, since citing its
 own zero-width position would say nothing about where the value came from.
 
+### `pointer`
+
+```yaml
+type:
+  pointer:
+    at: "((hi & 63) << 8) | lo"
+    type: {unit: name}
+```
+
+A back-reference: *read `type` at `at`, and carry on where you were.* Both keys
+are required. Real DNS needs it — an answer record's owner name is usually two
+bytes meaning "the name at offset 12" (RFC 1035 §4.1.4).
+
+`at` is an integer expression giving an offset **from the start of the
+message**, which is the only space it can mean. A run holds many messages, so a
+pointer that meant stream-absolute would work on a run's first message and
+silently misread every later one.
+
+Because `at` is an expression, a pointer **reads nothing where it stands** —
+the bytes encoding the reference are read by ordinary fields, exactly as `hi`
+and `lo` are above. Like `computed`, it is zero-width at the cursor; unlike
+`computed`, it cites the region it read rather than the fields it read from.
+That region may already be cited by whatever decoded it in place, and two
+records citing one region is legal.
+
+A pointer may only target bytes the message has **already decoded**: at or
+after the message start, strictly before the pointer. Anything else — an offset
+past the end, a forward reference, a target that does not decode — makes the
+region `undecodable`, and never raises. That rule is also what makes chains
+finite: each hop must land strictly earlier than the last, so a cycle cannot be
+constructed.
+
 ## Sizes
 
 | Kind | Form | Meaning |
@@ -166,20 +198,38 @@ A negative `count` is `undecodable`.
 ## Worked example
 
 From [`examples/dns.yaml`](https://github.com/adamkjonsson/zipline-kober/blob/main/examples/dns.yaml),
-a DNS name — a run of length-prefixed labels ending in a zero-length one:
+a DNS name — a run of length-prefixed labels, ending either in a zero-length
+label or in a compression pointer:
 
 ```yaml
   name:
     fields:
       - name: labels
         type: {unit: label}
-        repeat: {until: "labels.length == 0"}
+        repeat: {until: "labels.length == 0 or labels.length >= 192"}
 
   label:
     fields:
       - {name: length, type: {int: {bits: 8}}}
-      - {name: text, type: {string: {size: {expr: "length"}}}}
+      - name: rest
+        type:
+          switch:
+            on: "length >> 6"
+            cases:
+              0: {string: {size: {expr: "length"}}}
+              3: {unit: {name: compressed, args: ["length"]}}
+
+  compressed:
+    params: [{name: high, type: int}]
+    fields:
+      - {name: low, type: {int: {bits: 8}}}
+      - name: target
+        type: {pointer: {at: "((high & 63) << 8) | low", type: {unit: name}}}
 ```
+
+Four of the types in one place: an `int`, a `string` sized from an earlier
+field, a `switch` on the top two bits of that field, and a `pointer` reading a
+name that was already decoded somewhere earlier in the message.
 
 `labels.length` reads the `length` field of the label just decoded, which is
 what stops the repetition on the terminating zero byte.
