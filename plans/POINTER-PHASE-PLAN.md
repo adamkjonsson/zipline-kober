@@ -1,6 +1,7 @@
 # Phase plan: the language
 
-**State: not started.** Written after the compiler phase landed
+**State: stage 1 done, stages 2–8 not started.** Written after the compiler
+phase landed
 ([`COMPILER-PHASE-PLAN.md`](COMPILER-PHASE-PLAN.md)), against `DESIGN.md`
 revision 7 and `zpf` 0.2.x.
 
@@ -119,9 +120,11 @@ whitelist itself got.
 
 ## Design questions to settle first
 
-Q1 is settled. Q2–Q5 carry leanings rather than answers, and Stage 1 settles
-them with a spike, as the compiler phase's Q1–Q5 were settled — a written
-answer with code behind it, not a preference.
+**All six are settled**, each by Stage 1's spike rather than by argument — a
+written answer with code behind it, as the compiler phase's Q1–Q5 were settled.
+Q6 was raised by reading the capture rather than by writing this plan, and Q1's
+second half was **overturned** by running the code, which is what the stage was
+for.
 
 ### Q1 — What offset space does `Pointer.at` mean, and who translates? — **settled: message-relative, and out of range is `undecodable`**
 
@@ -147,29 +150,33 @@ about the input rather than a piece of input we never received, and §2 reserves
 Two things follow that the spike must still pin down, because "the message" is
 the underspecified word here and it is where the bug will live:
 
-- **What the origin actually is, in `STREAM` shape.** A run is not a message:
-  `_decode_run` in [`stage.py`](../src/kober/stage.py) loops, decoding as many
-  messages as fit one contiguous run, over a single `Cursor` carrying the
-  *run's* `base`. So message-relative is a third space that exists nowhere in
-  the code today — neither the run's base nor the stream's origin — and the
-  phase has to carry the current message's start into the decode. That is a
-  small addition, and it is the whole of what Q1's settlement costs.
-- **What "out of range" is measured against.** The message's start is known;
-  its end is not, until the decode finishes. So the reachable range is bounded
-  below by the message origin and above by what the run actually holds. Whether
-  a *forward* pointer into not-yet-decoded bytes is legal is a separate call:
-  RFC 1035 requires DNS pointers to point backwards, but that is a protocol's
-  rule and not obviously the language's. Leaning: allow forward, bound by the
-  available data, and let a protocol that wants stricter say so in prose — but
-  the spike should confirm nothing in emission or seams depends on the reads
-  being ordered.
+- **What the origin actually is, in `STREAM` shape** — *settled: it lives in
+  `decode_one`.* A run is not a message: `_decode_run` in
+  [`stage.py`](../src/kober/stage.py) loops, decoding as many messages as fit
+  one contiguous run, over a single `Cursor` carrying the *run's* `base`. So
+  message-relative is a third space that exists nowhere in the code today, and
+  the origin is fixed per **message**, where the entry unit starts —
+  `cursor.byte_offset()` on entry to `decode_one`, not `base`, and not
+  anything `decode_bytes` knows.
+- **What "out of range" is measured against** — *settled: the message's
+  high-water mark, and the leaning it replaces was wrong.* The draft leaned
+  toward allowing forward pointers, bounded by the available data. The spike
+  killed that: bounding at the run makes a message's decode depend on the bytes
+  that happen to **follow** it. The same message, given three different
+  neighbours, decoded three ways — `ok` and `truncated`, a target extent of
+  `[0,1)` or `[0,20)`, 14 or 18 bytes consumed.
+
+  A pointer may therefore target only bytes the message has **already
+  decoded**: at or after the origin, strictly before the cursor. Every real
+  pointer in the corpus is backwards, so nothing is lost, and a decode becomes
+  self-contained — which it demonstrably was not before.
 
 A pointer must not reach outside the current message into a neighbour that
 shares its run. That falls out of the origin being the message rather than the
 run, and it matters: citing a previous message's bytes from this one's record
 would put the emitter in a position §5's seam rule has no answer for.
 
-### Q2 — How is the chain bound expressed, and what happens when it blows?
+### Q2 — How is the chain bound expressed, and what happens when it blows? — **settled: the bound is a backstop, not the defence**
 
 `MAX_DEPTH = 64` in [`decoder.py`](../src/kober/decoder.py) already
 bounds unit nesting and raises `_Stop` into an `undecodable` region.
@@ -186,7 +193,23 @@ the bound. Leaning: only by the bound — a visited set costs an allocation per
 pointer read on the hot path to detect a case the bound already handles, and
 the compiler would have to reproduce it exactly for the differential to pass.
 
-### Q3 — What does a pointed-at region cite, and what happens to tiling?
+**Settled, and better than the leaning: no cycle can be constructed.** Each hop
+inherits a ceiling equal to the previous hop's *target*, so a chain's offsets
+strictly decrease. A self-pointer and a two-node cycle are both refused at the
+second hop, by the range rule, before the bound is consulted. No visited set,
+and no allocation.
+
+A legal backward chain still resolves: a hand-built message whose answer name
+points at a question name that is itself a pointer decodes to `'com'` through
+two hops, whole message consumed, status `ok`.
+
+**The hop bound stays, with its job restated.** It no longer guards against
+cycles, because there are none; it guards against *depth*. A 64 KB message
+admits a legal chain tens of thousands of hops long, and that is a stack
+overflow rather than a loop. It stays a separate constant from `MAX_DEPTH`, per
+the leaning above.
+
+### Q3 — What does a pointed-at region cite, and what happens to tiling? — **settled as leaned, and the emitter needed no fix**
 
 Overlapping citations are legal and **[verified]**. But two properties in the
 code assume more than the format requires:
@@ -202,18 +225,28 @@ is exactly what "not undecoded" means. The first must go, and **that retirement
 has to be argued in the design rather than performed in a diff**: it was a real
 property, the emitter was built on it, and it is being given up deliberately.
 
-**Leaning: a pointer read cites the bytes it actually read, at the offset it
-read them,** so the pointed-at region ends up cited twice — once by whatever
-decoded it in place, once by the reference. That is the honest statement and it
-is what the format's overlap allowance exists for.
+**Settled as leaned: a pointer read cites the bytes it actually read, at the
+offset it read them,** so the pointed-at region ends up cited twice — once by
+whatever decoded it in place, once by the reference.
 
-Settle what [`emit.py`](../src/kober/emit.py)'s hole-finding does when
-emissions overlap: `_holes` subtracts spoken-for intervals from the tree's
-extent, and overlap is new input to that. It is very likely already correct via
-`_union`; "very likely" is not the standard, so it gets a test that fails
-without the check.
+The overlap is **partial**, as the corpus predicted. In the 157-byte response,
+`dns.answers[0].rdata` cites `0x3b-0x61` while eight leaves under
+`dns.authority[0].name…target…` cite sub-ranges inside it, starting at `0x48`.
 
-### Q4 — Do string builtins mean calls in the expression language?
+**`emit.py` needed no fix.** Across all four responses at both granularities:
+cited ∩ undecoded is empty, no byte is uncovered, and `_holes` handles partial
+overlap correctly through `_union`. The prediction that it was "very likely
+already correct" held, and it was checked rather than assumed.
+
+Field granularity emits the pointed-at name **twice**, under two paths —
+`dns.questions[0].qname…` and `dns.answers[0].name.labels[0].rest.target…` —
+with identical payloads and ranges. That is the intended, honest outcome.
+Message granularity is unaffected: one record, overlap invisible.
+
+Tiling retires as expected. The weaker true property — every byte covered *at
+least* once — holds everywhere.
+
+### Q4 — Do string builtins mean calls in the expression language? — **settled: option (1), and it costs nothing at decode time**
 
 The whitelist refuses `ast.Call`. Three options:
 
@@ -231,14 +264,48 @@ The whitelist's promise was never "no functions"; it was *no author-supplied
 code and no unbounded work*, and a closed table of total functions keeps both.
 Say that in §3.3 rather than letting the change look like erosion.
 
-Settle what a malformed input yields — `to_int("abc")`. Leaning: a defined
-sentinel-free answer is impossible without an option type, so the function is
+Settled what a malformed input yields — `to_int("abc")`. The function is
 **partial at the value level and total at the decode level**: the field it
 sizes becomes `undecodable`, the decoder does not raise, and `check` cannot
-know in advance. That is the same shape as a length field pointing past the end
-of a segment, which the model already handles.
+know in advance.
 
-### Q5 — How far does the read seam generalize now?
+**That needs no new mechanism.** `_one` in
+[`decoder.py`](../src/kober/decoder.py) already catches `EvalError` and returns
+an `undecodable` node, which is exactly how a bad size expression behaves
+today. The builtin inherits the existing path rather than adding one.
+
+The parser change is likewise contained: the refusal is one message at one
+site — *"a function call is not allowed in an expression"* — so admitting a
+closed table replaces a blanket refusal with a lookup, in one place.
+
+Real numbers to write against, from `http_example.pcapng`: the response is
+`Transfer-Encoding: chunked` with `Content-Encoding: gzip`, and its first chunk
+header is `776` — hexadecimal, 1910 bytes. Both builtins are needed for one
+message.
+
+**What admitting calls does *not* open, and this is worth stating because the
+next phase will test it.** Transforms — decompression, decryption — will need
+an extension point that a closed table cannot give them, since kober cannot
+ship every proprietary codec. That extension point is **not** this one. A
+builtin maps a value to a value; a transform maps bytes to bytes and feeds a
+sub-decode with its own offset space, and merging the two into "calls" is a
+category error.
+
+The concrete cost of routing transforms through the expression language is that
+`check` stops being static: a user-registered function makes a spec valid in
+one process and invalid in another, depending on what was registered, and
+`kober check spec.yaml` could no longer answer on its own. A transform escapes
+that because its type is always bytes → bytes, so a spec can **name** a codec
+the checker does not have and still be checkable — an unknown codec becomes an
+undecodable region at decode time, as an unmatched `Switch` case already does.
+
+So the shape for later is the one §11.5 already named: **the spec names a
+transform; a registry supplies it**, kober shipping the well-known set and a
+caller registering their own through the Python API. The spec file stays data,
+which is also what keeps a non-Python backend possible — a spec naming a Python
+callable cannot be compiled by one, and a spec naming `gzip` can.
+
+### Q5 — How far does the read seam generalize now? — **settled: the seam is a `(data, base, limit)` triple**
 
 The insight above says the redirect is built to carry a future transform. The
 risk is building an abstraction for one caller.
@@ -255,19 +322,156 @@ The test that this was drawn right is stated now, so it can be checked later:
 adding a gzip transform should touch the byte-source type and the spec
 vocabulary, and **not** `decoder.py`'s field or unit loops.
 
+**Settled, and smaller than expected: the seam is a `(data, base, limit)`
+triple.** The spike needed no byte-source abstraction at all — a second
+`Cursor` over `data[:limit - base]` was the whole of it, and the slice *is* the
+byte source in embryo. A transform supplies a different `data` and a `base`
+that no longer indexes the input; `Pointer` supplies the enclosing run's own
+bytes with a ceiling. Those are the two parameters, and nothing else varied.
+
+So the seam to build in Stage 3 is: **a sub-decode takes the bytes it reads,
+the offset those bytes start at, and the offset it may not read past.** Naming
+it a type is Stage 3's call; the spike says the type has three fields and no
+behaviour.
+
+### Q6 — Can one field cite two disjoint ranges? — **settled: the question dissolves**
+
+Raised by reading the capture, and folded into Q3 in the first draft, which was
+wrong: it is structural rather than a matter of policy, and it decides whether
+this phase touches the emitter's data model.
+
+A pointer field inherently cites **two** ranges — the two bytes at the cursor
+that encode the reference, and the target region elsewhere. `zpf` is content:
+`record(cites=...)` takes "a pair, a ready `Span`, or a **sequence** of
+either". [`node.py`](../src/kober/node.py) and [`emit.py`](../src/kober/emit.py)
+are not: `Node` and `Emission` each carry one `off_start`/`off_end` pair, and
+`Node.width` is defined as their difference.
+
+**Leaning: decomposition, not multi-range.** The pointer node covers its own
+two bytes; the decoded target hangs beneath it as a child covering the target
+region. Every node stays contiguous, `Node` is untouched, and the two ranges
+exist as two nodes. What it costs is **tree containment** — a child would sit
+outside its parent's hull for the first time, and `_walk` in `emit.py` may lean
+on containment without saying so.
+
+If containment turns out to be load-bearing, the fallback is a multi-range
+citation on `Node` and `Emission`, which is a wider change than this phase
+wants and would be felt by the compiler's plan layer too.
+
+**Settled: neither. The question dissolves, and it dissolves for a reason worth
+keeping.** `Pointer.at` is an *expression*, so a pointer reads **nothing** at
+the cursor — the reference bytes are read by ordinary fields, whose citations
+already cover them. In the DNS spec the two bytes are `label.length` and
+`ptr.lo`; the `Pointer` field is zero-width where it stands and cites exactly
+one contiguous range, the target.
+
+The two-range case never arises, so `Node` and `Emission` are untouched and the
+compiler's plan layer inherits nothing. The shape is `Computed`'s — zero width
+at the cursor, cites elsewhere — which the model already carries.
+
+Containment *does* break, as predicted: a `target` node at `0x0c-0x2e` sits
+under an ancestor spanning `0x32-0x42`, and the tree stops being monotonic in
+offset. `emit._walk` turned out not to care. That was the risk, and it did not
+bite.
+
 ## Stages
 
-### Stage 1 — settle Q2–Q5, with a spike
+### Stage 1 — settle Q2–Q6, with a spike — **done**
 
-Hand-write, against the real `dns_example.pcapng` response, what a compressed
+Hand-write, against the real `dns_example.pcapng` responses, what a compressed
 name decode should produce: which nodes, which offsets, which citations, at
-both granularities. Then answer Q2–Q5 in this document, each with the evidence
+both granularities. Then answer Q2–Q6 in this document, each with the evidence
 that decided it, along with the two details Q1's settlement left open — what
 the message origin is in `STREAM` shape, and what an out-of-range offset is
-measured against. No production code.
+measured against. **No production code**: the prototype is scratch, and being
+free to get it wrong is the point.
+
+#### What the corpus actually holds
+
+Established before planning the stage, by converting the capture and
+enumerating every pointer site in the four responses:
+
+| Response | qd/an/ns/ar | Sites | Targets |
+| --- | --- | --- | --- |
+| 146 B | 1/0/1/0 | 1 | `0x32` → `0x0c` |
+| 66 B | 1/1/0/0 | 1 | `0x32` → `0x0c` |
+| 157 B | 1/1/1/0 | 3 | `0x2f`→`0x0c`, `0x61`→`0x48`, `0x87`→`0x71` |
+| 113 B | 1/2/0/0 | 2 | `0x2f`→`0x0c`, `0x61`→`0x3b` |
+
+Three things follow, and each changed the stage:
+
+- **Not every target is the question name.** `0x48` and `0x71` point *into the
+  middle of an earlier record's RDATA* — the tail of a CNAME's name, and the
+  tail of an SOA's MNAME — and `0x3b` points at an earlier RDATA's first byte.
+  So Q3's overlap is **partial**, not whole-region, which is the harder case
+  for `_holes` and `_union` and is not what the first draft assumed.
+- **The corpus contains no chain.** All seven targets begin with a label,
+  never with another pointer. Q2's bound cannot be exercised by real traffic,
+  so the stage has to *build* its adversarial inputs rather than find them.
+- **Q6 exists**, per above.
+
+#### Steps
+
+0. **The fixture.** The four responses as inline byte literals.
+   [`test_examples.py`](../tests/test_examples.py) sets the rule: the suite
+   "deliberately does not depend on" the sibling checkout, so real bytes are
+   inlined rather than read from `../python-zipline-wire`.
+1. **Hand-write the expected decode** — the 66-byte response first, then the
+   157-byte one, which has all three interesting targets. Nodes, offsets,
+   citations, both granularities. Tables, not code.
+2. **A throwaway prototype**: a minimal `Pointer` in a scratch copy of the
+   decoder, enough to produce trees for all four responses.
+3. **Settle Q6, then Q3.** Try decomposition first; find out whether `_walk`
+   leans on containment. Then run partial overlap through `emit.plan` and
+   confirm cited ∩ undecoded stays empty.
+4. **A real decode stage**, past `ConformanceChecker` and `check_coverage`.
+   Coverage is a promise about a file, and a tree is not a file.
+5. **Build the adversarial inputs Q2 needs**: a two-hop chain, a self-pointer,
+   a two-node cycle, a forward pointer, an out-of-range offset, and — for
+   `STREAM` shape — a pointer aimed at a neighbouring message in the same run,
+   which tests the boundary Q1's settlement created and which nothing in the
+   corpus produces.
+6. **Q4, separately.** String builtins share nothing with the pointer work: a
+   parse/infer/unparse sketch over the three functions, with the
+   malformed-input answer decided against the real HTTP exchange rather than
+   in the abstract.
+7. **Write the settlements** into this document, each with its evidence.
 
 Deliverable: this file's Q sections marked **settled**, and a scratch script
 that produced the numbers.
+
+#### What the spike found beyond the six questions
+
+The emitter turned out to be right under partial overlap, so the stage's
+"expect a bug" prediction did not pay off there. It paid off twice elsewhere.
+
+**A truncation inside a pointer target must not stay `truncated`.** Following a
+pointer into nonsense makes the target read run off the end, and the natural
+result is a `truncated` node. But `truncated` is **hole**-class (§5), so it
+declares a `stream-gap` seam and says those bytes never existed — a lie about
+the input, when what actually happened is that the spec aimed somewhere silly
+at input that arrived intact. A short read *inside a pointer read* is therefore
+converted to `undecodable`, which is `bytes`-class and owes no seam. With that,
+every pathology in the corpus — self-pointer, cycle, forward, out of range,
+garbage target — lands on `undecodable`, nothing raises, and everything
+terminates.
+
+**Conformance cannot catch an origin bug, so the test for it must compare
+values.** Running the whole corpus with the origin deliberately set to the
+run's base instead of the message's produced a file that is conformance-clean
+*and* coverage-clean — while message 1's answer name silently resolved to
+message 0's question name. A wrong pointer still cites *some* region in range,
+so the coverage guarantee is satisfied by a decode that is simply wrong. Stage
+4 must therefore assert on decoded **values** across a multi-message run; a
+conformance check would pass either way, which by `CLAUDE.md`'s rule makes it
+worthless as a regression test for this.
+
+#### What the spike did not settle
+
+`examples/dns.yaml`'s final shape. The spike's spec is built in Python because
+the loader has no `pointer:` key yet, and it models a name as a `label` repeat
+switching on the top two bits — which works, but Stage 7 should decide whether
+that is the spec an author would want to read.
 
 ### Stage 2 — `Pointer` in the model, loader, and checker
 
