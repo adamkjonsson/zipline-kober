@@ -589,7 +589,7 @@ origin fails the message-boundary one. The containment property — no node
 reaches past the message it belongs to — turned out to be the more robust of
 the two ways of saying it, and is worth keeping alongside.
 
-### Stage 5 — string builtins
+### Stage 5 — string builtins — **done**
 
 Q4's table, in [`expr.py`](../src/kober/expr.py) (parse, infer, `unparse`) and
 [`check.py`](../src/kober/check.py) (argument count and types, result type).
@@ -597,6 +597,30 @@ Three functions, no more, each total at the decode level. `unparse` must
 round-trip. The parser change is the security-relevant one: the function table
 is closed and matched by name, and an unknown name is refused by the same
 mechanism that refuses `ast.Call` today.
+
+**Three signatures, two names.** `to_int(s)`, `to_int(s, base)`, `lower(s)` —
+the three capabilities §13.2 asked for, spelled as two rows in `BUILTINS`.
+Arity is settled at parse time, where a float literal already is; argument
+types at inference, with the rest of typing.
+
+**`to_int` had a decision the plan had not seen.** Python's `int` accepts
+`1_000` and, in base 16, a `0x` prefix. Inheriting that would read a malformed
+wire length as a plausible number, which is the failure this project exists to
+avoid, so the conversion validates its own digits. Whitespace *is* stripped,
+because an HTTP field value carries optional whitespace by rule and allowing it
+is what saves the language a fourth function.
+
+**Nothing new was needed for failure.** A malformed value raises `EvalError`,
+which `_one` already turns into an `undecodable` node — the same path a size
+expression that cannot be evaluated has always taken. Q4 predicted this and it
+held exactly.
+
+Two documents said something now false and were corrected here rather than in
+stage 8: `docs/format/expressions.md`, whose whole "no string arithmetic"
+section was the *reason* for this work, and `DESIGN.md` §3.3's "no calls".
+A normative document that lies in the interim is worse than one polished late.
+`test_docs.py` gained a check that every `BUILTINS` row is documented, matching
+what it already does for loader keys.
 
 ### Stage 6 — both, in the compiler
 

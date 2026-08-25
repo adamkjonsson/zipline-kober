@@ -12,6 +12,7 @@ from kober.spec import (
     Count,
     EnumDef,
     Field,
+    FieldType,
     Fixed,
     FromExpr,
     IntType,
@@ -699,3 +700,51 @@ def test_a_pointer_to_its_own_unit_is_not_left_recursion():
         ]
     )
     assert errors(spec) == []
+
+
+# --- builtins --------------------------------------------------------------
+
+
+def sized_by(expr: str, *, first: FieldType | None = None) -> Spec:
+    """Build a two-field unit whose second field's size comes from ``expr``."""
+    head = first if first is not None else StringType(size=Fixed(4))
+    return build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="head", type=head),
+                    Field(name="body", type=BytesType(size=FromExpr(parse(expr)))),
+                ],
+            )
+        ]
+    )
+
+
+def test_a_builtin_types_as_its_table_row_says():
+    assert check(sized_by("to_int(head, 16)")) == ()
+
+
+def test_a_builtin_on_the_wrong_type_is_an_error():
+    spec = sized_by("to_int(head)", first=IntType(bits=8))
+    assert any("argument 1 of to_int()" in message for message in errors(spec))
+
+
+def test_a_builtin_returning_text_cannot_size_a_field():
+    assert any("size must be int" in message for message in errors(sized_by("lower(head)")))
+
+
+def test_a_builtin_cannot_reach_a_later_field():
+    """The forward-reference rule has to see through an argument."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="body", type=BytesType(size=FromExpr(parse("to_int(tail)")))),
+                    Field(name="tail", type=StringType(size=Fixed(2))),
+                ],
+            )
+        ]
+    )
+    assert any("tail" in message for message in errors(spec))

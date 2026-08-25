@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from kober.errors import EvalError, ExprError
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
 
 class ExprType(Enum):
@@ -168,7 +168,75 @@ class Compare:
     right: Expr
 
 
-Expr = IntLiteral | StrLiteral | BoolLiteral | Ref | UnaryOp | BinOp | BoolOp | Compare
+@dataclass(frozen=True)
+class Call:
+    """A call to one of the language's own functions.
+
+    Attributes:
+        name: The function, always a key of :data:`BUILTINS`.
+        args: Its arguments, positionally.
+
+    """
+
+    name: str
+    args: Sequence[Expr] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "args", tuple(self.args))
+
+
+Expr = IntLiteral | StrLiteral | BoolLiteral | Ref | UnaryOp | BinOp | BoolOp | Compare | Call
+
+
+@dataclass(frozen=True)
+class Builtin:
+    """One function's signature.
+
+    Attributes:
+        params: Argument types, positionally. Arguments past ``required`` are
+            optional and must be supplied in order.
+        required: How many arguments must be given.
+        returns: The result type.
+        doc: One line, for ``kober show`` and error messages.
+
+    """
+
+    params: tuple[ExprType, ...]
+    required: int
+    returns: ExprType
+    doc: str
+
+
+#: Every function the language has, and the whole of what admitting calls
+#: opened. See ``DESIGN.md`` §3.3.
+#:
+#: **What the whitelist bought was never "no functions".** It bought no
+#: author-supplied code and no unbounded work, and a closed table of total
+#: functions costs neither: an author cannot add to it, and each of these is a
+#: bounded operation on a value that has already been decoded.
+#:
+#: The three signatures here are exactly what real HTTP asked for (§13.2) — a
+#: decimal string, a hexadecimal string, and a case-insensitive match — and the
+#: table is meant to stay that small. A *transform* (decompression, decryption)
+#: is not a candidate for it: a builtin maps a value to a value, where a
+#: transform maps bytes to bytes and feeds a sub-decode, and it needs an
+#: extension point of its own rather than a fourth row here.
+BUILTINS: Mapping[str, Builtin] = MappingProxyType(
+    {
+        "to_int": Builtin(
+            params=(ExprType.STR, ExprType.INT),
+            required=1,
+            returns=ExprType.INT,
+            doc="Read text as an integer, in base 10 unless a base is given.",
+        ),
+        "lower": Builtin(
+            params=(ExprType.STR,),
+            required=1,
+            returns=ExprType.STR,
+            doc="Lower-case text, for a case-insensitive comparison.",
+        ),
+    }
+)
 
 #: Scope words that may lead a reference path. ``this`` is the containing
 #: unit, ``parent`` the unit that referenced it, ``root`` the entry unit.
@@ -322,8 +390,43 @@ def _translate(node: ast.expr, source: str, where: str | None) -> Expr:
         )
     if isinstance(node, ast.Compare):
         return _translate_compare(node, source, where)
+    if isinstance(node, ast.Call):
+        return _translate_call(node, source, where)
     msg = f"{_describe(node)} is not allowed in an expression"
     raise ExprError(msg, source, where)
+
+
+def _translate_call(node: ast.Call, source: str, where: str | None) -> Expr:
+    """Translate a call, refusing anything outside :data:`BUILTINS`.
+
+    The refusal is by *name*, against a closed table, which is what keeps "a
+    spec cannot run code" true now that calls parse at all. Nothing here builds
+    a name from the spec: an author writes one of two words or gets an error.
+    """
+    known = ", ".join(f"{name}()" for name in sorted(BUILTINS))
+    if not isinstance(node.func, ast.Name) or node.func.id not in BUILTINS:
+        called = node.func.id if isinstance(node.func, ast.Name) else _describe(node.func)
+        msg = (
+            f"{called!r} is not one of the expression language's functions; "
+            f"there are only {known}"
+        )
+        raise ExprError(msg, source, where)
+    if node.keywords:
+        msg = f"{node.func.id}() takes positional arguments only"
+        raise ExprError(msg, source, where)
+    builtin = BUILTINS[node.func.id]
+    if not builtin.required <= len(node.args) <= len(builtin.params):
+        wanted = (
+            str(builtin.required)
+            if builtin.required == len(builtin.params)
+            else f"{builtin.required} or {len(builtin.params)}"
+        )
+        msg = f"{node.func.id}() takes {wanted} argument(s), got {len(node.args)}"
+        raise ExprError(msg, source, where)
+    return Call(
+        name=node.func.id,
+        args=tuple(_translate(argument, source, where) for argument in node.args),
+    )
 
 
 def _translate_constant(node: ast.Constant, source: str, where: str | None) -> Expr:
@@ -468,7 +571,19 @@ def infer_type(expr: Expr, scope: Scope, source: str, where: str | None = None) 
         return _infer_binary(expr, scope, source, where)
     if isinstance(expr, BoolOp):
         return _infer_boolop(expr, scope, source, where)
+    if isinstance(expr, Call):
+        return _infer_call(expr, scope, source, where)
     return _infer_compare(expr, scope, source, where)
+
+
+def _infer_call(expr: Call, scope: Scope, source: str, where: str | None) -> ExprType:
+    """Type a builtin call. Arity was settled at parse time."""
+    builtin = BUILTINS[expr.name]
+    for index, argument in enumerate(expr.args):
+        actual = infer_type(argument, scope, source, where)
+        context = f"argument {index + 1} of {expr.name}()"
+        _require(actual, builtin.params[index], context, source, where)
+    return builtin.returns
 
 
 def _require(
@@ -587,7 +702,70 @@ def evaluate(expr: Expr, env: Environment) -> ExprValue:
         return _eval_binary(expr, env)
     if isinstance(expr, BoolOp):
         return _eval_boolop(expr, env)
+    if isinstance(expr, Call):
+        return _eval_call(expr, env)
     return _eval_compare(expr, env)
+
+
+#: Digits, by value, for reading text as an integer in a given base.
+_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def _eval_call(expr: Call, env: Environment) -> ExprValue:
+    """Evaluate a builtin call."""
+    values = [evaluate(argument, env) for argument in expr.args]
+    if expr.name == "lower":
+        return _as_str(values[0], "lower()").lower()
+    base = 10 if len(values) == 1 else _as_int(values[1], "to_int()")
+    return _to_int(_as_str(values[0], "to_int()"), base)
+
+
+def _to_int(text: str, base: int) -> int:
+    """Read ``text`` as an integer in ``base``, refusing anything else.
+
+    **Deliberately stricter than Python's :func:`int`**, which accepts
+    ``1_000`` and — in base 16 — a ``0x`` prefix. Neither appears in a wire
+    field, and quietly reading ``1_0`` as ten would turn a malformed length
+    into a plausible one, which is the failure this project exists to avoid.
+    Surrounding whitespace *is* allowed, because an HTTP field value carries
+    optional whitespace by the specification's own rule and stripping it here
+    is what saves the language a fourth function.
+
+    Args:
+        text: The text to read.
+        base: Radix, 2 to 36.
+
+    Returns:
+        The value.
+
+    Raises:
+        EvalError: If the base is unusable or the text is not a number in it.
+            **Partial at the value level and total at the decode level**: the
+            decoder turns this into an ``undecodable`` region, exactly as it
+            already does for a size expression that cannot be evaluated.
+
+    """
+    if not 2 <= base <= len(_DIGITS):
+        msg = f"to_int() base must be 2..{len(_DIGITS)}, got {base}"
+        raise EvalError(msg)
+    body = text.strip()
+    negative = body.startswith("-")
+    if body[:1] in "+-":
+        body = body[1:]
+    allowed = _DIGITS[:base]
+    if not body or any(character not in allowed for character in body.lower()):
+        msg = f"to_int() cannot read {text!r} as a base-{base} integer"
+        raise EvalError(msg)
+    value = int(body, base)
+    return -value if negative else value
+
+
+def _as_str(value: ExprValue, op: str) -> str:
+    """Return a text operand, refusing anything else."""
+    if not isinstance(value, str):
+        msg = f"{op} needs text, got {value!r}"
+        raise EvalError(msg)
+    return value
 
 
 def _as_int(value: ExprValue, op: str) -> int:
@@ -773,6 +951,9 @@ def _collect(expr: Expr, found: list[Ref]) -> None:
     elif isinstance(expr, BoolOp):
         for operand in expr.operands:
             _collect(operand, found)
+    elif isinstance(expr, Call):
+        for argument in expr.args:
+            _collect(argument, found)
 
 
 def unparse(expr: Expr) -> str:
@@ -820,6 +1001,10 @@ def _unparse(expr: Expr, limit: int) -> str:
         return "true" if expr.value else "false"
     if isinstance(expr, Ref):
         return ".".join(expr.path)
+    if isinstance(expr, Call):
+        # A call is an atom: it carries its own brackets and never needs more.
+        rendered = ", ".join(_unparse(argument, 0) for argument in expr.args)
+        return f"{expr.name}({rendered})"
     if isinstance(expr, UnaryOp):
         level = PRECEDENCE["not"] if expr.op == "not" else UNARY_PRECEDENCE
         space = " " if expr.op == "not" else ""

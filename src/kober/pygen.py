@@ -45,6 +45,7 @@ from kober.expr import (
     BinOp,
     BoolLiteral,
     BoolOp,
+    Call,
     Compare,
     IntLiteral,
     Ref,
@@ -676,6 +677,15 @@ def _expr(expr: Expr, binding: Binding, limit: int) -> str:
         left = _expr(expr.left, binding, level + 1)
         right = _expr(expr.right, binding, level + 1)
         return _group(f"{left} {expr.op} {right}", level, limit)
+    if isinstance(expr, Call):
+        # Valid, and it evaluates under the interpreter — the backend simply
+        # has no rendering for it yet. `CompileError` is what says that: the
+        # spec is fine and only this compilation is impossible.
+        msg = (
+            f"the compiler cannot yet render {expr.name}(); "
+            f"use the interpreter for this spec"
+        )
+        raise CompileError(msg)
     return _binary(expr, binding, limit)
 
 

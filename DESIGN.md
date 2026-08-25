@@ -361,14 +361,15 @@ in a segment we don't have. That is a normal outcome, not an error.
 ### 3.3 Expressions
 
 Small, total, side-effect free: arithmetic, comparison, boolean ops, field
-references, literals. No calls, no loops. Authored as strings
+references, literals, and **calls to a closed table of two functions**. No
+loops, and nothing an author can add to. Authored as strings
 (`size: "header.length * 4"`), parsed to an AST at load time so `check` can
 type them and scope them against the spec before any data exists.
 
 Scoping follows Kaitai: `this`, `parent`, `root`, plus unit param names. A
 reference to a not-yet-decoded field is a load-time error.
 
-Read "no calls, no loops" as **a choice about taste and cost, not a safety
+Read the smallness as **a choice about taste and cost, not a safety
 requirement.** Per §2.1, an expression cannot move the cursor whatever it
 contains, so no amount of arithmetic here threatens the coverage guarantee.
 The language is small because a small one is cheap to check, cheap to explain,
@@ -376,18 +377,38 @@ and portable to a non-Python reader — not because a bigger one would be
 dangerous. Growing it is §11 question 5, and the parser is built from a
 whitelist precisely so that growing it is a list change.
 
-**Real HTTP is the first thing that needed it grown** (§13.2). The language
-has no string-to-integer conversion, no substring, no case folding, and no
-search: it compares strings for equality and stops. That is enough for every
-*binary* protocol tried so far and not enough for a text one, because HTTP
-frames its body from a header **value** — `Content-Length` is a decimal
-string, a chunk size is a hexadecimal one, and whether chunked framing applies
-depends on matching a header case-insensitively.
+**Real HTTP is the first thing that needed it grown** (§13.2), and it is what
+the two functions are for. HTTP frames its body from a header **value**:
+`Content-Length` is a decimal string, a chunk size is a hexadecimal one, and
+whether chunked framing applies depends on matching a header
+case-insensitively. Those three needs are the table:
 
-Three total builtins would close it — `to_int(s, base)`, `starts_with(s, p)`,
-`lower(s)` — and none of them can move the cursor, so §2.1 has nothing to say
-about them. This is the "richer expressions" branch of question 5, and it now
-has the concrete case that question asked for.
+| Call | Result |
+| --- | --- |
+| `to_int(s)`, `to_int(s, base)` | int |
+| `lower(s)` | str |
+
+`to_int` is deliberately stricter than a typical library conversion: leading
+and trailing whitespace is allowed, because an HTTP field value carries
+optional whitespace by rule, but a digit separator or a radix prefix is not.
+Reading `1_0` as ten would turn a malformed wire length into a plausible one.
+Text that is not a number makes the field `undecodable` on the path a size
+expression that cannot be evaluated already takes — **partial at the value
+level, total at the decode level**.
+
+**What admitting calls did not open.** The whitelist never bought "no
+functions"; it bought no author-supplied code and no unbounded work, and a
+closed table of total functions costs neither. A *transform* — decompression,
+decryption — is not a candidate for the table: a function here maps a value to
+a value, where a transform maps bytes to bytes and feeds a sub-decode with its
+own offset space. Routing one through this language would also cost `check`
+its static answer, since a spec's validity would come to depend on what a
+caller had registered. That extension point is question 5's *hooks* branch, and
+the shape it wants is the spec **naming** a transform while a registry supplies
+it — the spec file staying data, which is also what keeps a non-Python backend
+possible.
+
+This is the "richer expressions" branch of question 5, taken.
 
 ## 4. Emission granularity, and the one thing `zpf` cannot express
 

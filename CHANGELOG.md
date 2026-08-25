@@ -54,6 +54,25 @@ installed from a checkout (see the README).
   the limitation rather than failing with a traceback, since `kober check`
   accepts such a spec.
 
+- **Two functions in the expression language**, `to_int` and `lower`, and the
+  `Call` node and closed `BUILTINS` table behind them. `to_int(s)` and
+  `to_int(s, base)` read text as an integer; `lower(s)` lower-cases it for a
+  case-insensitive comparison. They are what real HTTP framing needs and
+  nothing more: a `Content-Length` is a decimal string, a chunk size a
+  hexadecimal one, and whether chunked framing applies depends on a header
+  value whose case varies (`DESIGN.md` §13.2).
+
+  `to_int` is stricter than a typical conversion — surrounding whitespace is
+  allowed, a digit separator or radix prefix is not — because reading `1_0` as
+  ten turns a malformed wire length into a plausible one. Text that is not a
+  number makes the field `undecodable` rather than raising, on the path a size
+  expression that cannot be evaluated already takes.
+
+  **The table is closed and matched by name.** An unknown function is a
+  load-time error naming what does exist, so "a spec cannot run code" still
+  holds now that calls parse at all. `kober compile` reports a `CompileError`
+  naming the limitation until the backend renders them.
+
 - `kober.cursor.Cursor.view` and `Cursor.seek_to` — the seam a redirect reads
   through. `view(off_start, off_end)` hands out a second position over the same
   run, with its own base so spans stay absolute and its own end so a sub-decode
@@ -667,6 +686,14 @@ installed from a checkout (see the README).
   asked for a committed example and had only test fixtures.
 
 ### Documentation
+
+- `DESIGN.md` §3.3 no longer says the language has no calls, because it now
+  has two. The restatement is a narrowing of the rule's scope rather than an
+  exception to it: what the whitelist bought was no author-supplied code and no
+  unbounded work, and a closed table of total functions costs neither. It also
+  records what the table is *not* for — a byte transform maps bytes to bytes
+  and feeds a sub-decode, and routing one through expressions would cost
+  `check` its static answer.
 
 - `DESIGN.md` §2 now says what the coverage guarantee is **not**: leaves do not
   tile the input. Until `Pointer`, every leaf covered a distinct range and

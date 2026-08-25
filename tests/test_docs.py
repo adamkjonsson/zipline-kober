@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from kober import loader
+from kober import expr, loader
 
 DOCS = Path(__file__).resolve().parent.parent / "docs"
 FORMAT = DOCS / "format"
@@ -87,3 +87,10 @@ def test_the_worked_example_is_the_shipped_one():
     quoted = 'repeat: {until: "labels.length == 0"}'
     assert quoted in shipped, "examples/dns.yaml no longer matches the doc's quote"
     assert quoted in (FORMAT / "types.md").read_text()
+
+
+def test_every_builtin_is_documented():
+    """A function that works but is written up nowhere is a function nobody uses."""
+    text = format_text()
+    for name in expr.BUILTINS:
+        assert f"{name}(" in text, f"{name}() is not in the format reference"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from kober.errors import ExprError
+from kober.errors import EvalError, ExprError
 from kober.expr import (
     BinOp,
     BoolLiteral,
@@ -16,6 +16,7 @@ from kober.expr import (
     Scope,
     StrLiteral,
     UnaryOp,
+    evaluate,
     infer_type,
     parse,
     references,
@@ -108,7 +109,7 @@ def test_slash_is_integer_division():
 @pytest.mark.parametrize(
     ("source", "fragment"),
     [
-        ("len(x)", "function call"),
+        ("len(x)", "not one of the expression language's functions"),
         ("a ** 2", "'**'"),
         ("a @ b", "'@'"),
         ("a is b", "'is'"),
@@ -259,3 +260,127 @@ def test_what_unparse_writes_parses_back_to_the_same_tree(source: str):
     """
     tree = parse(source)
     assert parse(unparse(tree)) == tree
+
+
+# --- functions -------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["to_int(s)", "to_int(s, 16)", "lower(name)", "to_int(s) + 1", "lower(a) == 'x'"],
+)
+def test_a_call_round_trips(source: str):
+    """`unparse` has to produce something that parses back to the same tree."""
+    assert parse(unparse(parse(source))) == parse(source)
+
+
+def test_a_call_is_an_atom_and_needs_no_brackets():
+    assert unparse(parse("to_int(s) * 2")) == "to_int(s) * 2"
+    assert unparse(parse("to_int(a + b)")) == "to_int(a + b)"
+
+
+@pytest.mark.parametrize(
+    ("source", "fragment"),
+    [
+        ("len(x)", "not one of the expression language's functions"),
+        ("s.lower()", "not one of the expression language's functions"),
+        ("to_int()", "takes 1 or 2 argument(s), got 0"),
+        ("to_int(a, 16, 2)", "takes 1 or 2 argument(s), got 3"),
+        ("lower(a, b)", "takes 1 argument(s), got 2"),
+        ("to_int(a, base=16)", "positional arguments only"),
+    ],
+)
+def test_a_call_outside_the_table_is_refused(source: str, fragment: str):
+    """The table is closed, and matched by name — nothing is built from a spec."""
+    with pytest.raises(ExprError) as caught:
+        parse(source)
+    assert fragment in str(caught.value)
+
+
+def test_the_refusal_names_what_does_exist():
+    with pytest.raises(ExprError) as caught:
+        parse("upper(x)")
+    assert "lower()" in str(caught.value)
+    assert "to_int()" in str(caught.value)
+
+
+class _Values:
+    def __init__(self, **values: object) -> None:
+        self.values = values
+
+    def lookup(self, path: tuple[str, ...]) -> object:
+        return self.values[path[0]]
+
+
+@pytest.mark.parametrize(
+    ("source", "text", "expected"),
+    [
+        ("to_int(s)", "1234", 1234),
+        ("to_int(s)", "  1234  ", 1234),
+        ("to_int(s)", "-5", -5),
+        ("to_int(s)", "+5", 5),
+        ("to_int(s, 16)", "1a2b", 0x1A2B),
+        ("to_int(s, 16)", "776", 0x776),
+        ("to_int(s, 2)", "1011", 0b1011),
+        ("lower(s)", "Chunked", "chunked"),
+        ("lower(s)", "CHUNKED", "chunked"),
+    ],
+)
+def test_calls_evaluate(source: str, text: str, expected: object):
+    assert evaluate(parse(source), _Values(s=text)) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "   ", "abc", "1_0", "0x10", "12.5", "1 2", "١٢٣"],
+)
+def test_to_int_refuses_what_is_not_a_number(text: str):
+    """Stricter than Python's `int`, on purpose.
+
+    `int("1_0")` is ten, and reading a malformed wire length as a plausible
+    number is the failure mode this project exists to avoid. The refusal is an
+    `EvalError`, which the decoder turns into an undecodable region.
+    """
+    with pytest.raises(EvalError, match="cannot read"):
+        evaluate(parse("to_int(s)"), _Values(s=text))
+
+
+def test_to_int_refuses_a_hex_prefix_even_in_base_16():
+    with pytest.raises(EvalError, match="cannot read"):
+        evaluate(parse("to_int(s, 16)"), _Values(s="0x10"))
+
+
+def test_to_int_refuses_an_unusable_base():
+    with pytest.raises(EvalError, match="base must be"):
+        evaluate(parse("to_int(s, 99)"), _Values(s="10"))
+
+
+def test_to_int_refuses_a_digit_its_base_does_not_have():
+    with pytest.raises(EvalError, match="cannot read"):
+        evaluate(parse("to_int(s, 2)"), _Values(s="12"))
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [("to_int(s)", ExprType.INT), ("to_int(s, 16)", ExprType.INT), ("lower(s)", ExprType.STR)],
+)
+def test_a_call_has_the_type_its_table_row_says(source: str, expected: ExprType):
+    assert infer_type(parse(source), FakeScope(s=ExprType.STR), source) is expected
+
+
+@pytest.mark.parametrize(
+    ("source", "scope", "fragment"),
+    [
+        ("to_int(n)", {"n": ExprType.INT}, "argument 1 of to_int()"),
+        ("lower(n)", {"n": ExprType.INT}, "argument 1 of lower()"),
+        ("to_int(s, s)", {"s": ExprType.STR}, "argument 2 of to_int()"),
+    ],
+)
+def test_a_call_checks_its_argument_types(source: str, scope: dict, fragment: str):
+    with pytest.raises(ExprError, match=fragment.replace("(", r"\(").replace(")", r"\)")):
+        infer_type(parse(source), FakeScope(**scope), source)
+
+
+def test_a_call_reports_the_references_inside_it():
+    """The checker's forward-reference rule has to see through an argument."""
+    assert [ref.path for ref in references(parse("to_int(a.b, c)"))] == [("a", "b"), ("c",)]

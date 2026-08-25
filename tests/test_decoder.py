@@ -781,3 +781,45 @@ def test_a_cycle_is_refused_structurally_rather_than_merely_bounded():
     assert tree.status is NodeStatus.UNDECODABLE
     assert "outside the bytes already decoded" in (tree.detail or "")
     assert "hops" not in (tree.detail or "")
+
+
+# --- builtins --------------------------------------------------------------
+
+CHUNK_FIELDS = """\
+      - {name: size, type: {string: {size: {terminated: {delimiter: "\\r\\n"}}}}}
+      - {name: body, type: {bytes: {size: {expr: "to_int(size, 16)"}}}}
+"""
+
+
+def test_a_builtin_sizes_a_field_from_text():
+    """§13.2's case: a chunk header is a hexadecimal string, not an integer."""
+    tree = decode(CHUNK_FIELDS, b"1a\r\n" + b"x" * 0x1A)
+    assert tree.find("size").value == "1a"
+    assert tree.find("body").value == b"x" * 0x1A
+    assert tree.status is NodeStatus.OK
+
+
+def test_text_that_is_not_a_number_is_undecodable_not_a_raise():
+    """Partial at the value level, total at the decode level.
+
+    The same path a size expression that cannot be evaluated already takes —
+    the builtin adds no new failure mode, which is the whole of what makes
+    admitting it cheap.
+    """
+    tree = decode(CHUNK_FIELDS, b"chunked\r\nbody")
+    assert tree.status is NodeStatus.UNDECODABLE
+    assert "cannot read" in (tree.detail or "")
+
+
+def test_a_builtin_makes_a_case_insensitive_match_expressible():
+    """The other half of §13.2: `Transfer-Encoding` values vary in case."""
+    fields = """\
+      - {name: value, type: {string: {size: 7}}}
+      - name: body
+        type: {bytes: {size: {remaining: true}}}
+        condition: "lower(value) == 'chunked'"
+"""
+    for text in (b"chunked", b"CHUNKED", b"Chunked"):
+        tree = decode(fields, text + b"rest")
+        assert tree.find("body") is not None, text
+        assert tree.find("body").value == b"rest"

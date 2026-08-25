@@ -104,6 +104,40 @@ back.
 - **Switch fields**, whose type depends on the value dispatched on, so they
   have no single type to give.
 
+## Functions
+
+The language has exactly two, and they are the whole of what it can call:
+
+| Call | Result | Meaning |
+| --- | --- | --- |
+| `to_int(s)` | int | Read text as a base-10 integer. |
+| `to_int(s, base)` | int | The same, in `base` — 2 to 36. |
+| `lower(s)` | str | Lower-case text, for a case-insensitive comparison. |
+
+```yaml
+size: {expr: "to_int(length_header)"}          # Content-Length: 1234
+size: {expr: "to_int(chunk_size, 16)"}         # a chunked-encoding chunk header
+condition: "lower(transfer_encoding) == 'chunked'"
+```
+
+They exist because real HTTP framing needs them and nothing else did: a
+`Content-Length` is a decimal string, a chunk size is a hexadecimal one, and
+whether chunked framing applies depends on matching a header value whose case
+varies. Those three needs are the table, and it is meant to stay that size.
+
+**`to_int` is stricter than most languages' equivalent.** Surrounding
+whitespace is allowed, because an HTTP field value carries optional whitespace
+by rule. A digit separator (`1_000`), a radix prefix (`0x10`), and anything
+else that is not a sign followed by digits of the base is refused — reading a
+malformed wire length as a plausible number is worse than failing.
+
+Text that is not a number does not raise. It makes the field `undecodable`, on
+the same path as any other size expression that cannot be evaluated.
+
+**The table is closed.** An unknown name is a load-time error naming what does
+exist, and a spec cannot add to it. That is what keeps "a spec cannot run
+code" true now that calls parse at all.
+
 ## What the language deliberately cannot do
 
 It cannot move the read cursor. That is the invariant the whole coverage
@@ -111,21 +145,15 @@ guarantee rests on, and it is why the language being small is a choice about
 cost rather than a safety measure — no amount of arithmetic here threatens
 anything.
 
-What it also cannot do, and where that has already bitten: **there is no string
-arithmetic.** No conversion from text to integer, no substring, no case
-folding, no search. Equality is all there is.
+It cannot call anything outside the table above: no author-supplied function,
+no method on a value, no import. It has no substring, no search, and no loop.
 
-That is enough for binary protocols and not enough for text ones. Real HTTP
-frames its body from a *header value* — `Content-Length` is a decimal string,
-a chunk size is a hexadecimal one, and whether chunked framing applies at all
-depends on matching a header case-insensitively. None of that is expressible,
-so [`examples/http.yaml`](https://github.com/adamkjonsson/zipline-kober/blob/main/examples/http.yaml)
-decodes the start line and every header and then claims the body as opaque
-bytes, saying so in its own `doc:`.
-
-Three total builtins would close it — `to_int(s, base)`, `starts_with(s, p)`,
-`lower(s)` — and none of them could move the cursor. Whether to add them is an
-open question in `DESIGN.md` §11.
+**A byte transform is not a candidate for the table.** Decompression and
+decryption map bytes to bytes and feed a sub-decode with its own offset space,
+where a function here maps one value to another. They need an extension point
+of their own — see `DESIGN.md` §11 — and adding one as a third row would cost
+`check` its static answer, since a spec's validity would then depend on what a
+caller had registered.
 
 ## Decode-time failure
 
