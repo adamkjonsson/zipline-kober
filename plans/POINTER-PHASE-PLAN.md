@@ -515,13 +515,39 @@ passed. `ops.py` now raises `CompileError` naming the limitation, which is what
 that exception exists for — the spec is valid and runs under the interpreter,
 and only the compilation is impossible. Stage 6 removes it.
 
-### Stage 3 — `Pointer` in the interpreter
+### Stage 3 — `Pointer` in the interpreter — **done**
 
 The byte-source seam from Q5, then `Pointer` on it. A second `Cursor` over the
 same run at the resolved offset; the enclosing cursor never moves. Bound from
 Q2. Out-of-range, blown bound, and a target that itself fails all produce
 `undecodable` regions with details, and **nothing raises** — the promise
 [`decoder.py`](../src/kober/decoder.py) makes and that the fuzz suite asserts.
+
+**The seam landed as `Cursor.view(off_start, off_end)`**, plus `seek_to` for
+absolute positioning. Q5 called the seam a `(data, base, limit)` triple and
+that is exactly a view: its own bytes, its own base so spans stay absolute, its
+own end so a sub-decode cannot see what it was not given. A transform supplies
+different bytes to the same call.
+
+`_Read(origin, limit, depth, hops)` replaces the bare `depth` parameter
+threaded through the decode. Folding them together keeps the parameter count
+where it was and puts the four limits a redirect needs in one place.
+
+**Two things the spike had not exposed.**
+
+The window is `[origin, ceiling)`, **not** `[target, ceiling)`. Slicing from
+the target is the obvious reading of "the bytes it may see", and it makes the
+decoder *raise*: a further hop has to reach back past the current one, and a
+cursor rebased at the target no longer covers those bytes. The legal two-hop
+chain caught it. Bounding at both ends is also what stops a pointer reading
+into a neighbouring message that shares the run.
+
+**A self-pointer is not the cycle worth testing.** Two of the first tests
+written here passed with the inherited limit removed, because a target that
+reads nothing before hopping is refused by the range rule alone. The real
+cycle reads *forward* and then points back at itself, and only the inherited
+ceiling refuses it — structurally, without the hop bound ever being consulted.
+That is now the test, and it fails when the limit is removed.
 
 ### Stage 4 — coverage, and the invariants restated
 

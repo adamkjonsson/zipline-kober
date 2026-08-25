@@ -144,6 +144,58 @@ class Cursor:
         end = max(off_end - self._base, 0)
         return self._data[start:end]
 
+    def view(self, off_start: int, off_end: int) -> Cursor:
+        """Return a second cursor over ``[off_start, off_end)`` of this run.
+
+        **The seam a redirect reads through.** A sub-decode gets its own
+        position over the same bytes, carrying its own ``base`` so the spans it
+        reports stay absolute, and its own end so it cannot see a byte the
+        caller did not hand it. That ceiling is what makes such a decode
+        deterministic: without it, what a redirect resolves to would depend on
+        whatever happened to follow in the run.
+
+        :class:`~kober.spec.Pointer` is the one caller today, supplying this
+        run's own bytes. A byte transform would supply different bytes — the
+        output of a decompression, say — to the same shape.
+
+        This does not move ``self``: §2.1's rule is that the reading position
+        only advances by being claimed, and handing out a second position does
+        not claim anything.
+
+        Args:
+            off_start: First byte, in the stream's offset space.
+            off_end: One past the last.
+
+        Returns:
+            A cursor positioned at ``off_start``.
+
+        Raises:
+            ValueError: If the range is not inside this run.
+
+        """
+        low = off_start - self._base
+        high = off_end - self._base
+        if low < 0 or high > len(self._data) or low > high:
+            msg = f"view [{off_start}, {off_end}) is outside the run"
+            raise ValueError(msg)
+        return Cursor(self._data[low:high], off_start)
+
+    def seek_to(self, offset: int) -> None:
+        """Move to an absolute byte offset in the stream's space.
+
+        The byte-offset counterpart of :meth:`seek`, which counts bits from the
+        run's own start. Citations, :meth:`slice` and :meth:`view` all speak in
+        absolute offsets, so a caller holding one should not have to convert.
+
+        Args:
+            offset: The offset to move to.
+
+        Raises:
+            ValueError: If the offset is outside the run.
+
+        """
+        self.seek((offset - self._base) * _BITS_PER_BYTE)
+
     def seek(self, bit: int) -> None:
         """Move to an absolute bit position within the run.
 

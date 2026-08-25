@@ -49,10 +49,17 @@ installed from a checkout (see the README).
   each hop must land strictly earlier than the last, so a cycle cannot be
   constructed.
 
-  The model, the loader schema, and the checker land here; the decoder and the
-  compiler follow. `kober compile` reports a `CompileError` naming the
-  limitation rather than failing with a traceback, since `kober check` accepts
-  such a spec.
+  The model, the loader schema, the checker, and the **interpreter** land
+  here; the compiler follows. `kober compile` reports a `CompileError` naming
+  the limitation rather than failing with a traceback, since `kober check`
+  accepts such a spec.
+
+- `kober.cursor.Cursor.view` and `Cursor.seek_to` — the seam a redirect reads
+  through. `view(off_start, off_end)` hands out a second position over the same
+  run, with its own base so spans stay absolute and its own end so a sub-decode
+  cannot see a byte the caller did not give it. It does not move the cursor it
+  came from, which is what keeps §2.1 true of a construct that reads elsewhere.
+  `seek_to` is `seek`'s byte-offset counterpart, in the stream's own space.
 
 - `pyproject.toml`, packaging `kober` with a `kober` console script and an
   optional `yaml` extra for spec authoring.
