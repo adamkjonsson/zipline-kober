@@ -61,6 +61,10 @@ half of them leaves `examples/http.yaml` exactly where it is.
 | `http_stream_1.pcap` | **1645 messages** — 645 requests, 1000 responses, 692 with `Content-Length` (65–70 B), 308 with no framing header at all | Scale, and the *absence* case. Never been run. |
 | `http.pcap` | 4 HTTP messages and a DNS-over-UDP session. Two `Content-Length` responses, both **exact** once reassembled: 18 070 B plain, and 1 272 B gzip | A body two orders of magnitude larger than anything else, spanning several transport records — and `Content-Length` **with** a transformed body, which separates two variables `http_example.pcapng` confounds. |
 
+All three live in `python-zipline-wire`'s `tests/captures/`, beside the
+fourteen the earlier phases used, so the pipeline in the README reaches them
+without a special case.
+
 Established by reading them before planning, and each shapes the work:
 
 - **No run holds more than one message**, in any of the three. So the phase
