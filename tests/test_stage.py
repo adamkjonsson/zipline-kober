@@ -316,3 +316,35 @@ def test_content_registry_reads_messages_back_as_trees(tmp_path: Path):
     assert len(trees) == 1
     assert trees[0].find("tag").value == 0x1234
     assert trees[0].find("body").value == 0x5678
+
+
+def test_a_pointer_owes_no_seam(tmp_path: Path):
+    """A pointer cites bytes; it never names a hole, so nothing is owed.
+
+    §5 asks for a break after a **hole**-class region. A pointer produces no
+    undecoded region at all when it resolves, and `undecodable` — which is what
+    every way of failing to follow one produces — is bytes-class. The one route
+    to a false hole was a target read running short and reporting `truncated`,
+    which the decoder converts precisely so this stays true.
+    """
+    spec = Spec.from_yaml("""
+name: p
+version: "1.0"
+entry: message
+input: either
+units:
+  message:
+    fields:
+      - {name: blob, type: {bytes: {size: 2}}}
+      - {name: pos, type: {int: {bits: 8}}}
+      - {name: seen, type: {pointer: {at: "pos", type: {int: {bits: 16}}}}}
+""")
+    source, sink = tmp_path / "in.zpf", tmp_path / "out.zpf"
+    # Three messages: one resolving, one whose target does not decode, one
+    # resolving again — so a false hole would land between real records.
+    datagrams(source, [b"\xaa\xbb\x00", b"\xaa\xbb\x02", b"\xaa\xbb\x00"])
+    Decoder(spec).run(source, sink, produced_by="t", produced_at=1)
+    assert_conformant(sink, source)
+    assert [b for b in read_blocks(sink) if isinstance(b, zpf.Discontinuity)] == []
+    reasons = {b.reason for b in read_blocks(sink) if isinstance(b, zpf.Undecoded)}
+    assert reasons <= {"undecodable", "skipped"}, f"a pointer named a hole: {reasons}"

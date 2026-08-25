@@ -18,8 +18,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fuzzing import SEEDS, cases
+from fuzzing import POINTER_SPEC, SEEDS, cases, pointer_cases
 
+from kober.cursor import Cursor
 from kober.decoder import Decoder
 from kober.emit import plan
 from kober.node import Node, NodeStatus
@@ -144,3 +145,143 @@ def test_empty_and_tiny_inputs():
             tree = decoder.decode_bytes(data)
             check_tree(tree, data)
             assert tree.off_end <= len(data)
+
+
+# --- pointers --------------------------------------------------------------
+#
+# A pointer is the one construct that reads somewhere other than where the
+# cursor stands, so it is the one that can break coverage in a new way. These
+# run the same promises over mutated *real* traffic, against a spec that
+# follows compression pointers. Stage 7 makes `examples/dns.yaml` such a spec;
+# until then `fuzzing.POINTER_SPEC` is what there is to fuzz.
+
+
+def pointer_spec() -> Spec:
+    return Spec.from_yaml(POINTER_SPEC)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_following_pointers_never_raises(seed: int):
+    """Including cycles, forward references, and offsets past the end."""
+    decoder = Decoder(pointer_spec())
+    for data in pointer_cases(seed):
+        try:
+            tree = decoder.decode_bytes(data)
+        except Exception as exc:
+            exc.add_note(f"escaped a decode: pointers seed={seed} on {data!r}")
+            raise
+        check_tree(tree, data)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+@pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD])
+def test_a_pointer_never_makes_a_byte_both_cited_and_undecoded(seed: int, emit: Emit):
+    """The half of the coverage guarantee a pointer could plausibly break.
+
+    Overlap is legal — a pointed-at region is cited twice — but *contradiction*
+    is not, and a construct that cites bytes nothing walked over is exactly
+    where the two could be confused.
+    """
+    spec = pointer_spec()
+    decoder = Decoder(spec)
+    for data in pointer_cases(seed):
+        tree = decoder.decode_bytes(data)
+        emissions, unclaimed = plan(spec, tree, data, emit=emit)
+        cited: set[int] = set()
+        for record in emissions:
+            cited.update(range(record.off_start, record.off_end))
+        named: set[int] = set()
+        for region in unclaimed:
+            named.update(range(region.off_start, region.off_end))
+        overlap = cited & named
+        assert not overlap, (
+            f"pointers {emit.value}: {len(overlap)} byte(s) both cited and "
+            f"undecoded on {data!r}"
+        )
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_pointer_never_cites_outside_the_input(seed: int):
+    """A resolved offset is still an offset into bytes we were given."""
+    spec = pointer_spec()
+    decoder = Decoder(spec)
+    for data in pointer_cases(seed):
+        tree = decoder.decode_bytes(data)
+        emissions, unclaimed = plan(spec, tree, data, emit=Emit.FIELD)
+        for record in emissions:
+            assert 0 <= record.off_start <= record.off_end <= len(data), (
+                f"record [{record.off_start}, {record.off_end}) outside {len(data)} "
+                f"bytes on {data!r}"
+            )
+        for region in unclaimed:
+            assert 0 <= region.off_start <= region.off_end <= len(data)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_pointer_never_reaches_outside_its_own_message(seed: int):
+    """Two messages in one run must not read each other's bytes.
+
+    The rule Q1 settled, and the one conformance cannot see: a pointer with the
+    wrong origin still cites *some* region in range, so coverage stays clean
+    while the decode is wrong. Only the offsets say so.
+    """
+    spec = pointer_spec()
+    decoder = Decoder(spec)
+    for data in pointer_cases(seed):
+        cursor = Cursor(data + data, 0)
+        first = decoder.decode_one(cursor)
+        if first.status is not NodeStatus.OK or cursor.at_end():
+            continue
+        start = cursor.byte_offset()
+        second = decoder.decode_one(cursor)
+        for node in second.walk():
+            assert node.off_start >= start, (
+                f"a node at [{node.off_start}, {node.off_end}) reached back "
+                f"before its message at {start} on {data!r}"
+            )
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_whole_message_decodes_the_same_whatever_follows_it(seed: int):
+    """The ceiling is the message's high-water mark, not the run's end.
+
+    Only for a message that decoded **completely**: one that ran out of input
+    is entitled to decode further when given more, and that is not what this
+    is about. What a pointer must not do is resolve differently because of
+    bytes belonging to whatever comes next in the run — which it did, before
+    the ceiling replaced a run-wide bound.
+    """
+    decoder = Decoder(pointer_spec())
+    compared = 0
+    for data in pointer_cases(seed):
+        alone = decoder.decode_one(Cursor(data, 0))
+        if alone.status is NodeStatus.TRUNCATED:
+            # It stopped because the input did — `truncated` is exactly that
+            # claim. Being given more is entitled to take it further, and that
+            # is not what this is about. Note the extent is *not* the test: a
+            # read that runs out leaves the position before the last byte.
+            continue
+        compared += 1
+        followed = decoder.decode_one(Cursor(data + b"\xff" * 32, 0))
+        assert alone.render() == followed.render(), (
+            f"trailing bytes changed a decode that had already ended on {data!r}"
+        )
+    assert compared, "no case ended before its input did, so nothing was compared"
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_no_node_reaches_past_the_message_it_belongs_to(seed: int):
+    """A message is self-contained, pointers included.
+
+    The containment a run-wide ceiling would break: a pointer could resolve
+    into bytes belonging to whatever follows, and the message would cite them
+    while claiming to end before them.
+    """
+    decoder = Decoder(pointer_spec())
+    for data in pointer_cases(seed):
+        tree = decoder.decode_one(Cursor(data, 0))
+        for node in tree.walk():
+            assert node.off_end <= tree.off_end, (
+                f"{node.name} cites [{node.off_start}, {node.off_end}) past the "
+                f"message's own end at {tree.off_end} on {data!r}"
+            )

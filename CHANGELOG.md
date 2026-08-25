@@ -668,6 +668,15 @@ installed from a checkout (see the README).
 
 ### Documentation
 
+- `DESIGN.md` §2 now says what the coverage guarantee is **not**: leaves do not
+  tile the input. Until `Pointer`, every leaf covered a distinct range and
+  "tiling" and "covered" were the same statement, so the emitter was built on
+  the stronger one and a test asserted it. A region decoded in place and then
+  reached again by reference is cited twice, which `zpf` permits in as many
+  words. What survives is the guarantee itself — every byte cited or named, and
+  never both — which pointers leave untouched, since a pointed-at region is
+  cited, and cited is what "not undecoded" means.
+
 - `DESIGN.md` **revision 7**: the compiler as §14, and a restatement of §2.1.
   The cursor rule was true by impossibility — there was no author-supplied code,
   so nothing author-supplied could move the position. Generated code ends that,

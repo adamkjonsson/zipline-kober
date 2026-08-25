@@ -549,7 +549,7 @@ cycle reads *forward* and then points back at itself, and only the inherited
 ceiling refuses it — structurally, without the hop bound ever being consulted.
 That is now the test, and it fails when the limit is removed.
 
-### Stage 4 — coverage, and the invariants restated
+### Stage 4 — coverage, and the invariants restated — **done**
 
 - Retire the tiling assertion `test_every_byte_is_covered_by_a_leaf` in
   [`test_decoder.py`](../tests/test_decoder.py), replacing it with the weaker true property (every byte covered *at least*
@@ -565,6 +565,29 @@ That is now the test, and it fails when the limit is removed.
 - Confirm the §5 seam rule is untouched: a pointer produces no hole-class
   region, so it owes no seam. State it, because "obviously fine" is how the
   seam rule was wrong the first time.
+
+**The emitter was right, and the seam rule holds — but only because of stage
+3's conversion.** `_holes` handles a citation nested wholly inside another,
+which is the real-DNS case of an owner name pointing into an earlier record's
+rdata. No fix was needed, and there is now a test that would have caught one,
+with a companion asserting the overlap is really there so it cannot quietly
+stop proving anything. The seam test fails the moment a pointer target's short
+read is left as `truncated`: that is hole-class, and it would put a false
+`stream-gap` between two real records.
+
+**Two fuzz invariants had to be sharpened before they had teeth.** The first
+attempt asserted that trailing bytes never change a decode, which is simply
+false — a message that ran out of input is entitled to decode further when
+given more. Conditioning on the extent was wrong too, because a read that runs
+out leaves the position *before* the last byte. The discriminator that works is
+the status: `truncated` means "the input ended", and only those cases are
+exempt. A `assert compared` guard keeps the exemption from swallowing the whole
+corpus.
+
+Both mutations are checked. A run-wide ceiling fails two fuzz tests; a run-base
+origin fails the message-boundary one. The containment property — no node
+reaches past the message it belongs to — turned out to be the more robust of
+the two ways of saying it, and is worth keeping alongside.
 
 ### Stage 5 — string builtins
 

@@ -109,6 +109,22 @@ when this doesn't match":
 - a field landing inside a `Gap` → `reason="gap"`
 - a region the spec deliberately ignores (padding, encrypted body) → `reason="skipped"`
 
+**What the guarantee is not: leaves do not tile the input.** Until `Pointer`
+(§3.2) existed, every leaf covered a distinct range and the leaves together
+covered the message exactly once, so "tiling" and "covered" were the same
+statement and the emitter was built on the stronger one. A pointer breaks it —
+a region decoded in place and then reached again by reference is cited twice —
+and that is legal: `zpf` requires every offset to be covered **at least** once,
+and says in as many words that two records MAY cite the same input region.
+
+The retirement is worth stating rather than performing, because tiling is the
+property a reader would assume and it is the one a test asserted. What survives
+is exactly the guarantee: every byte cited or named, and **never both**. That
+second half is untouched by pointers, since a pointed-at region is cited, and
+cited is precisely what "not undecoded" means. Overlap is duplication, not
+contradiction; the contradiction the format forbids is a byte that is both
+spoken for and disclaimed.
+
 ### 2.1 The cursor rule
 
 Revisions 1–4 justified the declarative spec model here with: *if specs could
