@@ -35,7 +35,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from kober.check import require_valid, scope_at
-from kober.errors import SpecError
+from kober.errors import CompileError, SpecError
 from kober.expr import SCOPE_WORDS, ExprType, IntLiteral, Ref, infer_type, references, unparse
 from kober.spec import (
     BytesType,
@@ -45,6 +45,7 @@ from kober.spec import (
     Fixed,
     FromExpr,
     IntType,
+    Pointer,
     StringType,
     Switch,
     Terminated,
@@ -696,6 +697,15 @@ def _value(spec: Spec, unit: str, index: int, kind: FieldType) -> ValueType:
         scope = scope_at(spec, unit, index)
         inferred = infer_type(kind.expr, scope, unparse(kind.expr))
         return ValueType(kind=KINDS[inferred], expr=kind.expr)
+    if isinstance(kind, Pointer):
+        # Valid, and it runs under the interpreter — the neutral plan simply
+        # has no operation for it yet. That is what `CompileError` is for, and
+        # it is a better answer than a traceback from a spec `check` accepted.
+        msg = (
+            f"unit {unit!r}: the compiler cannot yet express a pointer; "
+            f"use the interpreter for this spec"
+        )
+        raise CompileError(msg)
     msg = f"unsupported field type {type(kind).__name__} in unit {unit!r}"
     raise TypeError(msg)
 

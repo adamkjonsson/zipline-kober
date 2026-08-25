@@ -473,7 +473,7 @@ the loader has no `pointer:` key yet, and it models a name as a `label` repeat
 switching on the top two bits — which works, but Stage 7 should decide whether
 that is the spec an author would want to read.
 
-### Stage 2 — `Pointer` in the model, loader, and checker
+### Stage 2 — `Pointer` in the model, loader, and checker — **done**
 
 - [`spec.py`](../src/kober/spec.py): `Pointer` as a frozen dataclass, added to
   `FieldType`, validating what one object can see by itself.
@@ -492,6 +492,28 @@ That last bullet is the one most likely to be got wrong quietly: a pointer
 target that recurses into itself is exactly the cycle Q2 bounds, and the
 checker's existing non-termination analysis will reason about it wrongly unless
 told that a pointer consumes nothing at the cursor.
+
+**What it actually needed was smaller than the sketch, in one place and larger
+in another.**
+
+`_leading_chain` needed nothing. It already refuses to walk anything that is
+not a plain `UnitRef`, so a leading `Pointer` field stops the walk on its own —
+and that is the *right* answer rather than a lucky one, because Q2's
+strictly-decreasing rule means a unit pointing at itself does terminate. A test
+records that, so the behaviour is deliberate rather than incidental.
+
+Reachability and parenting both fell out of one change: `_walk_types` now
+descends into a pointer's target. `_index_parents` and `_check_reachability`
+share that walk, so a unit reached only through a pointer is both reachable and
+parented at the pointing site — which is what settles `parent`'s meaning inside
+a pointed-at unit without a second rule. Reverting that branch fails four
+tests; reverting the `at` type check fails two.
+
+**One thing the sketch missed.** Adding a field type the checker accepts made
+`kober compile` crash with a bare `TypeError` on a spec `kober check` had just
+passed. `ops.py` now raises `CompileError` naming the limitation, which is what
+that exception exists for — the spec is valid and runs under the interpreter,
+and only the compilation is impossible. Stage 6 removes it.
 
 ### Stage 3 — `Pointer` in the interpreter
 

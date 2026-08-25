@@ -22,6 +22,7 @@ from kober.spec import (
     FromExpr,
     InputShape,
     IntType,
+    Pointer,
     Remaining,
     Spec,
     StringType,
@@ -479,3 +480,49 @@ def test_design_example_loads_and_checks_clean():
     """
     spec = from_yaml(document)
     assert check(spec) == ()
+
+
+# --- pointer ---------------------------------------------------------------
+
+
+def test_pointer_loads():
+    field = sole_field(
+        {"name": "target", "type": {"pointer": {"at": "n * 2", "type": {"int": {"bits": 8}}}}}
+    )
+    assert isinstance(field.type, Pointer)
+    assert unparse(field.type.at) == "n * 2"
+    assert field.type.type == IntType(bits=8)
+
+
+def test_pointer_nests_any_type():
+    """The target is a field type like any other, including a unit."""
+    field = sole_field(
+        {"name": "target", "type": {"pointer": {"at": "0", "type": {"unit": "name"}}}}
+    )
+    assert field.type.type == UnitRef(unit="name")
+
+
+@pytest.mark.parametrize("missing", ["at", "type"])
+def test_pointer_requires_both_keys(missing: str):
+    body = {"at": "0", "type": {"int": {"bits": 8}}}
+    del body[missing]
+    with pytest.raises(SpecError, match=f"missing required key '{missing}'"):
+        sole_field({"name": "t", "type": {"pointer": body}})
+
+
+def test_pointer_rejects_an_unknown_key():
+    """A misspelled key must not load and quietly do nothing."""
+    with pytest.raises(SpecError, match="offset"):
+        sole_field(
+            {
+                "name": "t",
+                "type": {
+                    "pointer": {"at": "0", "type": {"int": {"bits": 8}}, "offset": 4}
+                },
+            }
+        )
+
+
+def test_pointer_errors_carry_a_path():
+    with pytest.raises(SpecError, match=r"units\.message\.fields\[0\]\.type\.pointer\.at"):
+        sole_field({"name": "t", "type": {"pointer": {"at": "??", "type": {"int": {"bits": 8}}}}})

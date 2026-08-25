@@ -13,7 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from kober.errors import SpecError
+from kober.check import check
+from kober.errors import CompileError, SpecError
 from kober.ops import Kind, Plan
 from kober.spec import Spec
 
@@ -280,3 +281,20 @@ def test_checking_can_be_skipped_by_a_caller_that_already_did_it():
 def test_asking_for_a_unit_that_is_not_there_says_what_is():
     with pytest.raises(KeyError, match="label"):
         dns().object("nonesuch")
+
+
+def test_a_pointer_is_refused_as_a_compile_error_not_a_traceback():
+    """`check` accepts the spec, so the compiler owes a real message."""
+    spec = Spec.from_yaml("""
+name: p
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: lo, type: {int: {bits: 8}}}
+      - {name: t, type: {pointer: {at: "lo", type: {int: {bits: 8}}}}}
+""")
+    assert check(spec) == ()
+    with pytest.raises(CompileError, match="cannot yet express a pointer"):
+        Plan.from_spec(spec)

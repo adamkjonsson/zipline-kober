@@ -31,6 +31,29 @@ installed from a checkout (see the README).
 
 ### Added
 
+- `kober.spec.Pointer` and the `pointer:` spec key — a back-reference:
+  *read this type at that offset, and carry on where you were*
+  (`DESIGN.md` §3.2). Real DNS needs it; without it the answer section of
+  nearly every response is undecodable.
+
+  `at` is an integer expression giving an offset **from the start of the
+  message**, which is the only space it can mean — a run holds many messages,
+  and a stream-absolute reading would work on a run's first message and
+  silently misread every later one. Because `at` is an expression, a pointer
+  reads nothing where it stands: the bytes encoding the reference are read by
+  ordinary fields, so a pointer cites one contiguous range and never two.
+
+  A pointer may target only bytes the message has already decoded. Anything
+  else — past the end, forward, or a target that does not decode — makes the
+  region `undecodable` and never raises. That rule is also what bounds chains:
+  each hop must land strictly earlier than the last, so a cycle cannot be
+  constructed.
+
+  The model, the loader schema, and the checker land here; the decoder and the
+  compiler follow. `kober compile` reports a `CompileError` naming the
+  limitation rather than failing with a traceback, since `kober check` accepts
+  such a spec.
+
 - `pyproject.toml`, packaging `kober` with a `kober` console script and an
   optional `yaml` extra for spec authoring.
 - `DESIGN.md` — draft design: the spec model, decode semantics, emission

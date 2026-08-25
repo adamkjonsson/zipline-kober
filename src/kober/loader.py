@@ -50,6 +50,7 @@ from kober.spec import (
     InputShape,
     IntType,
     Param,
+    Pointer,
     Remaining,
     Spec,
     StringType,
@@ -83,6 +84,7 @@ _INT_KEYS = frozenset({"bits", "signed", "endian", "enum"})
 _BYTES_KEYS = frozenset({"size"})
 _STRING_KEYS = frozenset({"size", "encoding"})
 _SWITCH_KEYS = frozenset({"on", "cases", "default"})
+_POINTER_KEYS = frozenset({"at", "type"})
 _TERMINATED_KEYS = frozenset({"delimiter", "consume", "required"})
 _PARAM_KEYS = frozenset({"name", "type"})
 _ENUM_KEYS = frozenset({"members", "doc"})
@@ -467,7 +469,9 @@ def _field(document: object, where: str) -> Field:
 
 # --- types, sizes, repeats -------------------------------------------------
 
-_TYPE_KINDS = frozenset({"int", "bytes", "string", "unit", "switch", "computed"})
+_TYPE_KINDS = frozenset(
+    {"int", "bytes", "string", "unit", "switch", "computed", "pointer"}
+)
 _SIZE_KINDS = frozenset({"fixed", "expr", "terminated", "remaining"})
 _REPEAT_KINDS = frozenset({"count", "until", "to_end"})
 
@@ -495,6 +499,8 @@ def _field_type(document: object, where: str) -> FieldType:
         return _unit_ref(value, site)
     if tag == "switch":
         return _switch(value, site)
+    if tag == "pointer":
+        return _pointer(value, site)
     return Computed(expr=_expr(value, site))
 
 
@@ -528,6 +534,36 @@ def _unit_ref(document: object, where: str) -> UnitRef:
     return UnitRef(
         unit=_require_str(mapping["name"], f"{where}.name"),
         args=[_expr(item, f"{where}.args[{index}]") for index, item in enumerate(args)],
+    )
+
+
+def _pointer(document: object, where: str) -> Pointer:
+    """Build a pointer: where to read, and what is there.
+
+    Both keys are required. There is deliberately no shorthand and no default
+    offset space — ``at`` is always message-relative, so there is nothing for
+    a spec to mean by accident.
+
+    Args:
+        document: The mapping under the ``pointer`` tag.
+        where: Path to this node, for error messages.
+
+    Returns:
+        The pointer.
+
+    Raises:
+        SpecError: If a key is missing or unknown.
+
+    """
+    mapping = _require_mapping(document, where)
+    _reject_unknown(mapping, _POINTER_KEYS, where)
+    for required in ("at", "type"):
+        if required not in mapping:
+            msg = f"{where}: missing required key {required!r}"
+            raise SpecError(msg)
+    return Pointer(
+        at=_expr(mapping["at"], f"{where}.at"),
+        type=_field_type(mapping["type"], f"{where}.type"),
     )
 
 

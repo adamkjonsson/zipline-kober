@@ -48,6 +48,7 @@ from kober.spec import (
     Field,
     FromExpr,
     IntType,
+    Pointer,
     StringType,
     Switch,
     Terminated,
@@ -170,13 +171,22 @@ def scope_at(spec: Spec, unit: str, index: int, *, element_of: str | None = None
 
 
 def _walk_types(kind: FieldType) -> Iterator[FieldType]:
-    """Yield a field type and every type nested inside it."""
+    """Yield a field type and every type nested inside it.
+
+    A pointer's target counts as nested, which is what makes a unit reached
+    *only* through a pointer both reachable and parented: the two callers that
+    matter here are :meth:`_Checker._index_parents` and
+    :meth:`_Checker._check_reachability`, and neither should treat a
+    back-reference as a dead end.
+    """
     yield kind
     if isinstance(kind, Switch):
         for case in kind.cases.values():
             yield from _walk_types(case)
         if kind.default is not None:
             yield from _walk_types(kind.default)
+    elif isinstance(kind, Pointer):
+        yield from _walk_types(kind.type)
 
 
 def _size_of(kind: FieldType) -> SizeSpec | None:
@@ -411,6 +421,10 @@ class _Checker:
         if isinstance(kind, Computed):
             # Any type is fine; it just has to resolve and type-check.
             self._infer(kind.expr, unit, visible, where, "computed")
+        if isinstance(kind, Pointer):
+            # The offset obeys the same forward-reference rule as a size: it
+            # may only read fields already decoded where the pointer stands.
+            self._expect(kind.at, ExprType.INT, unit, visible, where, "pointer at")
         size = _size_of(kind)
         if isinstance(size, FromExpr):
             self._expect(size.expr, ExprType.INT, unit, visible, where, "size")
