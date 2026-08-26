@@ -1093,3 +1093,86 @@ def test_a_boolean_select_is_how_any_is_spelled():
     for data, expected in ((bytes([2, 1, 10, 7, 20]), True), (bytes([1, 1, 10]), False)):
         tree = select(data, value="true", default="false")
         assert tree.find("picked").value is expected
+
+
+# --- bounded terminator ----------------------------------------------------
+
+
+def bounded(data: bytes, *, required: str = "false") -> Node:
+    """Decode a header-shaped pair: a bounded name, then the rest of the line."""
+    return decode(
+        f"""\
+      - name: name
+        type:
+          string:
+            size: {{terminated: {{delimiter: ":", within: "\\r\\n", required: {required}}}}}
+      - name: value
+        type: {{string: {{size: {{terminated: {{delimiter: "\\r\\n"}}}}}}}}
+""",
+        data,
+    )
+
+
+def test_a_bound_splits_a_line_into_two_fields():
+    tree = bounded(b"Content-Length: 68\r\n")
+    assert tree.find("name").value == "Content-Length"
+    assert tree.find("value").value == " 68"
+
+
+def test_a_blank_line_takes_nothing_and_needs_no_special_case():
+    """The case the whole construct was chosen for."""
+    tree = bounded(b"\r\n")
+    assert tree.find("name").value == ""
+    assert tree.find("value").value == ""
+    assert tree.off_end == 2
+
+
+def test_a_delimiter_past_the_bound_reads_as_absent():
+    """It belongs to the *next* line, and an optional terminator takes nothing."""
+    tree = bounded(b"no-colon-here\r\nnext: value\r\n")
+    assert tree.find("name").value == ""
+    assert tree.find("value").value == "no-colon-here"
+
+
+def test_an_optional_bounded_terminator_reads_nothing_when_absent():
+    """Not the rest of the run, and not up to the bound: nothing.
+
+    The bound limits the search; it is never a second terminator. Reading to it
+    would be reading under a delimiter the spec did not find.
+    """
+    tree = bounded(b"no-colon-here\r\ntail")
+    name = tree.find("name")
+    assert name.value == ""
+    assert name.off_start == name.off_end
+
+
+def test_an_unbounded_optional_terminator_still_reads_the_rest():
+    """The other half of the contrast above, unchanged by this stage."""
+    tree = decode(
+        '      - {name: a, type: {string: {size: {terminated: '
+        '{delimiter: ":", required: false}}}}}\n',
+        b"no-colon-here",
+    )
+    assert tree.find("a").value == "no-colon-here"
+
+
+def test_a_required_bounded_terminator_is_truncated_when_absent():
+    """`required` still decides; the bound only changes what "absent" means."""
+    tree = bounded(b"no-colon-here\r\n", required="true")
+    assert tree.status is NodeStatus.TRUNCATED
+    assert "before b'\\r\\n'" in tree.find("name").detail
+
+
+def test_a_bounded_terminator_with_neither_present_is_truncated_when_required():
+    tree = bounded(b"nothing at all", required="true")
+    assert tree.status is NodeStatus.TRUNCATED
+
+
+def test_a_bound_that_is_absent_lets_the_search_run_on():
+    """Nothing bounds it, so it finds the delimiter as an unbounded read would."""
+    tree = decode(
+        '      - {name: a, type: {string: {size: {terminated: '
+        '{delimiter: ":", within: "\\r\\n"}}}}}\n',
+        b"name: value with no line ending",
+    )
+    assert tree.find("a").value == "name"

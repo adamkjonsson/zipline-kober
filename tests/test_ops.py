@@ -357,3 +357,39 @@ units:
     assert check(spec) == ()
     with pytest.raises(CompileError, match="switch under a pointer"):
         Plan.from_spec(spec)
+
+
+def test_a_bounded_terminator_is_refused_rather_than_dropped():
+    """The plan carries the spec's own size object straight to a backend.
+
+    So a bound no backend reads would go missing in silence, and the compiled
+    decoder would not fail — it would *disagree*, reading past a boundary the
+    interpreter stopped at. Refusing says so at compile time instead.
+    """
+    spec = Spec.from_yaml(
+        """
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - name: n
+        type:
+          string:
+            size: {terminated: {delimiter: ":", within: "\\r\\n", required: false}}
+"""
+    )
+    with pytest.raises(TypeError, match="bounded terminator is not yet compilable"):
+        Plan.from_spec(spec)
+
+
+def test_a_select_is_refused_by_the_compiler_for_now():
+    """Same reason, stated the same way: the interpreter has it, no backend does."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fuzzing import SELECT_SPEC
+
+    with pytest.raises(TypeError, match="unsupported field type Select"):
+        Plan.from_spec(Spec.from_yaml(SELECT_SPEC))

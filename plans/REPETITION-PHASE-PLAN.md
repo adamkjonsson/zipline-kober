@@ -1,6 +1,6 @@
 # Phase plan: speaking about repetitions
 
-**State: Stage 1 settled, Stages 2-8 not started.** Written after the language
+**State: Stages 1-4 done, Stages 5-8 open.** Written after the language
 phase landed ([`POINTER-PHASE-PLAN.md`](POINTER-PHASE-PLAN.md)), against
 `DESIGN.md` revision 8 and `zpf` 0.2.x.
 
@@ -629,14 +629,35 @@ did not — the corrections this stage produced were to the plan's *facts about
 the corpus*, not to its design judgment. `git status` was clean throughout and
 the 1047-test suite passes unchanged.
 
-### Stage 2 — the construct in the model, loader, and checker
+### Stage 2 — the construct in the model, loader, and checker — **done**
 
 The dataclass, the schema key, and the checks: the named field exists and is
 repeated, `where:` types as bool, `value:` and `default:` agree on a type, and
 the element binding resolves. Plus the exemption from Q5, tested in both
 directions — that a select may name a repetition, and that nothing else may.
 
-### Stage 3 — the interpreter
+**Done**, and two things came with it that the stage had not scoped.
+
+- **Finding 1's checker bug is fixed**, with a regression test verified against
+  it: reverting the fix fails the test, and fails `kober check` on the Stage 1
+  spec with six errors. Acceptance 6 is met.
+- **`Decoder._value` now says out loud that it does not implement a type.** It
+  had been falling off the end of its `isinstance` chain into `_sized`, so a
+  type the model gained before the engine did raised an `AttributeError` out of
+  a decode that promises never to raise — which is exactly the state this stage
+  leaves the tree in, `select` being loadable and checkable but not yet
+  runnable. An honest `undecodable` region is what the checker cannot say,
+  since such a spec is well formed and valid.
+
+**One test failed and was not fixed, deliberately.** A repeated `select` is not
+refused — but neither is a repeated `computed` or `pointer`. All three consume
+nothing and all three are caught only by the decoder's runtime "cannot
+terminate" guard. Special-casing `select` would leave it inconsistent with its
+siblings, and a static check for the family is not this phase's work, so the
+test now pins all three together with a note saying why. Whoever decides to
+catch it statically moves the family.
+
+### Stage 3 — the interpreter — **done**
 
 Evaluate it: walk the decoded elements, test the predicate, project the first
 match, fall back to the default. It reads no input and moves no position, and
@@ -651,7 +672,25 @@ Two things Stage 1 pins down, both from Q5:
   `value:` — `Decoder._one` turns it into an `undecodable` node, which is the
   honest answer. Swallowing it yields a fabricated default.
 
-### Stage 4 — Q3's answer: the bounded terminator
+**Done, and both instructions carried out and checked against their
+opposites** — a consuming select makes the position assertion fire, and
+restoring the guard makes the unevaluable-predicate test fail.
+
+**The engine reproduces the Stage 1 spike exactly.** Run with only `within:`
+patched in from scratch, `examples`-shaped specs over all three captures give
+output identical to the settlement's in **every record, span, and reason** —
+30 761 blocks on `http_stream_1.pcap`, 92 on `http.pcap`, 59 on
+`http_example.pcapng` — with conformance clean and coverage findings matching
+the baseline. So the numbers in *What the spike measured* are now the numbers
+the shipped engine produces, not a prototype's.
+
+The fuzz spec lives in `tests/fuzzing.py` beside the mutators, for the reason
+that module gives: both implementations are held to these promises and cannot
+be compared over inputs that differ, so Stage 5 will want this one. It frames a
+body from its projection, so a select returning the wrong number shows up as a
+claim on bytes rather than a quiet wrong value.
+
+### Stage 4 — Q3's answer: the bounded terminator — **done**
 
 `within:` on a `terminated` size, in the size model and the decoder's
 `_read_terminated`. The rule is *whichever comes first*: if the delimiter does
@@ -662,6 +701,33 @@ It lands with the tests that pin what it does when what it looks for is not
 there — no delimiter, no bound, neither, and the bound before the delimiter —
 and with the checker-warning fix from Q3: the "non-required terminator makes
 truncation invisible" warning must not fire when `within` is set.
+
+**Done.** The search itself went into `Cursor.find`, which takes the bound as a
+second argument — searching is what a cursor is for, and it makes "whichever
+comes first" a property with tests of its own rather than two `find` calls in
+the decoder. All four absence cases are pinned, in the cursor and again through
+a decode, and checked against two broken implementations: ignoring the bound
+fails two tests, and reading to the bound instead of taking nothing fails three.
+
+**One rule the stage had to decide and the plan had not stated.** An *optional*
+bounded terminator that finds nothing reads **nothing** — not the rest of the
+run, which is what an unbounded one does, and not up to the bound either. The
+bound is a limit on the search and never a second terminator; letting the value
+run to it would be reading under a delimiter that was never found. Both
+spellings are now in a table in the format reference, because the difference is
+the part a reader will otherwise get wrong.
+
+**The finished spec now runs on stock `kober`.** No patches: `kober check`
+reports `ok` with no warning, and the three captures decode identically to the
+Stage 1 spike in every record, span, and reason. What is left for Stage 6 is
+the prose and moving it into `examples/`.
+
+**The compiler refuses a bound rather than dropping it**, which it had to be
+told to do: `ops.py` hands a backend the spec's own size object, so a `within`
+no backend reads would go missing in silence — and a compiled decoder ignoring
+it would not fail, it would *disagree*, reading past a boundary the interpreter
+stopped at. It now raises at plan time, as it already did for `Select`. Stage 5
+implements both.
 
 ### Stage 5 — the compiler
 

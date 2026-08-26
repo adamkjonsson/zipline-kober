@@ -341,29 +341,47 @@ class Cursor:
         """
         return self.read_bytes(self.remaining_bytes())
 
-    def find(self, delimiter: bytes) -> int | None:
+    def find(self, delimiter: bytes, within: bytes | None = None) -> int | None:
         """Return the byte offset of the next ``delimiter``, relative to the position.
 
         Searches from the current position without moving it. Requires
         alignment, since a delimiter is a byte sequence.
 
+        ``within`` bounds the search: the delimiter counts only if it begins at
+        or before the first occurrence of the bound. The rule is **whichever
+        comes first**, and a delimiter past the bound is reported as absent —
+        not as found at the bound. Where the bound does not occur either, there
+        is nothing to bound and the search runs to the end of the run as usual.
+
         Args:
             delimiter: What to search for.
+            within: A byte sequence the search must not run past, or ``None``
+                to search the whole run.
 
         Returns:
             Bytes from the current position to the delimiter's first byte, or
-            ``None`` if it does not occur.
+            ``None`` if it does not occur before the bound.
 
         Raises:
-            ValueError: If the position is not byte-aligned, or the delimiter
-                is empty.
+            ValueError: If the position is not byte-aligned, or either
+                sequence is empty.
 
         """
         if not delimiter:
             msg = "cannot search for an empty delimiter"
             raise ValueError(msg)
+        if within is not None and not within:
+            msg = "cannot bound a search by an empty delimiter"
+            raise ValueError(msg)
         if not self.is_aligned():
             msg = "cannot search for a delimiter from a position inside a byte"
             raise ValueError(msg)
-        found = self._data.find(delimiter, self._bit // _BITS_PER_BYTE)
-        return None if found < 0 else found - self._bit // _BITS_PER_BYTE
+        here = self._bit // _BITS_PER_BYTE
+        found = self._data.find(delimiter, here)
+        if found < 0:
+            return None
+        if within is not None:
+            bound = self._data.find(within, here)
+            if 0 <= bound < found:
+                return None
+        return found - here

@@ -80,6 +80,37 @@ installed from a checkout (see the README).
   "no match", which would report the author's default as though it had been
   read off the wire.
 
+- `within:` on a `terminated` size — a second byte sequence the search must
+  not run past, so one line can split into two fields:
+
+  ```yaml
+  - {name: name,  type: {string: {size: {terminated: {delimiter: ":", within: "\r\n", required: false}}}}}
+  - {name: value, type: {string: {size: {terminated: {delimiter: "\r\n"}}}}}
+  ```
+
+  An HTTP header then *has* a name and a value in the spec, rather than having
+  them computed back out of the line by expressions afterwards — and the split
+  reaches the output, so a consumer gets the name and the value as two
+  separately cited records. Reading a name as "up to the next colon" without a
+  bound would run into the next header, or past the end of the headers
+  entirely, on any line that has no colon in it.
+
+  The rule is **whichever comes first**: a delimiter beginning after the bound
+  reads as though it were not there. `required` still decides what that means,
+  with one difference worth knowing — an *optional* bounded terminator that
+  finds nothing reads **nothing**, where an unbounded one reads the rest of the
+  run. The bound limits the search and is never a second terminator; reading up
+  to it would be reading under a delimiter that was never found.
+
+  The blank line ending a header block needs no special case: it has no colon
+  before its CRLF, so the terminator takes nothing and the name comes back
+  empty.
+
+  `kober.cursor.Cursor.find` takes the bound as a second argument, and the
+  checker's "a non-required terminator on a string makes truncation invisible"
+  warning no longer fires when `within` is set — the bound *is* the guarantee
+  that warning exists to notice the absence of.
+
 - `kober.spec.Pointer` and the `pointer:` spec key — a back-reference:
   *read this type at that offset, and carry on where you were*
   (`DESIGN.md` §3.2). Real DNS needs it; without it the answer section of

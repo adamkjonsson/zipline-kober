@@ -720,6 +720,14 @@ def _value(spec: Spec, unit: str, index: int, kind: FieldType) -> ValueType:
             consumes=kind.bits > 0,
         )
     if isinstance(kind, (StringType, BytesType)):
+        if isinstance(kind.size, Terminated) and kind.size.within is not None:
+            # Refused rather than dropped. The plan carries the spec's own size
+            # object straight through to a backend, so a bound no backend reads
+            # would go missing in silence — and a compiled decoder that ignored
+            # it would not fail, it would *disagree*, reading past a boundary
+            # the interpreter stopped at.
+            msg = f"a bounded terminator is not yet compilable, in unit {unit!r}"
+            raise TypeError(msg)
         return ValueType(
             kind=Kind.TEXT if isinstance(kind, StringType) else Kind.BYTES,
             encoding=kind.encoding if isinstance(kind, StringType) else None,

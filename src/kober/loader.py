@@ -86,7 +86,7 @@ _BYTES_KEYS = frozenset({"size"})
 _STRING_KEYS = frozenset({"size", "encoding"})
 _SWITCH_KEYS = frozenset({"on", "cases", "default"})
 _POINTER_KEYS = frozenset({"at", "type"})
-_TERMINATED_KEYS = frozenset({"delimiter", "consume", "required"})
+_TERMINATED_KEYS = frozenset({"delimiter", "consume", "required", "within"})
 _PARAM_KEYS = frozenset({"name", "type"})
 _ENUM_KEYS = frozenset({"members", "doc"})
 
@@ -697,10 +697,12 @@ def _size(document: object, where: str) -> SizeSpec:
     if "delimiter" not in body:
         msg = f"{site}: missing required key 'delimiter'"
         raise SpecError(msg)
+    within = body.get("within")
     return Terminated(
         delimiter=_delimiter(body["delimiter"], f"{site}.delimiter"),
         consume=_require_bool(body.get("consume", True), f"{site}.consume"),
         required=_require_bool(body.get("required", True), f"{site}.required"),
+        within=None if within is None else _delimiter(within, f"{site}.within"),
     )
 
 

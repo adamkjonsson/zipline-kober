@@ -207,6 +207,7 @@ size:
     delimiter: "\r\n"     # or a list of byte values: [13, 10]
     consume: true         # default
     required: true        # default
+    within: null          # default: search the whole run
 ```
 
 `delimiter` is the byte sequence to stop at, written as text or as a list of
@@ -217,6 +218,35 @@ a missing delimiter means:
   that usually means the message continues in a segment we do not have, which
   is an ordinary outcome rather than an error.
 - `required: false` — the rest of the run is the value.
+
+`within` bounds the search by a second byte sequence, and the rule is
+**whichever comes first**: a delimiter that begins after the bound reads as
+though it were not there at all. It is what lets one line split into two
+fields —
+
+```yaml
+- {name: name,  type: {string: {size: {terminated: {delimiter: ":", within: "\r\n", required: false}}}}}
+- {name: value, type: {string: {size: {terminated: {delimiter: "\r\n"}}}}}
+```
+
+— so an HTTP header *has* a name and a value in the spec, instead of having
+them computed back out of the line afterwards. The blank line ending a header
+block falls out with no special case: it has no colon before its CRLF, so the
+optional bounded terminator takes nothing and both come back empty.
+
+A bound changes only what "absent" means; `required` still decides what to do
+about it. The one place the two spellings differ is what an **optional** absent
+terminator reads:
+
+| | Delimiter not found | |
+| --- | --- | --- |
+| | `required: true` | `required: false` |
+| no `within` | `truncated` | the rest of the run |
+| `within` set | `truncated` | **nothing** |
+
+Bounded, it reads nothing rather than reading up to the bound. The bound is a
+limit on the search, never a second terminator — letting the value run to it
+would be reading under a delimiter the spec never found.
 
 A size expression evaluating to a negative number is `undecodable`. A size
 larger than what remains is `truncated`.

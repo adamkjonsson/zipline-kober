@@ -704,18 +704,31 @@ class Decoder:
         return self._read_terminated(size, cursor)
 
     def _read_terminated(self, size: Terminated, cursor: Cursor) -> bytes:
-        """Read up to a delimiter, treating its absence per ``required``."""
-        found = cursor.find(size.delimiter)
+        """Read up to a delimiter, treating its absence per ``required``.
+
+        A ``within`` bound makes "absent" mean *absent before the bound*, and
+        changes nothing else: ``required`` still decides between a truncation
+        and an ordinary empty value.
+
+        The one place the two differ is what an *optional* absent terminator
+        reads. Unbounded, the value runs to the end of the run, because nothing
+        said where else it could stop. Bounded, it reads **nothing** — the
+        bound is a limit on the search, not a second terminator, and letting
+        the value run to it would be reading under a delimiter the spec never
+        found.
+        """
+        found = cursor.find(size.delimiter, size.within)
         if found is None:
             if size.required:
                 # Not an error: in STREAM shape the value may simply continue
                 # in a segment we do not hold (§3.2).
+                where = f" before {size.within!r}" if size.within is not None else ""
                 msg = (
-                    f"no terminator {size.delimiter!r} in the remaining "
+                    f"no terminator {size.delimiter!r}{where} in the remaining "
                     f"{cursor.remaining_bytes()} byte(s)"
                 )
                 raise TruncatedRead(msg)
-            return cursor.read_remaining()
+            return b"" if size.within is not None else cursor.read_remaining()
         value = cursor.read_bytes(found)
         if size.consume:
             cursor.read_bytes(len(size.delimiter))

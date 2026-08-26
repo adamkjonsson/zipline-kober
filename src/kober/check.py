@@ -444,7 +444,16 @@ class _Checker:
         size = _size_of(kind)
         if isinstance(size, FromExpr):
             self._expect(size.expr, ExprType.INT, unit, visible, where, "size")
-        if isinstance(size, Terminated) and not size.required and isinstance(kind, StringType):
+        if (
+            isinstance(size, Terminated)
+            and not size.required
+            and size.within is None
+            and isinstance(kind, StringType)
+        ):
+            # `within` is exempt because it *is* the guarantee this warns about
+            # the absence of. An unbounded optional terminator swallows the rest
+            # of the run, so a truncated message reads as a whole one; a bounded
+            # one cannot reach past its bound, so there is nothing to hide.
             self.warn(where, "a non-required terminator on a string makes truncation invisible")
 
     def _check_select(self, unit: Unit, kind: Select, visible: set[str], where: str) -> None:

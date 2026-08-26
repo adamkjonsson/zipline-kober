@@ -23,6 +23,7 @@ from kober.spec import (
     Spec,
     StringType,
     Switch,
+    Terminated,
     Unit,
     UnitRef,
     Until,
@@ -1007,3 +1008,46 @@ def test_ordering_still_holds_inside_the_unit_that_declares_a_computed():
         ]
     )
     assert "declared later" in only_error(spec)
+
+
+def test_an_optional_terminator_on_a_string_warns():
+    """It swallows the rest of the run, so a truncated message reads as whole."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(
+                        name="s",
+                        type=StringType(size=Terminated(b":", required=False)),
+                    )
+                ],
+            )
+        ]
+    )
+    assert any("truncation invisible" in message for message in warnings(spec))
+
+
+def test_a_bounded_optional_terminator_does_not_warn():
+    """`within` is the guarantee the warning exists to notice the absence of.
+
+    An unbounded optional terminator hides a truncation by reading to the end
+    of the run; a bounded one cannot reach past its bound, so there is nothing
+    to hide and the warning would be noise on the one spelling that is safe.
+    """
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(
+                        name="s",
+                        type=StringType(
+                            size=Terminated(b":", required=False, within=b"\r\n")
+                        ),
+                    )
+                ],
+            )
+        ]
+    )
+    assert warnings(spec) == []

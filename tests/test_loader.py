@@ -582,3 +582,52 @@ def test_select_from_must_be_text():
     body = {**SELECT_BODY, "from": 3}
     with pytest.raises(SpecError, match=r"select\.from"):
         sole_field({"name": "length", "type": {"select": body}})
+
+
+def test_terminated_loads_a_bound():
+    field = sole_field(
+        {
+            "name": "n",
+            "type": {
+                "string": {
+                    "size": {"terminated": {"delimiter": ":", "within": "\r\n"}}
+                }
+            },
+        }
+    )
+    assert field.type.size.delimiter == b":"
+    assert field.type.size.within == b"\r\n"
+
+
+def test_terminated_has_no_bound_by_default():
+    field = sole_field(
+        {"name": "n", "type": {"string": {"size": {"terminated": {"delimiter": ":"}}}}}
+    )
+    assert field.type.size.within is None
+
+
+def test_a_bound_accepts_byte_values_like_a_delimiter():
+    field = sole_field(
+        {
+            "name": "n",
+            "type": {
+                "string": {
+                    "size": {"terminated": {"delimiter": [58], "within": [13, 10]}}
+                }
+            },
+        }
+    )
+    assert field.type.size.within == b"\r\n"
+
+
+def test_an_empty_bound_is_refused():
+    """Omitting it means "the whole run"; writing nothing means a mistake."""
+    with pytest.raises(SpecError, match="bound must not be empty"):
+        sole_field(
+            {
+                "name": "n",
+                "type": {
+                    "string": {"size": {"terminated": {"delimiter": ":", "within": ""}}}
+                },
+            }
+        )

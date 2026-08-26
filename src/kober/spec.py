@@ -113,28 +113,54 @@ class FromExpr:
 
 @dataclass(frozen=True)
 class Terminated:
-    """A size delimited by a byte sequence.
+    """A size delimited by a byte sequence, optionally bounded by a second.
 
     In ``STREAM`` shape a missing terminator at the end of the available data
     means *truncated*, which may simply mean the message continues in a
     segment we do not have. That is a normal outcome, not an error — see
     ``DESIGN.md`` §3.2.
 
+    **``within`` is what lets one line split into two fields.** An HTTP header
+    is a name, a colon, and a value, all inside one CRLF-terminated line — and
+    reading the name as "up to the next colon" without a bound would run into
+    the *next* header, or past the end of the headers entirely, whenever a line
+    has no colon in it. Bounding the search makes a header *have* a name and a
+    value in the spec, rather than having them computed back out of the line by
+    three expressions afterwards.
+
+    The rule is **whichever comes first**. When the delimiter does not occur
+    before the bound, the read behaves exactly as though the delimiter were not
+    there at all, so :attr:`required` still decides what that means. Note what
+    that is *not*: the value does not quietly extend to the bound instead. The
+    bound is a limit on the search, never a second terminator, because
+    substituting one delimiter for another is the kind of quiet guess this
+    project exists to avoid.
+
+    The blank line ending a header block falls out of that without a special
+    case: it has no colon before its CRLF, so an optional bounded terminator
+    takes nothing and the name comes back empty.
+
     Attributes:
         delimiter: The bytes that end the value.
         consume: Whether the delimiter is consumed from the input.
         required: Whether its absence is a truncation (``True``) or an
             ordinary end of value (``False``).
+        within: A second byte sequence the search must not run past. ``None``
+            searches the rest of the run.
 
     """
 
     delimiter: bytes
     consume: bool = True
     required: bool = True
+    within: bytes | None = None
 
     def __post_init__(self) -> None:
         if not self.delimiter:
             msg = "terminator delimiter must not be empty"
+            raise SpecError(msg)
+        if self.within is not None and not self.within:
+            msg = "terminator bound must not be empty; omit it to search the whole run"
             raise SpecError(msg)
 
 
