@@ -44,6 +44,29 @@ HTTP_REQUEST = b"GET / HTTP/1.1\r\nHost: httpforever.com\r\nAccept: */*\r\n\r\n"
 #: The seed input each shipped example is fuzzed from.
 SEEDS: dict[str, bytes] = {"dns.yaml": DNS_QUERY, "http.yaml": HTTP_REQUEST}
 
+#: A chunked response and a counted one, for ``examples/http.yaml``.
+#:
+#: :data:`HTTP_REQUEST` reaches **neither** of that spec's framing arms — it has
+#: no framing header, so every variant of it takes the third path and the two
+#: that do the work are never entered. That is the same gap that let a wrong
+#: `chunked` comparison live through five stages: the corpus with 2000 real
+#: messages has no chunked message in it either. These are the seeds that reach
+#: the arms, and they exist for the reason :data:`DNS_RESPONSE` does.
+HTTP_CHUNKED = (
+    b"HTTP/1.1 200 OK\r\nServer: nginx\r\nTransfer-Encoding: chunked\r\n"
+    b"Connection: keep-alive\r\n\r\n1a\r\n" + b"x" * 0x1A + b"\r\n0\r\n\r\n"
+)
+
+HTTP_COUNTED = (
+    b"POST /api/v1/orders HTTP/1.1\r\nHost: api.example.com\r\n"
+    b"Content-Type: application/json\r\nContent-Length: 26\r\n\r\n"
+    b'{"id": 89163, "ok": false}'
+)
+
+#: Every framing arm the shipped example chooses between, so a sweep covers the
+#: choice and not only one side of it.
+HTTP_FRAMINGS: tuple[bytes, ...] = (HTTP_REQUEST, HTTP_CHUNKED, HTTP_COUNTED)
+
 #: A real DNS response, from `python-zipline-wire`'s ``dns_example.pcapng``.
 #: Its answer's owner name is ``c0 0c`` — the compression pointer of RFC 1035
 #: §4.1.4, and the reason `Pointer` exists. Inlined rather than read from the
@@ -217,3 +240,19 @@ def select_cases(seed: int) -> list[bytes]:
 
     """
     return variants(SELECT_MESSAGE, seed)
+
+
+def framing_cases(seed: int) -> list[bytes]:
+    """Build one batch of variants across every HTTP framing arm.
+
+    Args:
+        seed: Which batch.
+
+    Returns:
+        The batch, the three seeds' variants interleaved in a fixed order.
+
+    """
+    out: list[bytes] = []
+    for index, base in enumerate(HTTP_FRAMINGS):
+        out.extend(variants(base, seed * len(HTTP_FRAMINGS) + index, rounds=ROUNDS))
+    return out

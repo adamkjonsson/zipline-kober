@@ -81,6 +81,34 @@ get there the transport layers are gone.
 That is not tidiness: the differential can only compare results over inputs that
 match, and the mutations that break one are the ones worth showing the other.
 
+### A seed is only worth the code it reaches
+
+Check what a seed *enters*, not only that its variants pass. `fuzzing.py` seeds
+`examples/http.yaml` with a request that has no framing header — so every
+variant of it took the third path, and neither arm that chooses a framing was
+ever entered. A wrong comparison in the chunked arm survived five stages of this
+project behind that gap, agreeing with every measurement taken, because the
+measurements ran the arm that worked.
+
+So `HTTP_CHUNKED` and `HTTP_COUNTED` sit beside it, and
+`test_the_framing_seeds_reach_every_arm` asserts that all three arms are still
+entered. A mutation set that stopped reaching one would otherwise go unnoticed
+exactly as the original did — which is the same reason `DNS_RESPONSE` exists
+beside the query: the query reaches no pointer.
+
+### A byte count is not a criterion
+
+Coverage says every byte was accounted for. It does not say the decode was
+*right*, and the two come apart in one specific way worth knowing: a message
+that stops early leaves its tail to the driver, which decodes it as further
+messages — and those cite it. Zero undecoded regions, conformance clean,
+coverage whole, decode nonsense.
+
+That is how a chunked response was read as headers followed by twenty
+imaginary messages while every check passed. Where a spec frames its own
+content, assert the **shape**: one message consuming its whole extent, its body
+in the parts it should have. `tests/test_examples.py` does this for HTTP.
+
 ## The deeper pipeline
 
 The in-suite fuzzing covers the engine and the emitter. It **cannot reach the
@@ -120,6 +148,15 @@ The compiled path is worth running over the same file, since both drive the same
   (`packeteer stream --packet-loss --gap-jitter …`) — a better source of gap
   and reordering cases than hand-built fixtures. If it lacks a protocol you
   need, that is an issue to file on *that* project.
+
+  Two limits worth knowing before planning around it. **Its TCP anomalies are
+  ignored with `--payload http`** — packet loss, corruption, retransmission,
+  RST and stray packets all warn and do nothing — so impaired *HTTP* streams
+  have to come from `packeteer fuzz` over a real capture instead. And it
+  **cannot generate chunked HTTP**, which matters because the real captures
+  cannot either: across all sixteen of them there is exactly **one** chunked
+  message, against 1151 with a `Content-Length`. Treat the chunked path as
+  having a seed behind it and not a capture.
 
 ## A regression test must be checked against its bug
 

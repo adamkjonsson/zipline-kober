@@ -1,6 +1,6 @@
 # Phase plan: speaking about repetitions
 
-**State: Stages 1-6 done, Stages 7-8 open.** Written after the language
+**State: Stages 1-7 done, Stage 8 open.** Written after the language
 phase landed ([`POINTER-PHASE-PLAN.md`](POINTER-PHASE-PLAN.md)), against
 `DESIGN.md` revision 8 and `zpf` 0.2.x.
 
@@ -855,6 +855,75 @@ whole exercises the driver's shape dispatch on a file that is not all one
 protocol — which no capture used so far does. Finding 3 is what that turns up,
 and Stage 7 should record that it met it and left it rather than treating the
 193 bytes as a regression.
+
+**Done.** Every combination agrees and every criterion is met, including the
+one Stage 6 said a region count could not state.
+
+| Checked | Result |
+| --- | --- |
+| 3 captures × 2 granularities, interpreted vs compiled | identical in every record, span, and reason |
+| the same, conformance | clean throughout |
+| the same, coverage | 80 / 4 / 0 findings — **identical to the baseline's**, and all of them `coverage-gap`+`extent-mismatch` pairs from streams that never close |
+| 10 mutated captures (`packeteer fuzz`, 5 seeds × 2 captures) | identical, conformance clean, coverage categories unchanged from the baseline |
+| 5 synthetic streams (`packeteer stream`, varied MTU, jitter, payload distribution) | identical, conformance clean, 480 messages, 0 undecoded regions |
+| `examples/dns.yaml` on 3 captures | identical — the phase changed nothing under it |
+
+**The shape criterion, which is the one that matters.** Every run is decoded
+message by message and compared against an independent RFC 7230 reader — not
+the region count that hid Stage 6's bug:
+
+| Capture | Messages | Framing | Boundaries |
+| --- | --- | --- | --- |
+| `http_stream_1.pcap` | 2000 decoded, 2000 expected | 853 / 1147, matching exactly | **all 40 runs agree** |
+| `http.pcap` | 4 / 4 | 2 / 2 | agree |
+| `http_example.pcapng` | 2 / 2 | 1 chunked, 1 neither | agree |
+| synthetic (`packeteer`) | 480 / 480 | 210 / 270 | agree |
+
+Nothing stopped early, and no message left its body to the driver — which is
+the specific failure that used to look like success.
+
+**Finding 3, met and left as instructed.** Before this phase `http.pcap`
+carried four `truncated` regions: two HTTP bodies (18 070 B and 1 272 B) and
+two DNS-over-UDP datagrams (47 B and 146 B). The two HTTP holes are gone; the
+two DNS regions are byte-identical to before. An HTTP spec meeting DNS bytes
+still says `truncated` where it should say `undecodable`, and that is finding
+3's own work, not a regression here.
+
+### What Stage 7 found
+
+**The corpus contains exactly one chunked message.** Across all sixteen
+captures in `python-zipline-wire` and everything `packeteer` can generate:
+
+| | Messages |
+| --- | --- |
+| `Content-Length` | 1151 real, plus 270 synthetic |
+| chunked | **1**, in `http_example.pcapng` |
+
+That is not a footnote — it is the explanation for Stage 6. The arm with 1151
+examples was exercised on every run of every stage; the arm with one was
+checked only by its region count, and a region count could not see it. Any
+future work on HTTP framing should assume the chunked path is effectively
+untested by the corpus and lean on the seeds instead.
+
+**So the in-suite fuzzer got seeds for both arms**, which it did not have:
+`SEEDS["http.yaml"]` has no framing header, so all sixty of its variants took
+the third path and neither arm that does the work was ever entered. That is the
+same shape of gap, in the one place that is supposed to catch it.
+`HTTP_CHUNKED` and `HTTP_COUNTED` join it, with a test asserting that the sweep
+still reaches all three arms — because a mutation set that stopped reaching
+them would go unnoticed exactly as the old seed did.
+
+**Two limitations in `packeteer`, which are issues to file on that project**
+rather than worked around here, per the testing rule in `CLAUDE.md`:
+
+- **TCP anomalies are not applied to an HTTP payload.** `--packet-loss`,
+  `--payload-corruption`, `--retransmission-*`, `--server-rst` and
+  `--stray-packets` are all silently ignored with `--payload http`, with a
+  warning. So impaired *HTTP* streams cannot be generated, and the gap and
+  seam paths were reached only through `packeteer fuzz` on the real captures.
+- **It cannot generate chunked HTTP**, which is the one arm the real corpus
+  also cannot exercise. Between them these two are why the chunked path has a
+  hand-written seed rather than a capture behind it.
 
 ### Stage 8 — documentation, and what has to be restated
 

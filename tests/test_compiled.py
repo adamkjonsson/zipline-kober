@@ -33,6 +33,7 @@ from fuzzing import (
     SELECT_MESSAGE,
     SELECT_SPEC,
     cases,
+    framing_cases,
     pointer_cases,
     select_cases,
     variants,
@@ -1611,4 +1612,24 @@ def test_a_bounded_terminator_writes_the_same_records(emit: Emit):
 def test_a_bounded_terminator_agrees_on_adversarial_input(seed: int):
     spec = inline(BOUNDED)
     for data in variants(b"Content-Length: 68\r\n", seed=seed):
+        compare(spec, data)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_both_implementations_agree_across_every_framing_arm(seed: int, emit: Emit):
+    """The differential where the framing is *chosen*, not where it is fixed.
+
+    `SEEDS["http.yaml"]` takes neither arm, so a compiled select and a compiled
+    bounded read were being compared only on the path that uses neither.
+    """
+    spec = example("http")
+    for data in framing_cases(seed):
+        writes(spec, data, emit)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_both_implementations_fail_alike_on_a_mutated_framing(seed: int):
+    spec = example("http")
+    for data in framing_cases(seed):
         compare(spec, data)

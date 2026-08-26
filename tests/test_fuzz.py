@@ -19,7 +19,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fuzzing import SEEDS, SELECT_SPEC, cases, pointer_cases, select_cases
+from fuzzing import (
+    SEEDS,
+    SELECT_SPEC,
+    cases,
+    framing_cases,
+    pointer_cases,
+    select_cases,
+)
 
 from kober.cursor import Cursor
 from kober.decoder import Decoder
@@ -406,3 +413,80 @@ def test_a_select_uses_the_documented_vocabulary(seed: int):
         _, unclaimed = plan(spec, tree, data, emit=Emit.FIELD)
         for region in unclaimed:
             assert region.reason in allowed, f"{region.reason!r} on {data!r}"
+
+
+# --- http's framing arms ---------------------------------------------------
+#
+# `SEEDS["http.yaml"]` has no framing header, so every variant of it takes the
+# third path and neither arm that does the work is entered. That is the gap
+# that let a wrong `chunked` comparison live through five stages — the corpus
+# with 2000 real messages has no chunked message in it either — so the arms get
+# seeds of their own, exactly as pointers did.
+
+
+def http_spec() -> Spec:
+    return Spec.from_file(EXAMPLES / "http.yaml")
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_framing_a_body_never_raises(seed: int):
+    """Including a `Content-Length` mutated into something `to_int` refuses."""
+    decoder = Decoder(http_spec())
+    for data in framing_cases(seed):
+        try:
+            tree = decoder.decode_bytes(data)
+        except Exception as exc:
+            exc.add_note(f"escaped a decode: framing seed={seed} on {data!r}")
+            raise
+        check_tree(tree, data)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+@pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD])
+def test_framing_never_makes_a_byte_both_cited_and_undecoded(seed: int, emit: Emit):
+    spec = http_spec()
+    decoder = Decoder(spec)
+    for data in framing_cases(seed):
+        tree = decoder.decode_bytes(data)
+        emissions, unclaimed = plan(spec, tree, data, emit=emit)
+        cited: set[int] = set()
+        for record in emissions:
+            cited.update(range(record.off_start, record.off_end))
+        named: set[int] = set()
+        for region in unclaimed:
+            named.update(range(region.off_start, region.off_end))
+        overlap = cited & named
+        assert not overlap, f"framing {emit.value}: {len(overlap)} byte(s) on {data!r}"
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_framed_body_never_reaches_past_what_it_was_given(seed: int):
+    """A length off the wire is the obvious way to claim bytes that are not there."""
+    decoder = Decoder(http_spec())
+    for data in framing_cases(seed):
+        tree = decoder.decode_bytes(data)
+        body = tree.find("body")
+        if body is not None:
+            assert body.off_end <= len(data), f"{body.off_end} past {len(data)}"
+
+
+def test_the_framing_seeds_reach_every_arm():
+    """Or the sweep above proves nothing, which is how this got missed before.
+
+    Asserted rather than assumed: the point of these seeds is the arms they
+    enter, and a mutation set that stopped entering them would go unnoticed
+    exactly as `SEEDS["http.yaml"]` did.
+    """
+    decoder = Decoder(http_spec())
+    arms = {"chunks": 0, "body": 0, "neither": 0}
+    for data in framing_cases(1):
+        tree = decoder.decode_bytes(data)
+        if tree.status is not NodeStatus.OK:
+            continue
+        if tree.find("chunks") is not None:
+            arms["chunks"] += 1
+        elif tree.find("body") is not None:
+            arms["body"] += 1
+        else:
+            arms["neither"] += 1
+    assert all(count > 0 for count in arms.values()), arms

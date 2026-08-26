@@ -891,6 +891,19 @@ installed from a checkout (see the README).
 
 ### Documentation
 
+- **`docs/dev/testing.md` gains two rules this phase paid for.** *A seed is
+  only worth the code it reaches* — the HTTP fuzz seed had no framing header,
+  so every variant took the third path and neither framing arm was ever
+  entered. And *a byte count is not a criterion* — a message that stops early
+  leaves its tail to the driver, which decodes it as further messages and cites
+  it, so coverage stays whole while the decode is nonsense. Both are written
+  from the bug they let through.
+
+- **The `packeteer` notes say what it will not do**: its TCP anomalies are
+  silently ignored with `--payload http`, and it cannot generate chunked HTTP —
+  which matters because the sixteen real captures hold exactly one chunked
+  message against 1151 counted ones.
+
 - `DESIGN.md` **revision 8**: `Pointer` as built rather than decided (§3.2),
   §2.1 restated for a second cursor, §13.1 closed, §13.2 corrected, §11
   question 5's line re-drawn, and a new question 6.
