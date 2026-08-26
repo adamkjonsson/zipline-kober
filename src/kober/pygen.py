@@ -733,12 +733,15 @@ def _builtin(expr: Call, binding: Binding) -> str:
     ``to_int`` goes through :func:`kober.runtime.to_int`, which **is** the
     function the interpreter evaluates — one implementation of a conversion
     that is deliberately stricter than Python's, so the two cannot drift and
-    the differential has nothing to find here. ``lower`` is a method call on a
-    value the checker has already typed as text.
+    the differential has nothing to find here. ``lower`` and ``trim`` are
+    method calls on a value the checker has already typed as text, and mean
+    exactly what the interpreter's ``str.lower`` and ``str.strip`` mean.
     """
     arguments = [_expr(argument, binding, 0) for argument in expr.args]
     if expr.name == "lower":
         return f"{arguments[0]}.lower()"
+    if expr.name == "trim":
+        return f"{arguments[0]}.strip()"
     return f"to_int({', '.join(arguments)})"
 
 

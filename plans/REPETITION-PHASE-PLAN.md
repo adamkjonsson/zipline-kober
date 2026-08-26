@@ -1,6 +1,6 @@
 # Phase plan: speaking about repetitions
 
-**State: Stages 1-5 done, Stages 6-8 open.** Written after the language
+**State: Stages 1-6 done, Stages 7-8 open.** Written after the language
 phase landed ([`POINTER-PHASE-PLAN.md`](POINTER-PHASE-PLAN.md)), against
 `DESIGN.md` revision 8 and `zpf` 0.2.x.
 
@@ -343,6 +343,16 @@ rather than converted, the fourth function is back.
 
 The prediction held exactly: **only `lower` and `to_int`**, the two the last
 phase shipped, and §3.3's table does not grow.
+
+> **Corrected in Stage 6: this was wrong, and the paragraph two above it says
+> why.** `trim` is forced by `Transfer-Encoding: chunked` whichever option is
+> chosen, because the whitespace is in the *value* and `to_int` only absorbs it
+> for a conversion. Option (2) needs **one** new builtin, not none. The
+> comparison it loses by is smaller than it looked and the conclusion is
+> unchanged — one row against three — but the sentence above was a claim about
+> the corpus that the corpus had not been asked, and it survived to Stage 6
+> because `http_stream_1.pcap` has no chunked message and the one capture that
+> does was checked only by its undecoded-region count. See *What Stage 6 found*.
 
 **And the blank line falls out as predicted**, which was the part that had to
 be checked rather than argued. `\r\n` has no `:` before its `\r\n`, so the
@@ -794,6 +804,41 @@ wins over a length when both are present.
 This is the phase's acceptance criterion, and the measurable form of it is the
 big capture: 2000 messages decoding with no `truncated` region that is not a
 real truncation.
+
+**Done**, and the prose turned out to be the smaller half.
+
+### What Stage 6 found, and what it says about the measurements before it
+
+**The spec read every real chunked response as unframed, and every earlier
+stage's numbers agreed with it.** `lower(headers.value) == 'chunked'` is false,
+because RFC 7230 §3.2.3 permits whitespace after the colon and the value reads
+as `" chunked"`. `to_int` strips it internally — which is exactly why
+`content_length` worked and hid the shape of the problem — but a string
+*comparison* has nothing to strip it.
+
+Three things let it survive from Stage 1 to here, and each is worth keeping:
+
+- **`http_stream_1.pcap` has no chunked message**, which Stage 1 recorded as a
+  fact about the corpus without drawing the conclusion: the 2000-message
+  agreement between Q3's two options never once ran the `chunked` select's
+  match arm.
+- **Q3's write-up predicted this exact failure and filed it under the wrong
+  option.** "The moment a header value is compared rather than converted, the
+  fourth function is back" was written as the argument against option (1). It
+  is true of both, because the whitespace is in the value and not in how the
+  value was reached.
+- **"Zero undecoded regions" is not a sufficient criterion, and this is the
+  proof.** The chunked response decoded 834 of its 2756 bytes; the driver then
+  read the chunk body as further HTTP messages, which cited every remaining
+  byte. Coverage was whole, conformance was clean, the region count was zero,
+  and the decode was nonsense. Acceptance 2 — *the chunked body into its
+  chunks* — is the criterion that catches it, and it is the one that was
+  checked least.
+
+The fix is `trim`, the language's third function, and the tests now assert the
+*shape* rather than the count: one message consuming the whole response, its
+body in chunks, at three different spacings after the colon. Removing `trim`
+fails four of them.
 
 ### Stage 7 — fuzz, and the corpus that has never been run
 

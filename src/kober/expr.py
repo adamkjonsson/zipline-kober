@@ -215,12 +215,13 @@ class Builtin:
 #: functions costs neither: an author cannot add to it, and each of these is a
 #: bounded operation on a value that has already been decoded.
 #:
-#: The three signatures here are exactly what real HTTP asked for (§13.2) — a
-#: decimal string, a hexadecimal string, and a case-insensitive match — and the
-#: table is meant to stay that small. A *transform* (decompression, decryption)
-#: is not a candidate for it: a builtin maps a value to a value, where a
-#: transform maps bytes to bytes and feeds a sub-decode, and it needs an
-#: extension point of its own rather than a fourth row here.
+#: The signatures here are exactly what real HTTP asked for (§13.2) — a decimal
+#: string, a hexadecimal string, a case-insensitive match, and the surrounding
+#: whitespace an HTTP field value is allowed to carry — and the table is meant
+#: to stay that small. A *transform* (decompression, decryption) is not a
+#: candidate for it: a builtin maps a value to a value, where a transform maps
+#: bytes to bytes and feeds a sub-decode, and it needs an extension point of its
+#: own rather than another row here.
 BUILTINS: Mapping[str, Builtin] = MappingProxyType(
     {
         "to_int": Builtin(
@@ -234,6 +235,12 @@ BUILTINS: Mapping[str, Builtin] = MappingProxyType(
             required=1,
             returns=ExprType.STR,
             doc="Lower-case text, for a case-insensitive comparison.",
+        ),
+        "trim": Builtin(
+            params=(ExprType.STR,),
+            required=1,
+            returns=ExprType.STR,
+            doc="Text without leading or trailing whitespace.",
         ),
     }
 )
@@ -716,6 +723,8 @@ def _eval_call(expr: Call, env: Environment) -> ExprValue:
     values = [evaluate(argument, env) for argument in expr.args]
     if expr.name == "lower":
         return _as_str(values[0], "lower()").lower()
+    if expr.name == "trim":
+        return _as_str(values[0], "trim()").strip()
     base = 10 if len(values) == 1 else _as_int(values[1], "to_int()")
     return to_int(_as_str(values[0], "to_int()"), base)
 
@@ -728,8 +737,10 @@ def to_int(text: str, base: int = 10) -> int:
     field, and quietly reading ``1_0`` as ten would turn a malformed length
     into a plausible one, which is the failure this project exists to avoid.
     Surrounding whitespace *is* allowed, because an HTTP field value carries
-    optional whitespace by the specification's own rule and stripping it here
-    is what saves the language a fourth function.
+    optional whitespace by the specification's own rule. That is a convenience
+    for the common case and not a substitute for :data:`BUILTINS`' ``trim``:
+    the moment a field value is *compared* rather than converted, nothing here
+    absorbs the whitespace and the caller has to.
 
     Args:
         text: The text to read.

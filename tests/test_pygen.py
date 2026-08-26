@@ -664,7 +664,28 @@ def test_a_boolean_literal_is_spelled_pythons_way():
 def test_a_string_literal_keeps_its_value():
     plan = Plan.from_spec(load("http.yaml"))
     binding = Binding(plan, Names(plan), "header")
-    assert render_expr(parse("line == 'x'"), binding) == 'line == "x"'
+    assert render_expr(parse("name == 'x'"), binding) == 'name == "x"'
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("lower(value)", "value.lower()"),
+        ("trim(value)", "value.strip()"),
+        ("trim(lower(value))", "value.lower().strip()"),
+    ],
+)
+def test_a_text_builtin_renders_to_the_method_that_means_the_same(
+    source: str, expected: str
+):
+    """`str.strip` is `trim` and `str.lower` is `lower`; nothing else would do.
+
+    Agreement on the *values* is covered by the whole-spec differential, which
+    runs `trim(lower(...))` over every framing arm of `examples/http.yaml`.
+    """
+    plan = Plan.from_spec(load("http.yaml"))
+    binding = Binding(plan, Names(plan), "header")
+    assert render_expr(parse(source), binding) == expected
 
 
 # --- the same answers as the interpreter -----------------------------------

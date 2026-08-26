@@ -92,6 +92,17 @@ installed from a checkout (see the README).
   ordinary read's is where it stands, and one pair of span locals cannot hold
   both, written down as they are before the branch is chosen.
 
+- `trim(s)` in the expression language — text without leading or trailing
+  whitespace, and the language's third function.
+
+  Not decoration, and its absence was a real bug in this project's own HTTP
+  example. RFC 7230 §3.2.3 permits optional whitespace after a header's colon,
+  so a value reads as `" chunked"`. `to_int` strips it internally, which is why
+  a `Content-Length` needs nothing — but a string **comparison** has nothing to
+  strip it, so `lower(value) == 'chunked'` answered false on every real chunked
+  message. `to_int`'s whitespace allowance is a convenience for conversion, not
+  a substitute for this.
+
 - `within:` on a `terminated` size — a second byte sequence the search must
   not run past, so one line can split into two fields:
 
@@ -660,6 +671,20 @@ installed from a checkout (see the README).
 
 ### Changed
 
+- **Breaking: `examples/http.yaml` frames its body by asking its headers**, and
+  its assumption disclaimer is gone. It chooses between chunked encoding, a
+  `Content-Length`, and no body at all, and a `header` unit now has a `name`
+  and a `value` rather than a single `line` — so a consumer reading its output
+  gets each header's two halves as separately cited records. Anything reading
+  `header.line` reads `header.name` and `header.value` instead.
+
+  What it stops doing is the point: a body that was not chunk-formatted used to
+  come back `truncated`, a **hole**-class reason declaring a gap in a stream
+  that had none. It now decodes 2000 real messages from
+  `http_stream_1.pcap` — 1147 counted, 853 with no framing header, fifty
+  pipelined per run — with no undecoded region at all, and reads the 18 070-byte
+  response in `http.pcap` that used to be a hole.
+
 - **Breaking: `examples/dns.yaml` decodes a whole message.** The answer,
   authority, and additional sections are decoded rather than marked `skipped`,
   following compression pointers into names decoded earlier. All eight messages
@@ -714,6 +739,15 @@ installed from a checkout (see the README).
   field.
 
 ### Fixed
+
+- **`examples/http.yaml` read every real chunked response as unframed**, and
+  accounted for every byte while doing it. The header value it compared against
+  `'chunked'` carries the whitespace RFC 7230 permits, so the comparison was
+  false, no body was read, and the driver decoded the chunk data as further
+  HTTP messages — which cited it. Coverage stayed whole and the decode was
+  nonsense, which is why a record count could not have caught this and the
+  tests now assert the message's *shape*: one message, the whole response, its
+  body in chunks. Fixed by `trim`, above.
 
 - **A record for a computed integer was written on one line however long it
   got.** Every other `sink.record` call the compiler emits is wrapped to the

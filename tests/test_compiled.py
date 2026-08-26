@@ -76,6 +76,17 @@ RESPONSE = QUERY[:6] + struct.pack(">H", 1) + QUERY[8:] + b"\xc0\x0c\x00\x01"
 
 HTTP = b"GET / HTTP/1.1\r\nHost: httpforever.com\r\nAccept: */*\r\n\r\nbody"
 
+#: One message per framing the example chooses between, so the differential
+#: runs each arm rather than only the one a single request happens to take.
+HTTP_MESSAGES = [
+    HTTP,
+    b"POST /x HTTP/1.1\r\nContent-Length: 4\r\nHost: h\r\n\r\nbody",
+    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n0\r\n\r\n",
+    b"HTTP/1.1 204 No Content\r\nHost: h\r\n\r\n",
+    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+    b"POST / HTTP/1.1\r\nCONTENT-LENGTH:2\r\n\r\nhi",
+]
+
 
 #: Modules already compiled, by source. A prefix sweep compiles one spec once.
 _MODULES: dict[str, ModuleType] = {}
@@ -656,8 +667,23 @@ def test_the_same_records_are_written_for_dns(data: bytes, emit: Emit):
 
 
 @pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
-def test_the_same_records_are_written_for_http(emit: Emit):
-    writes(example("http"), HTTP, emit)
+@pytest.mark.parametrize("data", HTTP_MESSAGES, ids=lambda d: str(len(d)))
+def test_the_same_records_are_written_for_http(data: bytes, emit: Emit):
+    """One message per framing arm: chunked, counted, absent, and zero-length."""
+    writes(example("http"), data, emit)
+
+
+@pytest.mark.parametrize("data", HTTP_MESSAGES, ids=lambda d: str(len(d)))
+def test_http_decodes_the_same_both_ways_whichever_framing_it_chose(data: bytes):
+    compare(example("http"), data)
+
+
+@pytest.mark.parametrize("data", HTTP_MESSAGES, ids=lambda d: str(len(d)))
+def test_every_prefix_of_an_http_message_agrees(data: bytes):
+    """Truncation across every boundary, the select and the bounded read included."""
+    spec = example("http")
+    for length in range(len(data) + 1):
+        compare(spec, data[:length])
 
 
 @pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
