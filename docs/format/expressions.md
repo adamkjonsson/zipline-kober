@@ -99,37 +99,48 @@ back.
 
 - **Anonymous fields** — they have no name, which is what makes them safe for
   padding.
-- **Repeated fields**, except inside their own `until`, where the name means
-  the element just decoded. The language has no list type.
+- **Repeated fields**, except inside their own `until`, or inside the `where`
+  and `value` of a `select` that names them — in all three the name means one
+  element rather than the list. The language has no list type, and those
+  bindings do not add one: nothing can hold a list, pass one, or return one.
 - **Switch fields**, whose type depends on the value dispatched on, so they
   have no single type to give.
 
 ## Functions
 
-The language has exactly two, and they are the whole of what it can call:
+The language has exactly three, and they are the whole of what it can call:
 
 | Call | Result | Meaning |
 | --- | --- | --- |
 | `to_int(s)` | int | Read text as a base-10 integer. |
 | `to_int(s, base)` | int | The same, in `base` — 2 to 36. |
 | `lower(s)` | str | Lower-case text, for a case-insensitive comparison. |
+| `trim(s)` | str | Text without leading or trailing whitespace. |
 
 ```yaml
 size: {expr: "to_int(length_header)"}          # Content-Length: 1234
 size: {expr: "to_int(chunk_size, 16)"}         # a chunked-encoding chunk header
-condition: "lower(transfer_encoding) == 'chunked'"
+condition: "trim(lower(transfer_encoding)) == 'chunked'"
 ```
 
 They exist because real HTTP framing needs them and nothing else did: a
 `Content-Length` is a decimal string, a chunk size is a hexadecimal one, and
 whether chunked framing applies depends on matching a header value whose case
-varies. Those three needs are the table, and it is meant to stay that size.
+varies and which carries whatever whitespace followed the colon. Those needs
+are the table, and it is meant to stay that size.
 
 **`to_int` is stricter than most languages' equivalent.** Surrounding
 whitespace is allowed, because an HTTP field value carries optional whitespace
 by rule. A digit separator (`1_000`), a radix prefix (`0x10`), and anything
 else that is not a sign followed by digits of the base is refused — reading a
 malformed wire length as a plausible number is worse than failing.
+
+**`to_int`'s whitespace is a convenience, not a substitute for `trim`.** It
+helps only where a value is *converted*. The moment one is **compared** —
+`== 'chunked'` — nothing strips the space the sender was allowed to put there,
+and the comparison quietly answers false. That is not hypothetical: it is how
+this project's own HTTP example read every real chunked response as unframed,
+while still accounting for every byte.
 
 Text that is not a number does not raise. It makes the field `undecodable`, on
 the same path as any other size expression that cannot be evaluated.

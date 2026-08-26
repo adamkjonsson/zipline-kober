@@ -16,6 +16,7 @@ from kober import expr, loader
 
 DOCS = Path(__file__).resolve().parent.parent / "docs"
 FORMAT = DOCS / "format"
+README = DOCS.parent / "README.md"
 
 
 def format_text() -> str:
@@ -94,3 +95,47 @@ def test_every_builtin_is_documented():
     text = format_text()
     for name in expr.BUILTINS:
         assert f"{name}(" in text, f"{name}() is not in the format reference"
+
+
+# --- the README ------------------------------------------------------------
+#
+# It enumerates the field types and counts the builtins, which is the same
+# drift risk the pages above are guarded against — and the same guard caught a
+# construct missing from the format reference once already.
+
+
+def test_the_readme_lists_every_field_type():
+    """A reader's first sight of the language must not be missing a construct.
+
+    Checked against the *table rows*, not the whole file. A first attempt looked
+    anywhere in the README and passed a deliberately broken table, because the
+    prose underneath happens to name the same constructs — which is the failure
+    mode this whole module exists to prevent, one level up.
+    """
+    rows = [
+        line for line in README.read_text().splitlines() if line.startswith("| `")
+    ]
+    listed = {
+        name.strip().strip("`")
+        for line in rows
+        for name in line.split("|")[1].split(",")
+    }
+    missing = sorted(loader._TYPE_KINDS - listed)
+    assert not missing, f"README's field-type table is missing {missing}"
+
+
+def test_the_readme_counts_the_builtins_correctly():
+    """It says how many there are in words, which a table cannot check for it."""
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
+    spelled = words[len(expr.BUILTINS)]
+    text = README.read_text()
+    assert f"closed table of {spelled} functions" in text, (
+        f"README should say 'closed table of {spelled} functions'; "
+        f"there are {len(expr.BUILTINS)}"
+    )
+
+
+def test_the_readme_states_the_integer_width_the_model_allows():
+    from kober.spec import MAX_INT_BITS
+
+    assert f"1 to {MAX_INT_BITS} bits" in README.read_text()

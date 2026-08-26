@@ -113,28 +113,54 @@ class FromExpr:
 
 @dataclass(frozen=True)
 class Terminated:
-    """A size delimited by a byte sequence.
+    """A size delimited by a byte sequence, optionally bounded by a second.
 
     In ``STREAM`` shape a missing terminator at the end of the available data
     means *truncated*, which may simply mean the message continues in a
     segment we do not have. That is a normal outcome, not an error — see
     ``DESIGN.md`` §3.2.
 
+    **``within`` is what lets one line split into two fields.** An HTTP header
+    is a name, a colon, and a value, all inside one CRLF-terminated line — and
+    reading the name as "up to the next colon" without a bound would run into
+    the *next* header, or past the end of the headers entirely, whenever a line
+    has no colon in it. Bounding the search makes a header *have* a name and a
+    value in the spec, rather than having them computed back out of the line by
+    three expressions afterwards.
+
+    The rule is **whichever comes first**. When the delimiter does not occur
+    before the bound, the read behaves exactly as though the delimiter were not
+    there at all, so :attr:`required` still decides what that means. Note what
+    that is *not*: the value does not quietly extend to the bound instead. The
+    bound is a limit on the search, never a second terminator, because
+    substituting one delimiter for another is the kind of quiet guess this
+    project exists to avoid.
+
+    The blank line ending a header block falls out of that without a special
+    case: it has no colon before its CRLF, so an optional bounded terminator
+    takes nothing and the name comes back empty.
+
     Attributes:
         delimiter: The bytes that end the value.
         consume: Whether the delimiter is consumed from the input.
         required: Whether its absence is a truncation (``True``) or an
             ordinary end of value (``False``).
+        within: A second byte sequence the search must not run past. ``None``
+            searches the rest of the run.
 
     """
 
     delimiter: bytes
     consume: bool = True
     required: bool = True
+    within: bytes | None = None
 
     def __post_init__(self) -> None:
         if not self.delimiter:
             msg = "terminator delimiter must not be empty"
+            raise SpecError(msg)
+        if self.within is not None and not self.within:
+            msg = "terminator bound must not be empty; omit it to search the whole run"
             raise SpecError(msg)
 
 
@@ -339,7 +365,59 @@ class Pointer:
     type: FieldType
 
 
-FieldType = IntType | BytesType | StringType | UnitRef | Switch | Computed | Pointer
+@dataclass(frozen=True)
+class Select:
+    """Ask a question about a repeated field, and get one scalar back.
+
+    The construct that lets a spec choose its own framing. Without it a body
+    cannot depend on whether *any* header said ``chunked``, because ``headers``
+    is repeated and the expression language has no list type — so
+    ``examples/http.yaml`` had to *assume* a framing and call the bytes it then
+    misread ``truncated``, declaring a hole in a stream that had none
+    (``DESIGN.md`` §13.2).
+
+    **It is aggregation in the model rather than in the grammar**, which is the
+    same choice §11.5 made for :class:`Pointer` and for the same reason. An
+    ``any(headers, …)`` expression form would need a binding construct in the
+    general grammar — a lambda in all but name — and a ``first(headers, …)``
+    would have to return *an element*, which :class:`~kober.expr.ExprType` has
+    no member for. A select sidesteps both: it yields a scalar whose type is
+    its projection's, so the checker types it with machinery that already
+    exists, and a later field may reference it like any other value.
+
+    **Totality is structural.** :attr:`default` is required, so "nothing
+    matched" always has an answer the author wrote. There is no partial
+    function here to argue about, and no need for one.
+
+    It reads no input and moves no position — the repetition is complete before
+    it runs — so it stays on the unconstrained side of §2.1's table, exactly as
+    :class:`Computed` does.
+
+    Attributes:
+        source: Name of the repeated field to ask about, spelled ``from:`` in a
+            document. It must be declared earlier in the same unit and must be
+            repeated.
+        where: A boolean predicate over one element. The **first** element it
+            holds for is the one selected.
+        value: The projection of that element, and the field's value.
+        default: The value when no element matched. Required.
+
+    """
+
+    source: str
+    where: Expr
+    value: Expr
+    default: Expr
+
+    def __post_init__(self) -> None:
+        if not self.source.strip():
+            msg = "select 'from' must name a repeated field"
+            raise SpecError(msg)
+
+
+FieldType = (
+    IntType | BytesType | StringType | UnitRef | Switch | Computed | Pointer | Select
+)
 
 
 # --- units and specs -------------------------------------------------------

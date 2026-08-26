@@ -100,7 +100,9 @@ python -m venv .venv
   has found in itself came from the second kind:
   - `../python-zipline-wire` converts real captures to `.zpf`
     (`zpfwire convert CAPTURE -o OUT.zpf`); its `tests/captures/` holds
-    fourteen, including DNS, HTTP, and packet loss.
+    sixteen, including DNS, HTTP, and packet loss. Between them they hold
+    exactly **one** chunked HTTP message, against 1151 with a `Content-Length`
+    — so the chunked path has a seed behind it, not a capture.
   - `../packeteer` generates synthetic traffic and adversarial variants
     (`packeteer fuzz`, and `packeteer stream --packet-loss --gap-jitter`).
     If it lacks a protocol, that is an issue to file on *that* project.

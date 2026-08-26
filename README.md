@@ -37,6 +37,38 @@ bad 1.0: 2 error(s), 1 warning(s)
 It reports every fault it can see rather than stopping at the first, so a spec
 gets fixed in one pass. `--strict` makes warnings fail too.
 
+### What a spec can say
+
+Eight field types, and each one's answer for *what happens when it does not
+match* is half of what it means — a construct with no such answer is how a
+decoder ends up guessing.
+
+| | |
+| --- | --- |
+| `int` | Any width from 1 to 64 bits, signed or not, either endianness, optionally labelled by an enum. Sub-byte fields cite the bytes containing them, so a flags word and the bits inside it are both expressible. |
+| `bytes`, `string` | Sized by a constant, an expression, a delimiter, or the rest of the run. |
+| `unit` | An instance of another unit, optionally with arguments. |
+| `switch` | Choose a type from an earlier value. No default means the region is marked `undecodable` rather than guessed at. |
+| `computed` | A value derived from earlier fields. Reads nothing; cites the fields its expression read. |
+| `pointer` | *Read this type at that offset, and carry on where you were.* Real DNS needs it — an answer's owner name is usually two bytes meaning "the name at offset 12". |
+| `select` | Ask a question about a **repeated** field and get one scalar back. What lets an HTTP message frame its own body by asking whether any header said `chunked`. |
+
+Fields repeat by count, by a condition tested after each element, or to the end
+of the run; they can be conditional; and the expression language behind all of
+that is small on purpose — arithmetic, comparison, field references, and a
+closed table of three functions an author cannot add to.
+
+What it deliberately cannot do is move the read cursor. That is the invariant
+the coverage guarantee rests on, and it is why constructs get added rather than
+hooks: `pointer` and `select` both exist because a real capture needed
+something sayable, and saying it declaratively kept `check` able to answer
+before any data exists.
+
+The [spec format reference](docs/format/index.md) documents every key;
+[`examples/dns.yaml`](examples/dns.yaml) and
+[`examples/http.yaml`](examples/http.yaml) are complete specs for real
+protocols, exercised by the test suite against real captures.
+
 `show` prints the field tree a spec describes, expanding nested units in place:
 
 ```console
@@ -222,7 +254,11 @@ one adversarial buffer.
 [`packeteer`](https://github.com/adamkjonsson/packeteer) can also generate
 traffic with impairments directly (`packeteer stream --packet-loss
 --gap-jitter …`), which is a better source of gap and reordering cases than
-hand-built fixtures.
+hand-built fixtures — **except for HTTP**, where its TCP anomalies are ignored
+([packeteer#83](https://github.com/adamkjonsson/packeteer/issues/83)) and it
+cannot produce a chunked body
+([#82](https://github.com/adamkjonsson/packeteer/issues/82)). Impaired HTTP has
+to come from `packeteer fuzz` over a real capture instead.
 
 ## License
 

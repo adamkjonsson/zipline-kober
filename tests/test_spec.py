@@ -21,6 +21,7 @@ from kober.spec import (
     Param,
     Pointer,
     Remaining,
+    Select,
     Spec,
     StringType,
     Switch,
@@ -266,3 +267,25 @@ def test_pointer_nests_a_whole_type():
     """The target is any field type, a unit included — §3.2."""
     kind = Pointer(at=parse("0"), type=UnitRef(unit="name"))
     assert kind.type == UnitRef(unit="name")
+
+
+def test_select_is_a_frozen_field_type():
+    kind = Select(
+        source="headers",
+        where=parse("headers.name == 'x'"),
+        value=parse("headers.value"),
+        default=parse("''"),
+    )
+    assert kind.source == "headers"
+    with pytest.raises(FrozenInstanceError):
+        kind.source = "other"  # type: ignore[misc]
+
+
+def test_select_needs_a_source_to_ask_about():
+    with pytest.raises(SpecError, match="must name a repeated field"):
+        Select(
+            source="  ",
+            where=parse("true"),
+            value=parse("1"),
+            default=parse("0"),
+        )

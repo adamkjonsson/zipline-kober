@@ -31,6 +31,109 @@ installed from a checkout (see the README).
 
 ### Added
 
+- `kober.spec.Select` and the `select:` spec key — ask a question about a
+  **repeated** field, and get one scalar back. Four required keys: `from`
+  names the repetition, `where` is a predicate over one element, `value`
+  projects the first element it holds for, and `default` is what to say when
+  nothing matched.
+
+  ```yaml
+  - name: content_length
+    type:
+      select:
+        from: headers
+        where: "lower(headers.name) == 'content-length'"
+        value: "to_int(headers.value)"
+        default: "-1"
+  ```
+
+  This is what lets a message frame its own body. Choosing between
+  `Content-Length` and chunked encoding means asking whether *any* header said
+  so, and until now nothing could: `headers` is repeated, and the expression
+  language has no list type (`DESIGN.md` §11 question 6).
+
+  **Aggregation went into the model rather than the grammar**, the same choice
+  §11.5 made for `pointer:`. An `any(headers, …)` form would need a binding
+  construct in the general grammar — a lambda in all but name — and a
+  `first(headers, …)` would have to return an *element*, which `ExprType` has
+  no member for. A select yields a scalar whose type is its projection's, so a
+  later field references it like any other value, and `check` types it with
+  machinery that already existed. Because `default` is required, "nothing
+  matched" always has an answer the author wrote.
+
+  Inside `where` and `value` the repeated field's own name means the element
+  being tested, which is the binding `until` already uses and spelled the same
+  way. `default` does not get that binding. **The language still has no list
+  type and gains none:** nothing can hold a list, pass one, or return one.
+
+  At field granularity a select cites **the element it selected** — this value
+  came from *that* header, not from all of them. A default cites no bytes.
+
+  It reads no input and moves no read position, so it stays on the
+  unconstrained side of §2.1 exactly as `computed:` does. That claim is
+  asserted directly, cursor either side, rather than inferred from coverage
+  staying whole: a select that *did* consume would leave coverage whole anyway,
+  the byte it took being covered by whatever followed.
+
+  An expression in `where` or `value` that cannot be evaluated makes the field
+  `undecodable`, exactly as an unevaluable size does. It is **not** treated as
+  "no match", which would report the author's default as though it had been
+  read off the wire.
+
+  Both implementations have it. The compiler renders a select as a small nested
+  function — a walk over a list yielding one value is what a function is for,
+  and in one it can simply `return`, so "the first match" is a return inside the
+  loop and "nothing matched" is the line after it. It is nested rather than
+  module-level so that it closes over what it reads, which is the only way to be
+  sure a generated helper was handed everything it needs.
+
+  `kober.pygen` refuses one shape the interpreter accepts: a `switch` with a
+  select in only *some* cases. A select's extent is the element it chose and an
+  ordinary read's is where it stands, and one pair of span locals cannot hold
+  both, written down as they are before the branch is chosen.
+
+- `trim(s)` in the expression language — text without leading or trailing
+  whitespace, and the language's third function.
+
+  Not decoration, and its absence was a real bug in this project's own HTTP
+  example. RFC 7230 §3.2.3 permits optional whitespace after a header's colon,
+  so a value reads as `" chunked"`. `to_int` strips it internally, which is why
+  a `Content-Length` needs nothing — but a string **comparison** has nothing to
+  strip it, so `lower(value) == 'chunked'` answered false on every real chunked
+  message. `to_int`'s whitespace allowance is a convenience for conversion, not
+  a substitute for this.
+
+- `within:` on a `terminated` size — a second byte sequence the search must
+  not run past, so one line can split into two fields:
+
+  ```yaml
+  - {name: name,  type: {string: {size: {terminated: {delimiter: ":", within: "\r\n", required: false}}}}}
+  - {name: value, type: {string: {size: {terminated: {delimiter: "\r\n"}}}}}
+  ```
+
+  An HTTP header then *has* a name and a value in the spec, rather than having
+  them computed back out of the line by expressions afterwards — and the split
+  reaches the output, so a consumer gets the name and the value as two
+  separately cited records. Reading a name as "up to the next colon" without a
+  bound would run into the next header, or past the end of the headers
+  entirely, on any line that has no colon in it.
+
+  The rule is **whichever comes first**: a delimiter beginning after the bound
+  reads as though it were not there. `required` still decides what that means,
+  with one difference worth knowing — an *optional* bounded terminator that
+  finds nothing reads **nothing**, where an unbounded one reads the rest of the
+  run. The bound limits the search and is never a second terminator; reading up
+  to it would be reading under a delimiter that was never found.
+
+  The blank line ending a header block needs no special case: it has no colon
+  before its CRLF, so the terminator takes nothing and the name comes back
+  empty.
+
+  `kober.cursor.Cursor.find` takes the bound as a second argument, and the
+  checker's "a non-required terminator on a string makes truncation invisible"
+  warning no longer fires when `within` is set — the bound *is* the guarantee
+  that warning exists to notice the absence of. Both implementations have it.
+
 - `kober.spec.Pointer` and the `pointer:` spec key — a back-reference:
   *read this type at that offset, and carry on where you were*
   (`DESIGN.md` §3.2). Real DNS needs it; without it the answer section of
@@ -568,6 +671,20 @@ installed from a checkout (see the README).
 
 ### Changed
 
+- **Breaking: `examples/http.yaml` frames its body by asking its headers**, and
+  its assumption disclaimer is gone. It chooses between chunked encoding, a
+  `Content-Length`, and no body at all, and a `header` unit now has a `name`
+  and a `value` rather than a single `line` — so a consumer reading its output
+  gets each header's two halves as separately cited records. Anything reading
+  `header.line` reads `header.name` and `header.value` instead.
+
+  What it stops doing is the point: a body that was not chunk-formatted used to
+  come back `truncated`, a **hole**-class reason declaring a gap in a stream
+  that had none. It now decodes 2000 real messages from
+  `http_stream_1.pcap` — 1147 counted, 853 with no framing header, fifty
+  pipelined per run — with no undecoded region at all, and reads the 18 070-byte
+  response in `http.pcap` that used to be a hole.
+
 - **Breaking: `examples/dns.yaml` decodes a whole message.** The answer,
   authority, and additional sections are decoded rather than marked `skipped`,
   following compression pointers into names decoded earlier. All eight messages
@@ -622,6 +739,37 @@ installed from a checkout (see the README).
   field.
 
 ### Fixed
+
+- **`examples/http.yaml` read every real chunked response as unframed**, and
+  accounted for every byte while doing it. The header value it compared against
+  `'chunked'` carries the whitespace RFC 7230 permits, so the comparison was
+  false, no body was read, and the driver decoded the chunk data as further
+  HTTP messages — which cited it. Coverage stayed whole and the decode was
+  nonsense, which is why a record count could not have caught this and the
+  tests now assert the message's *shape*: one message, the whole response, its
+  body in chunks. Fixed by `trim`, above.
+
+- **A record for a computed integer was written on one line however long it
+  got.** Every other `sink.record` call the compiler emits is wrapped to the
+  line length; the one for a value whose width is not declared was not, so a
+  field with a long enough name generated a module that failed this project's
+  own lint. Found by compiling a spec with a field called `content_length`.
+
+- **A `computed` field of a nested unit could not be referenced from outside
+  it.** Typing the reference re-checked that computed's own expression against
+  the *referrer's* visible names — which, once the path had crossed into
+  another unit, belonged to the wrong unit entirely, so every field of the
+  inner one was reported as "declared later":
+
+  ```
+  error: probe.outer.probe: computed: 'raw' is declared later in unit 'leaf'
+  ```
+
+  The ordering rule is about where the *reference* stands, and it is applied
+  where the reference is written; a computed's own ordering is checked at its
+  own declaration site. Nothing is loosened by not asking twice. Found while
+  writing the `select:` example, where `until: "chunks.length == 0"` is the
+  natural way to end a chunked body and was refused.
 
 - **A field path in a compiled decoder carried the backend's identifier, not
   the spec's.** A field named `class` is a Python keyword, so the attribute
@@ -742,6 +890,57 @@ installed from a checkout (see the README).
   asked for a committed example and had only test fixtures.
 
 ### Documentation
+
+- **`DESIGN.md` revision 9.** §13.2 is **closed** — its wrong diagnosis kept
+  visible, and a second wrong one recorded beside it — and §11 question 6 is
+  answered by `Select`. §3.2 gains the construct and the bounded terminator,
+  §3.3 gains `trim` and the reason a closed table reopened, and §2.1 gains the
+  totality argument along with the general lesson behind it: a select that
+  consumed input passes every coverage-shaped invariant, so the rule it obeys
+  is asserted directly and each assertion is checked against an implementation
+  that breaks it.
+
+  §11 question 5's line moves once more. This was the third real gap closed by
+  making the declarative language say more rather than letting code in beside
+  it, and aggregation landed in the *model* rather than the expression
+  language — so the declarative vocabulary grew and the expression language did
+  not. Hooks stay deferred and are weaker still.
+
+- **The `README` says what a spec can express**, which it never did: eight
+  field types with each one's answer for what happens when it does not match,
+  the three ways a field repeats, and why constructs get added rather than
+  hooks. `tests/test_docs.py` now guards that table the way it already guarded
+  the format reference — against the table rows rather than the whole file,
+  since the prose underneath names the same constructs and a first attempt
+  passed a deliberately broken table.
+
+- **Corrected in the reference docs:** the format index quoted a schema error
+  whose wording and type list had both drifted (`pointer` and `select` were
+  missing from it), `docs/dev/testing.md` said fourteen captures in one place
+  and sixteen in another, and the `README`'s pointer at `packeteer stream
+  --packet-loss` now says that HTTP is the one payload where those options are
+  ignored.
+
+- **`docs/dev/decisions.md` is current again.** Its `DESIGN.md` revision list
+  stopped at 7 and now runs to 9; the §11 tally said four questions and there
+  are six, of which three are open; and it gains a section for what is *owed*
+  rather than open — byte transforms, and the `Transfer-Encoding: gzip,
+  chunked` form `examples/http.yaml` deliberately does not recognise. The
+  upstream-issues rule now covers the test tooling too, with the three
+  `packeteer` issues this phase filed.
+
+- **`docs/dev/testing.md` gains two rules this phase paid for.** *A seed is
+  only worth the code it reaches* — the HTTP fuzz seed had no framing header,
+  so every variant took the third path and neither framing arm was ever
+  entered. And *a byte count is not a criterion* — a message that stops early
+  leaves its tail to the driver, which decodes it as further messages and cites
+  it, so coverage stays whole while the decode is nonsense. Both are written
+  from the bug they let through.
+
+- **The `packeteer` notes say what it will not do**: its TCP anomalies are
+  silently ignored with `--payload http`, and it cannot generate chunked HTTP —
+  which matters because the sixteen real captures hold exactly one chunked
+  message against 1151 counted ones.
 
 - `DESIGN.md` **revision 8**: `Pointer` as built rather than decided (§3.2),
   §2.1 restated for a second cursor, §13.1 closed, §13.2 corrected, §11

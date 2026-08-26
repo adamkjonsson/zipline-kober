@@ -330,3 +330,52 @@ def test_seek_to_takes_an_absolute_offset():
 def test_seek_to_refuses_an_offset_outside_the_run():
     with pytest.raises(ValueError, match="outside the run"):
         Cursor(b"abcdef", base=100).seek_to(107)
+
+
+# --- bounded search --------------------------------------------------------
+
+
+def test_find_within_a_bound():
+    """The delimiter is before the bound, so it is found as usual."""
+    assert Cursor(b"name: value\r\nnext").find(b":", b"\r\n") == 4
+
+
+def test_find_refuses_a_delimiter_past_the_bound():
+    """The rule is whichever comes first, and past the bound reads as absent."""
+    assert Cursor(b"blank\r\nname: value").find(b":", b"\r\n") is None
+
+
+def test_find_with_no_delimiter_at_all():
+    assert Cursor(b"blank\r\nmore").find(b":", b"\r\n") is None
+
+
+def test_find_with_no_bound_present_searches_the_whole_run():
+    """Nothing to bound the search, so it behaves as an unbounded one."""
+    assert Cursor(b"name: value").find(b":", b"\r\n") == 4
+
+
+def test_find_with_neither_present():
+    assert Cursor(b"nothing here").find(b":", b"\r\n") is None
+
+
+def test_find_accepts_a_delimiter_starting_exactly_at_the_bound():
+    """At the bound is not past it: the delimiter does begin before it ends."""
+    assert Cursor(b"abc\r\ndef").find(b"\r", b"\r\n") == 3
+
+
+def test_find_bound_is_relative_to_the_position():
+    """A bound behind the position must not hide a delimiter ahead of it."""
+    cursor = Cursor(b"\r\nname: value\r\n")
+    cursor.read_bytes(2)
+    assert cursor.find(b":", b"\r\n") == 4
+
+
+def test_find_refuses_an_empty_bound():
+    with pytest.raises(ValueError, match="empty delimiter"):
+        Cursor(b"abc").find(b":", b"")
+
+
+def test_find_within_does_not_move_the_position():
+    cursor = Cursor(b"name: value\r\n")
+    cursor.find(b":", b"\r\n")
+    assert cursor.tell() == 0

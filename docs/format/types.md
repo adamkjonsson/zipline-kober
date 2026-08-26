@@ -142,6 +142,54 @@ region `undecodable`, and never raises. That rule is also what makes chains
 finite: each hop must land strictly earlier than the last, so a cycle cannot be
 constructed.
 
+### `select`
+
+```yaml
+type:
+  select:
+    from: headers
+    where: "lower(headers.name) == 'content-length'"
+    value: "to_int(headers.value)"
+    default: "-1"
+```
+
+Ask a question about a **repeated** field, and get one scalar back. All four
+keys are required.
+
+`from` names a repeated field declared earlier in the same unit. `where` is a
+boolean predicate over one element, and the **first** element it holds for is
+the one selected. `value` projects that element, and is the field's value.
+`default` is the value when nothing matched.
+
+Inside `where` and `value`, the repeated field's own name means **the element
+being tested**, not the list — the same binding an `until` uses, and spelled
+the same way. `default` does not get that binding: nothing matched, so there is
+no element for it to mean.
+
+A select's type is its projection's, so `value` and `default` must agree on
+one, and a later field may reference the result like any other scalar:
+
+```yaml
+- {name: body, type: {bytes: {size: {expr: "content_length"}}}, condition: "content_length > 0"}
+```
+
+This is the one construct that can ask about a repetition, and the reason it
+exists is that a message often cannot be framed without one: choosing between
+`Content-Length` and chunked encoding means asking whether *any* header said
+so. Because `default` is required, "nothing matched" always has an answer the
+spec wrote — there is no case left over to guess at.
+
+It consumes no input and moves no position; the repetition is already decoded
+by the time it runs. At field granularity it cites **the element it selected**,
+which is the honest evidence — this value came from *that* header, not from all
+of them. When nothing matched there is nothing to point at, so the default
+cites no bytes at all.
+
+An expression in `where` or `value` that cannot be evaluated — `to_int` on a
+value that is not a number, say — makes the field `undecodable`, exactly as an
+unevaluable size does. It is not quietly treated as "no match", because that
+would report the author's default as though it were read from the input.
+
 ## Sizes
 
 | Kind | Form | Meaning |
@@ -159,6 +207,7 @@ size:
     delimiter: "\r\n"     # or a list of byte values: [13, 10]
     consume: true         # default
     required: true        # default
+    within: null          # default: search the whole run
 ```
 
 `delimiter` is the byte sequence to stop at, written as text or as a list of
@@ -169,6 +218,35 @@ a missing delimiter means:
   that usually means the message continues in a segment we do not have, which
   is an ordinary outcome rather than an error.
 - `required: false` — the rest of the run is the value.
+
+`within` bounds the search by a second byte sequence, and the rule is
+**whichever comes first**: a delimiter that begins after the bound reads as
+though it were not there at all. It is what lets one line split into two
+fields —
+
+```yaml
+- {name: name,  type: {string: {size: {terminated: {delimiter: ":", within: "\r\n", required: false}}}}}
+- {name: value, type: {string: {size: {terminated: {delimiter: "\r\n"}}}}}
+```
+
+— so an HTTP header *has* a name and a value in the spec, instead of having
+them computed back out of the line afterwards. The blank line ending a header
+block falls out with no special case: it has no colon before its CRLF, so the
+optional bounded terminator takes nothing and both come back empty.
+
+A bound changes only what "absent" means; `required` still decides what to do
+about it. The one place the two spellings differ is what an **optional** absent
+terminator reads:
+
+| | Delimiter not found | |
+| --- | --- | --- |
+| | `required: true` | `required: false` |
+| no `within` | `truncated` | the rest of the run |
+| `within` set | `truncated` | **nothing** |
+
+Bounded, it reads nothing rather than reading up to the bound. The bound is a
+limit on the search, never a second terminator — letting the value run to it
+would be reading under a delimiter the spec never found.
 
 A size expression evaluating to a negative number is `undecodable`. A size
 larger than what remains is `truncated`.
@@ -182,9 +260,11 @@ larger than what remains is `truncated`.
 | `to_end` | `{to_end: true}` | Repeat until the run is exhausted. |
 
 An `until` expression sees the field it repeats, and there it means **the
-element just decoded** rather than the list. That is the one place a repeated
-field may be referenced; everywhere else it is refused, because the expression
-language has no list type.
+element just decoded** rather than the list. A [`select`](#select)'s `where`
+and `value` bind the same way. Those are the only places a repeated field may
+be referenced; everywhere else it is refused, because the expression language
+has no list type — and neither binding gives it one, since each names a single
+element for the length of one expression.
 
 Two guards, both reachable from crafted input:
 

@@ -267,7 +267,15 @@ def test_what_unparse_writes_parses_back_to_the_same_tree(source: str):
 
 @pytest.mark.parametrize(
     "source",
-    ["to_int(s)", "to_int(s, 16)", "lower(name)", "to_int(s) + 1", "lower(a) == 'x'"],
+    [
+        "to_int(s)",
+        "to_int(s, 16)",
+        "lower(name)",
+        "to_int(s) + 1",
+        "lower(a) == 'x'",
+        "trim(s)",
+        "trim(lower(a)) == 'x'",
+    ],
 )
 def test_a_call_round_trips(source: str):
     """`unparse` has to produce something that parses back to the same tree."""
@@ -324,6 +332,12 @@ class _Values:
         ("to_int(s, 2)", "1011", 0b1011),
         ("lower(s)", "Chunked", "chunked"),
         ("lower(s)", "CHUNKED", "chunked"),
+        ("trim(s)", " chunked", "chunked"),
+        ("trim(s)", "chunked ", "chunked"),
+        ("trim(s)", "\t chunked \r\n", "chunked"),
+        ("trim(s)", "chunked", "chunked"),
+        ("trim(s)", "   ", ""),
+        ("trim(lower(s))", " Chunked ", "chunked"),
     ],
 )
 def test_calls_evaluate(source: str, text: str, expected: object):
@@ -362,7 +376,12 @@ def test_to_int_refuses_a_digit_its_base_does_not_have():
 
 @pytest.mark.parametrize(
     ("source", "expected"),
-    [("to_int(s)", ExprType.INT), ("to_int(s, 16)", ExprType.INT), ("lower(s)", ExprType.STR)],
+    [
+        ("to_int(s)", ExprType.INT),
+        ("to_int(s, 16)", ExprType.INT),
+        ("lower(s)", ExprType.STR),
+        ("trim(s)", ExprType.STR),
+    ],
 )
 def test_a_call_has_the_type_its_table_row_says(source: str, expected: ExprType):
     assert infer_type(parse(source), FakeScope(s=ExprType.STR), source) is expected
@@ -373,6 +392,7 @@ def test_a_call_has_the_type_its_table_row_says(source: str, expected: ExprType)
     [
         ("to_int(n)", {"n": ExprType.INT}, "argument 1 of to_int()"),
         ("lower(n)", {"n": ExprType.INT}, "argument 1 of lower()"),
+        ("trim(n)", {"n": ExprType.INT}, "argument 1 of trim()"),
         ("to_int(s, s)", {"s": ExprType.STR}, "argument 2 of to_int()"),
     ],
 )

@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import struct
+from typing import Any
 
 import pytest
 
+from kober.cursor import Cursor
 from kober.decoder import MAX_DEPTH, MAX_POINTER_HOPS, Decoder
 from kober.errors import SpecError
 from kober.node import Node, NodeStatus
-from kober.spec import Spec
+from kober.spec import Field, Select, Spec
 
 DNS_QUERY = (
     struct.pack(">HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
@@ -704,8 +706,6 @@ def test_a_self_pointer_terminates_rather_than_looping():
 
 def test_the_offset_is_relative_to_the_message_not_the_run():
     """A run holds many messages; offset 0 means *this* message's first byte."""
-    from kober.cursor import Cursor
-
     decoder = Decoder(build(POINTER_FIELDS))
     # Two messages of two bytes each: a pointer consumes nothing, so each
     # message is exactly its `pad` and `pos`.
@@ -823,3 +823,356 @@ def test_a_builtin_makes_a_case_insensitive_match_expressible():
         tree = decode(fields, text + b"rest")
         assert tree.find("body") is not None, text
         assert tree.find("body").value == b"rest"
+
+
+class _Unimplemented:
+    """A field type the engine does not know, for the fall-through test."""
+
+
+def test_a_field_type_the_engine_does_not_implement_is_undecodable_not_a_raise():
+    """The model may gain a type before the engine does; a decode still cannot raise.
+
+    This is not hypothetical: `select` was exactly that between the stage that
+    put it in the model and the stage that taught the engine to run it. What the
+    checker cannot say — the spec is well formed and valid — the decoder has to,
+    and the way it says it is an honest `undecodable` region rather than an
+    `AttributeError` out of a decode that promises never to raise.
+    """
+    spec = build('      - {name: a, type: {int: {bits: 8}}}\n')
+    item = spec.unit("message").fields[0]
+    object.__setattr__(item, "type", _Unimplemented())
+    tree = Decoder(spec, check=False).decode_bytes(b"\x01\x02")
+    assert tree.status is NodeStatus.UNDECODABLE
+    assert "not implemented" in tree.detail
+
+
+# --- select ----------------------------------------------------------------
+
+
+SELECT_ITEM = """\
+  item:
+    fields:
+      - {name: tag, type: {int: {bits: 8}}}
+      - {name: body, type: {int: {bits: 8}}}
+"""
+
+
+def select_fields(
+    where: str = "items.tag == 7",
+    value: str = "items.body",
+    default: str = "-1",
+    extra: str = "",
+) -> str:
+    return f"""\
+      - {{name: n, type: {{int: {{bits: 8}}}}}}
+      - {{name: items, type: {{unit: item}}, repeat: {{count: "n"}}}}
+      - name: picked
+        type:
+          select: {{from: items, where: "{where}", value: "{value}", default: "{default}"}}
+{extra}"""
+
+
+def select(data: bytes, **kw: str) -> Node:
+    return decode(select_fields(**kw), data, extra_units=SELECT_ITEM)
+
+
+def test_select_projects_the_first_match():
+    """Two elements match; the *first* wins, which is the documented rule."""
+    tree = select(bytes([3, 1, 10, 7, 20, 7, 30]))
+    assert tree.find("picked").value == 20
+
+
+def test_select_falls_back_to_its_default():
+    tree = select(bytes([2, 1, 10, 2, 20]))
+    assert tree.find("picked").value == -1
+
+
+def test_select_cites_the_element_it_selected():
+    """Q4: the honest evidence is *that* element, not the whole repetition."""
+    tree = select(bytes([3, 1, 10, 7, 20, 9, 30]))
+    picked = tree.find("picked")
+    matched = tree.find("items").children[1]
+    assert (picked.off_start, picked.off_end) == (matched.off_start, matched.off_end)
+    # And narrower than the repetition, which is the point of the rule.
+    items = tree.find("items")
+    assert (picked.off_start, picked.off_end) != (items.off_start, items.off_end)
+
+
+def test_a_default_cites_nothing():
+    """Nothing matched, so there is nothing to point at."""
+    picked = select(bytes([2, 1, 10, 2, 20])).find("picked")
+    assert picked.off_start == picked.off_end
+
+
+def test_select_over_an_empty_repetition_takes_the_default():
+    tree = select(bytes([0]))
+    assert tree.find("picked").value == -1
+    assert tree.status is NodeStatus.OK
+
+
+def test_select_reads_no_input_and_moves_no_position():
+    """§2.1, asserted where the claim is made rather than inferred from coverage.
+
+    A select that *consumed* would leave coverage whole — the byte it took
+    would be covered by whatever followed — so no coverage-shaped invariant
+    can catch it. This compares the cursor either side, which does.
+    """
+    spec = build(select_fields(), extra_units=SELECT_ITEM)
+    decoder = Decoder(spec)
+    seen: list[tuple[int, int]] = []
+    original = Decoder._select
+
+    def watched(
+        self: Decoder, item: Field, kind: Select, frame: Any,
+        cursor: Cursor, mark: int,
+    ) -> Node:
+        before = cursor.tell()
+        node = original(self, item, kind, frame, cursor, mark)
+        seen.append((before, cursor.tell()))
+        return node
+
+    Decoder._select = watched
+    try:
+        for data in (bytes([3, 1, 10, 7, 20, 9, 30]), bytes([2, 1, 10, 2, 20]), bytes([0])):
+            cursor = Cursor(data)
+            decoder.decode_one(cursor)
+    finally:
+        Decoder._select = original
+
+    assert len(seen) == 3, "the select did not run"
+    assert all(before == after for before, after in seen), seen
+
+
+def test_the_no_movement_assertion_catches_a_select_that_consumes():
+    """The check above must fail against a consuming implementation, or it is worthless."""
+    spec = build(select_fields(), extra_units=SELECT_ITEM)
+    decoder = Decoder(spec)
+    original = Decoder._select
+
+    def greedy(
+        self: Decoder, item: Field, kind: Select, frame: Any,
+        cursor: Cursor, mark: int,
+    ) -> Node:
+        node = original(self, item, kind, frame, cursor, mark)
+        if cursor.remaining_bytes() > 0:
+            cursor.read_bytes(1)
+        return node
+
+    seen: list[tuple[int, int]] = []
+
+    def watched(
+        self: Decoder, item: Field, kind: Select, frame: Any,
+        cursor: Cursor, mark: int,
+    ) -> Node:
+        before = cursor.tell()
+        node = greedy(self, item, kind, frame, cursor, mark)
+        seen.append((before, cursor.tell()))
+        return node
+
+    Decoder._select = watched
+    try:
+        cursor = Cursor(bytes([1, 7, 20, 99]))
+        decoder.decode_one(cursor)
+    finally:
+        Decoder._select = original
+
+    assert seen and any(before != after for before, after in seen)
+
+
+def test_an_unevaluable_predicate_is_undecodable_not_a_silent_default():
+    """Reporting the author's default as though it were read is the failure to avoid."""
+    tree = decode(
+        """\
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: items, type: {unit: item}, repeat: {count: "n"}}
+      - name: picked
+        type:
+          select:
+            from: items
+            where: "to_int(items.text) > 100"
+            value: "to_int(items.text)"
+            default: "0"
+""",
+        bytes([1]) + b"zz",
+        extra_units="""\
+  item:
+    fields:
+      - {name: text, type: {string: {size: 2}}}
+""",
+    )
+    assert tree.status is NodeStatus.UNDECODABLE
+    picked = tree.find("picked")
+    # The node is kept and says what happened, as any failed field's is. What
+    # matters is that it carries no value: a `0` here would be the author's
+    # default wearing the input's clothes.
+    assert picked.status is NodeStatus.UNDECODABLE
+    assert picked.value is None
+    assert "to_int()" in tree.detail
+
+
+def test_an_unevaluable_projection_is_undecodable_too():
+    tree = decode(
+        """\
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: items, type: {unit: item}, repeat: {count: "n"}}
+      - name: picked
+        type:
+          select:
+            from: items
+            where: "items.text == 'zz'"
+            value: "to_int(items.text)"
+            default: "0"
+""",
+        bytes([1]) + b"zz",
+        extra_units="""\
+  item:
+    fields:
+      - {name: text, type: {string: {size: 2}}}
+""",
+    )
+    assert tree.status is NodeStatus.UNDECODABLE
+
+
+def test_the_element_binding_is_put_back_after_a_select():
+    """A later field must see the repetition, not whichever element was tested."""
+    tree = select(
+        bytes([2, 1, 10, 7, 20]),
+        extra='      - {name: after, type: {computed: "picked + 1"}}\n',
+    )
+    assert tree.find("picked").value == 20
+    assert tree.find("after").value == 21
+    assert tree.find("items").is_repetition
+
+
+def test_a_failed_select_leaves_the_repetition_bound():
+    """Even when an expression raises part-way, the name is restored."""
+    spec = build(
+        """\
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: items, type: {unit: item}, repeat: {count: "n"}}
+      - name: picked
+        type:
+          select:
+            from: items
+            where: "to_int(items.text) > 0"
+            value: "1"
+            default: "0"
+""",
+        extra_units="""\
+  item:
+    fields:
+      - {name: text, type: {string: {size: 2}}}
+""",
+    )
+    tree = Decoder(spec).decode_bytes(bytes([1]) + b"zz")
+    assert tree.status is NodeStatus.UNDECODABLE
+    items = tree.find("items")
+    assert items is not None and items.is_repetition
+
+
+def test_a_select_result_can_size_a_later_field():
+    """The construct earns its place by framing what comes after it."""
+    tree = decode(
+        """\
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: items, type: {unit: item}, repeat: {count: "n"}}
+      - name: length
+        type:
+          select: {from: items, where: "items.tag == 7", value: "items.body", default: "0"}
+      - {name: payload, type: {bytes: {size: {expr: "length"}}}}
+""",
+        bytes([2, 1, 10, 7, 3]) + b"abcdef",
+        extra_units=SELECT_ITEM,
+    )
+    assert tree.find("length").value == 3
+    assert tree.find("payload").value == b"abc"
+
+
+def test_a_boolean_select_is_how_any_is_spelled():
+    """`value: "true"` with `default: "false"` is the `any` the language has no word for."""
+    for data, expected in ((bytes([2, 1, 10, 7, 20]), True), (bytes([1, 1, 10]), False)):
+        tree = select(data, value="true", default="false")
+        assert tree.find("picked").value is expected
+
+
+# --- bounded terminator ----------------------------------------------------
+
+
+def bounded(data: bytes, *, required: str = "false") -> Node:
+    """Decode a header-shaped pair: a bounded name, then the rest of the line."""
+    return decode(
+        f"""\
+      - name: name
+        type:
+          string:
+            size: {{terminated: {{delimiter: ":", within: "\\r\\n", required: {required}}}}}
+      - name: value
+        type: {{string: {{size: {{terminated: {{delimiter: "\\r\\n"}}}}}}}}
+""",
+        data,
+    )
+
+
+def test_a_bound_splits_a_line_into_two_fields():
+    tree = bounded(b"Content-Length: 68\r\n")
+    assert tree.find("name").value == "Content-Length"
+    assert tree.find("value").value == " 68"
+
+
+def test_a_blank_line_takes_nothing_and_needs_no_special_case():
+    """The case the whole construct was chosen for."""
+    tree = bounded(b"\r\n")
+    assert tree.find("name").value == ""
+    assert tree.find("value").value == ""
+    assert tree.off_end == 2
+
+
+def test_a_delimiter_past_the_bound_reads_as_absent():
+    """It belongs to the *next* line, and an optional terminator takes nothing."""
+    tree = bounded(b"no-colon-here\r\nnext: value\r\n")
+    assert tree.find("name").value == ""
+    assert tree.find("value").value == "no-colon-here"
+
+
+def test_an_optional_bounded_terminator_reads_nothing_when_absent():
+    """Not the rest of the run, and not up to the bound: nothing.
+
+    The bound limits the search; it is never a second terminator. Reading to it
+    would be reading under a delimiter the spec did not find.
+    """
+    tree = bounded(b"no-colon-here\r\ntail")
+    name = tree.find("name")
+    assert name.value == ""
+    assert name.off_start == name.off_end
+
+
+def test_an_unbounded_optional_terminator_still_reads_the_rest():
+    """The other half of the contrast above, unchanged by this stage."""
+    tree = decode(
+        '      - {name: a, type: {string: {size: {terminated: '
+        '{delimiter: ":", required: false}}}}}\n',
+        b"no-colon-here",
+    )
+    assert tree.find("a").value == "no-colon-here"
+
+
+def test_a_required_bounded_terminator_is_truncated_when_absent():
+    """`required` still decides; the bound only changes what "absent" means."""
+    tree = bounded(b"no-colon-here\r\n", required="true")
+    assert tree.status is NodeStatus.TRUNCATED
+    assert "before b'\\r\\n'" in tree.find("name").detail
+
+
+def test_a_bounded_terminator_with_neither_present_is_truncated_when_required():
+    tree = bounded(b"nothing at all", required="true")
+    assert tree.status is NodeStatus.TRUNCATED
+
+
+def test_a_bound_that_is_absent_lets_the_search_run_on():
+    """Nothing bounds it, so it finds the delimiter as an unbounded read would."""
+    tree = decode(
+        '      - {name: a, type: {string: {size: {terminated: '
+        '{delimiter: ":", within: "\\r\\n"}}}}}\n',
+        b"name: value with no line ending",
+    )
+    assert tree.find("a").value == "name"

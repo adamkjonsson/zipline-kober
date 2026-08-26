@@ -22,10 +22,23 @@ bare name is shorthand for ``this``. Two rules make references honest:
 - *Ordering.* A field may reference only fields declared **before** it, since
   a later field has not been decoded when the expression runs. ``until``
   expressions additionally see the field they repeat, which is the element
-  just decoded.
+  just decoded, and so do a :class:`~kober.spec.Select`'s ``where`` and
+  ``value``.
 - *Reachability.* ``parent`` resolves against every site that references the
   unit, and must resolve at all of them — a unit reachable from two parents
   cannot rely on a field only one of them has.
+
+The ordering rule is about **where the reference stands**, and it is applied
+where the reference is written. Descending a dotted path into another field's
+own expression does not re-apply it: that field's ordering was checked at its
+own declaration site, and re-checking it against the referrer's names asks the
+wrong question — cross-unit, against the wrong unit's names entirely.
+
+A repeated field may **not** be referenced, because the expression language has
+no list type and never gains one. The two exemptions above are the whole of the
+exception, and both are narrow by construction: each binds the repeated name to
+one *element* for the length of one expression, so nothing anywhere can hold a
+list.
 
 ``root`` is the exception: it resolves against the entry unit's fields
 without an ordering rule, because how much of the entry unit has been decoded
@@ -49,6 +62,7 @@ from kober.spec import (
     FromExpr,
     IntType,
     Pointer,
+    Select,
     StringType,
     Switch,
     Terminated,
@@ -425,11 +439,83 @@ class _Checker:
             # The offset obeys the same forward-reference rule as a size: it
             # may only read fields already decoded where the pointer stands.
             self._expect(kind.at, ExprType.INT, unit, visible, where, "pointer at")
+        if isinstance(kind, Select):
+            self._check_select(unit, kind, visible, where)
         size = _size_of(kind)
         if isinstance(size, FromExpr):
             self._expect(size.expr, ExprType.INT, unit, visible, where, "size")
-        if isinstance(size, Terminated) and not size.required and isinstance(kind, StringType):
+        if (
+            isinstance(size, Terminated)
+            and not size.required
+            and size.within is None
+            and isinstance(kind, StringType)
+        ):
+            # `within` is exempt because it *is* the guarantee this warns about
+            # the absence of. An unbounded optional terminator swallows the rest
+            # of the run, so a truncated message reads as a whole one; a bounded
+            # one cannot reach past its bound, so there is nothing to hide.
             self.warn(where, "a non-required terminator on a string makes truncation invisible")
+
+    def _check_select(self, unit: Unit, kind: Select, visible: set[str], where: str) -> None:
+        """Check a select: a real, earlier, repeated source, and agreeing types.
+
+        The ordering rule is the ordinary one — a select may only ask about a
+        repetition already decoded — so it is checked against ``visible``
+        exactly as any other reference is. What is *not* ordinary is that the
+        source may be repeated at all, which nothing else may be; that
+        exemption lives in :class:`_Scope` and reaches only ``where`` and
+        ``value``.
+        """
+        source = unit.field(kind.source)
+        if kind.source not in visible:
+            if source is not None:
+                self.error(
+                    where,
+                    f"select from {kind.source!r}: it is declared later in unit "
+                    f"{unit.name!r}; a select may only ask about a repetition "
+                    "already decoded",
+                )
+            else:
+                known = ", ".join(sorted(visible)) or "none"
+                self.error(
+                    where,
+                    f"select from {kind.source!r}: unknown name in unit "
+                    f"{unit.name!r}; in scope: {known}",
+                )
+            return
+        if source is None:
+            # In scope but not a field: a unit parameter holds a scalar, so
+            # there is no repetition behind it to ask about.
+            self.error(
+                where,
+                f"select from {kind.source!r}: that is a parameter, not a repeated field",
+            )
+            return
+        if source.repeat is None:
+            self.error(
+                where,
+                f"select from {kind.source!r}: it is not repeated, so there is "
+                "nothing to select from",
+            )
+            return
+        # `where` and `value` see the element, under the repetition's own name,
+        # exactly as an `until` does. `default` does not: nothing matched, so
+        # there is no element for it to mean.
+        self._expect(
+            kind.where, ExprType.BOOL, unit, visible, where, "select where",
+            element_of=kind.source,
+        )
+        projected = self._infer(
+            kind.value, unit, visible, where, "select value", element_of=kind.source
+        )
+        fallback = self._infer(kind.default, unit, visible, where, "select default")
+        if projected is not None and fallback is not None and projected is not fallback:
+            self.error(
+                where,
+                f"select value is {projected.value} but its default is "
+                f"{fallback.value}; they must agree, because either one can end up "
+                "being the field's value",
+            )
 
     def _check_unit_ref(self, unit: Unit, kind: UnitRef, visible: set[str], where: str) -> None:
         """Check that a unit reference resolves and its arguments match."""
@@ -630,8 +716,22 @@ class _Scope:
         if isinstance(kind, BytesType):
             return ExprType.BYTES
         if isinstance(kind, Computed):
-            scope = _Scope(self.checker, unit, self.visible)
-            return infer_type(kind.expr, scope, unparse(kind.expr))
+            # `None`, not the referrer's visible set. The ordering rule is
+            # about where the *reference* stands, and it was applied when the
+            # head of this path was looked up; re-applying it to the computed's
+            # own expression asks the wrong question, and asks it against the
+            # wrong unit whenever the path crossed into a nested one. Its own
+            # ordering was checked at its own declaration site by
+            # `_Checker._check_field`. Same argument as the `UnitRef` branch
+            # above, which states it for descending rather than for typing.
+            return infer_type(kind.expr, _Scope(self.checker, unit, None), unparse(kind.expr))
+        if isinstance(kind, Select):
+            # A select's type is its projection's, which is the whole reason
+            # aggregation went into the model: no new `ExprType` member, and a
+            # scalar any later field can reference. `value` is evaluated with
+            # the element bound, so typing it needs that binding too.
+            scope = _Scope(self.checker, unit, None, kind.source)
+            return infer_type(kind.value, scope, unparse(kind.value))
         raise self._fail(
             path,
             f"{item.name!r} is a switch; its type depends on the value dispatched on, "

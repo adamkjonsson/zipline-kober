@@ -44,6 +44,29 @@ HTTP_REQUEST = b"GET / HTTP/1.1\r\nHost: httpforever.com\r\nAccept: */*\r\n\r\n"
 #: The seed input each shipped example is fuzzed from.
 SEEDS: dict[str, bytes] = {"dns.yaml": DNS_QUERY, "http.yaml": HTTP_REQUEST}
 
+#: A chunked response and a counted one, for ``examples/http.yaml``.
+#:
+#: :data:`HTTP_REQUEST` reaches **neither** of that spec's framing arms — it has
+#: no framing header, so every variant of it takes the third path and the two
+#: that do the work are never entered. That is the same gap that let a wrong
+#: `chunked` comparison live through five stages: the corpus with 2000 real
+#: messages has no chunked message in it either. These are the seeds that reach
+#: the arms, and they exist for the reason :data:`DNS_RESPONSE` does.
+HTTP_CHUNKED = (
+    b"HTTP/1.1 200 OK\r\nServer: nginx\r\nTransfer-Encoding: chunked\r\n"
+    b"Connection: keep-alive\r\n\r\n1a\r\n" + b"x" * 0x1A + b"\r\n0\r\n\r\n"
+)
+
+HTTP_COUNTED = (
+    b"POST /api/v1/orders HTTP/1.1\r\nHost: api.example.com\r\n"
+    b"Content-Type: application/json\r\nContent-Length: 26\r\n\r\n"
+    b'{"id": 89163, "ok": false}'
+)
+
+#: Every framing arm the shipped example chooses between, so a sweep covers the
+#: choice and not only one side of it.
+HTTP_FRAMINGS: tuple[bytes, ...] = (HTTP_REQUEST, HTTP_CHUNKED, HTTP_COUNTED)
+
 #: A real DNS response, from `python-zipline-wire`'s ``dns_example.pcapng``.
 #: Its answer's owner name is ``c0 0c`` — the compression pointer of RFC 1035
 #: §4.1.4, and the reason `Pointer` exists. Inlined rather than read from the
@@ -145,3 +168,91 @@ def pointer_cases(seed: int) -> list[bytes]:
 
     """
     return variants(DNS_RESPONSE, seed)
+
+
+#: A spec whose body is framed by a ``select``, and its seed input.
+#:
+#: No shipped example uses one until ``examples/http.yaml`` is finished, and the
+#: construct's promises need fuzzing before then — so the spec lives here beside
+#: the mutators, for the same reason they do: both implementations have to be
+#: held to it, over the same inputs.
+#:
+#: Written to reach the parts that can plausibly break. The projection runs
+#: ``to_int`` over text off the wire, so a mutation makes it unevaluable; the
+#: predicate runs ``lower``, so a mutation makes it miss and take the default;
+#: and the result **sizes a later field**, so a select that returned the wrong
+#: number would show up as a claim on bytes rather than as a quiet wrong value.
+SELECT_SPEC = """
+name: select_probe
+version: "1.0"
+entry: message
+input: either
+units:
+  message:
+    fields:
+      - {name: count, type: {int: {bits: 8}}}
+      - {name: items, type: {unit: item}, repeat: {count: "count"}}
+      - name: size
+        type:
+          select:
+            from: items
+            where: "lower(items.key) == 'length'"
+            value: "to_int(items.value)"
+            default: "0"
+      - name: present
+        type:
+          select:
+            from: items
+            where: "lower(items.key) == 'length'"
+            value: "true"
+            default: "false"
+      - {name: payload, type: {bytes: {size: {expr: "size"}}}}
+      - {name: rest, type: {bytes: {size: {remaining: true}}}}
+  item:
+    fields:
+      - {name: klen, type: {int: {bits: 8}}}
+      - {name: key, type: {string: {size: {expr: "klen"}}}}
+      - {name: vlen, type: {int: {bits: 8}}}
+      - {name: value, type: {string: {size: {expr: "vlen"}}}}
+"""
+
+
+def _item(key: bytes, value: bytes) -> bytes:
+    """Encode one length-prefixed key/value pair for :data:`SELECT_MESSAGE`."""
+    return bytes([len(key)]) + key + bytes([len(value)]) + value
+
+
+#: One well-formed message for :data:`SELECT_SPEC`: two items, the second of
+#: which the select matches, and a four-byte body it frames.
+SELECT_MESSAGE = (
+    bytes([2]) + _item(b"Host", b"example") + _item(b"Length", b"4") + b"body" + b"tail"
+)
+
+
+def select_cases(seed: int) -> list[bytes]:
+    """Build one batch of variants of the select-framed message.
+
+    Args:
+        seed: Which batch.
+
+    Returns:
+        The batch.
+
+    """
+    return variants(SELECT_MESSAGE, seed)
+
+
+def framing_cases(seed: int) -> list[bytes]:
+    """Build one batch of variants across every HTTP framing arm.
+
+    Args:
+        seed: Which batch.
+
+    Returns:
+        The batch, the three seeds' variants interleaved in a fixed order.
+
+    """
+    out: list[bytes] = []
+    for index, base in enumerate(HTTP_FRAMINGS):
+        out.extend(variants(base, seed * len(HTTP_FRAMINGS) + index, rounds=ROUNDS))
+    return out

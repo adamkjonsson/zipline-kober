@@ -11,8 +11,9 @@ public API, and the arguments behind them. **Claims marked [verified] were
 executed, not reasoned about.**
 
 It is revised rather than patched, and each revision says what changed and why.
-Two are worth knowing about, because both corrected the document rather than
-extending it:
+The ones worth knowing about are the ones that **corrected** the document
+rather than extending it, and there are more of those than is comfortable —
+which is the point of keeping them:
 
 - **Revision 5** rewrote §2's central argument. It had justified the
   declarative spec model with "if specs could run code they could swallow
@@ -27,6 +28,17 @@ extending it:
   program rather than of the language. The restatement is the argument for why
   that is still defensible, and it rests on the comparison rather than on
   assertion.
+- **Revision 8** adds `Pointer` and the first expression functions, and
+  corrects §13.2's diagnosis, which had been wrong for four revisions: text
+  arithmetic was never what stopped HTTP framing its body. §2.1 admits a
+  *second* cursor, and §2 gives up "leaves tile the input" — a pointed-at
+  region is cited twice.
+- **Revision 9** adds `Select`, closes §13.2 and answers §11 question 6. It
+  corrects §13.2 **again**, in the other direction: the revision-8 diagnosis
+  was right and was believed *complete* too early, because every measurement
+  agreed with it and every measurement ran the framing arm that worked. Both
+  wrong readings are kept side by side, which is the most useful thing in that
+  section.
 
 Sections most worth reading before changing code: §2.1 (the cursor rule), §4.1
 (field naming and its stopgap), §5 (seams), §9.2, §13 and §14.
@@ -53,11 +65,17 @@ is the part that would otherwise vanish. Two examples:
   replaced it. It also predicted a fast path with a careful fallback for exact
   truncation, which turned out to be unnecessary — a per-field bounds check
   against a known offset costs nothing measurable.
+- The repetition phase stated four facts about its own corpus and got all four
+  wrong, including "no run holds more than one message" — every run of the
+  capture it was about holds fifty. Every design leaning in that plan survived;
+  what did not survive was the measurement. The plan is corrected in place with
+  the numbers and the method that produced them, because the pattern is the
+  useful part: **the wrong things were the facts, not the judgements.**
 
 ## Upstream issues — what is blocked on the format
 
 `kober` is a load test of `zpf`, and a gap upstream is treated as a finding
-rather than something to route around. Five have been filed:
+rather than something to route around. Six have been filed against the format:
 
 | Issue | What | State |
 | --- | --- | --- |
@@ -72,6 +90,21 @@ rather than something to route around. Five have been filed:
 per-record label, which is why the field path is formatted in exactly one
 place.
 
+The same rule applies to the **test tooling**, which is upstream in the same
+sense: a gap in what an adversary can generate is a gap in what this project
+can be sure of. Three are filed against
+[`packeteer`](https://github.com/adamkjonsson/packeteer):
+
+| Issue | What | Why it matters here |
+| --- | --- | --- |
+| [#81](https://github.com/adamkjonsson/packeteer/issues/81) | `encode_http_message` adds `Content-Length` beside `Transfer-Encoding`, counting the *encoded* body | A chunked message cannot be hand-built through it, and the result is the RFC 7230 §3.3.3 ambiguity |
+| [#82](https://github.com/adamkjonsson/packeteer/issues/82) | `--payload http` cannot generate a chunked response | The framing arm the real captures also cannot reach — see `docs/dev/testing.md` |
+| [#83](https://github.com/adamkjonsson/packeteer/issues/83) | TCP anomalies are ignored with `--payload http` | Impaired *HTTP* streams have to come from fuzzing a real capture instead |
+
+#82 is the one with a bug behind it rather than an inconvenience: the chunked
+path had one message of real traffic in reach, and a decoder that read every
+chunked response wrong shipped for a whole phase behind that.
+
 ## Commit messages
 
 Longer than usual here, and deliberately. Where a change corrected an earlier
@@ -83,13 +116,35 @@ is the record of what was tried and rejected, which neither the code nor
 
 ## What is *not* written down
 
-The open questions, deliberately. `DESIGN.md` §11 carries four, and they are
-questions rather than decisions:
+The open questions, deliberately. `DESIGN.md` §11 carries six, of which **three
+are still open** — they are questions rather than decisions, and writing a
+decision down before it is one is how a document starts lying:
 
 1. Which stream shape a spec may assume, and whether a framing adapter belongs
    in the model.
 2. *(Closed — `Computed` stays.)*
 3. Whether to import `.ksy`.
 4. When to follow `zpf` 0.3, which will break.
-5. How far the spec language goes before it becomes a program — where the
-   `Pointer` construct and the missing string builtins both land.
+5. How far the spec language goes before it becomes a program. The one that has
+   moved most: `Pointer`, a closed table of three functions, and `Select` have
+   all landed on the near side, each closing a real gap by making the
+   *declarative* language say more. Hooks stay on the far side, and now have a
+   concrete case waiting for them — byte transforms, which no closed table can
+   hold.
+6. *(Closed — `Select` answers it.)*
+
+## What is owed, and is not a question
+
+Two things are decided in outline and simply not built, which is a different
+state from either of the above and worth not confusing with them:
+
+- **Byte transforms** — decompression and decryption. The shape is settled in
+  §11.5: the spec *names* a transform and a registry supplies it, so the spec
+  file stays data and `check` stays static. `examples/http.yaml` has a
+  `Content-Encoding: gzip` body it deliberately leaves opaque, and
+  `http_gzip.pcap` is the fixture kept for it.
+- **`Transfer-Encoding: gzip, chunked`**, which is legal HTTP and which
+  `examples/http.yaml` does not recognise, because saying "ends with chunked"
+  needs a function the language does not have. It reads as *unframed* rather
+  than mis-framed, which is the safe direction, and the spec says so where a
+  reader meets it.

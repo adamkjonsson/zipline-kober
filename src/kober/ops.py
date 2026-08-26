@@ -46,6 +46,7 @@ from kober.spec import (
     FromExpr,
     IntType,
     Pointer,
+    Select,
     StringType,
     Switch,
     Terminated,
@@ -107,13 +108,22 @@ class ValueType:
             spells it.
         size: How far a ``TEXT`` or ``BYTES`` value extends.
         args: Arguments bound to an ``OBJECT``'s parameters, positionally.
-        expr: The expression a computed value comes from. It reads nothing, so
-            it is the one kind whose value is not on the wire at all.
+        expr: The expression a computed value comes from, or a select's
+            projection. It reads nothing, so these are the kinds whose value is
+            not on the wire at all.
         at: Where to read this, for a back-reference — an integer expression
             in the **message's** offset space, per ``DESIGN.md`` §3.2. ``None``
             means the ordinary case: read it where the position stands. A
             value with an ``at`` never advances the position, so ``consumes``
             is always false alongside it.
+        source: Name of the repeated field a select asks about, as the spec
+            spells it. It is what tells a select from a computed: both carry an
+            ``expr``, and only a select has a repetition behind it.
+        where: A select's predicate over one element. The **first** element it
+            holds for is the one ``expr`` projects.
+        default: A select's value when no element matched. Never ``None``
+            alongside a ``source``, which is what makes the construct total —
+            a backend has no "nothing matched" case to invent an answer for.
         consumes: Whether reading this provably advances the read position.
             What lets a backend drop the runtime check that a repetition is
             making progress — see :func:`consumes`.
@@ -131,6 +141,9 @@ class ValueType:
     args: tuple[Expr, ...] = ()
     expr: Expr | None = None
     at: Expr | None = None
+    source: str | None = None
+    where: Expr | None = None
+    default: Expr | None = None
     consumes: bool = False
 
 
@@ -599,9 +612,19 @@ def _unit_exprs(spec: Spec, unit: Unit) -> Iterator[Expr]:
 
 
 def _kind_exprs(kind: FieldType) -> Iterator[Expr]:
-    """Yield the expressions one field type evaluates."""
+    """Yield the expressions one field type evaluates.
+
+    **All of a select's three**, which is easy to get wrong and expensive to:
+    :func:`_outer` reads this walk to decide which ``parent`` and ``root``
+    values a unit needs threaded in, so a select naming one in a predicate it
+    does not yield would compile to a function missing the argument.
+    """
     if isinstance(kind, Computed):
         yield kind.expr
+    elif isinstance(kind, Select):
+        yield kind.where
+        yield kind.value
+        yield kind.default
     elif isinstance(kind, Pointer):
         yield kind.at
         yield from _kind_exprs(kind.type)
@@ -742,6 +765,8 @@ def _value(spec: Spec, unit: str, index: int, kind: FieldType) -> ValueType:
         return ValueType(kind=KINDS[inferred], expr=kind.expr)
     if isinstance(kind, Pointer):
         return _pointer(spec, unit, index, kind)
+    if isinstance(kind, Select):
+        return _select(spec, unit, index, kind)
     msg = f"unsupported field type {type(kind).__name__} in unit {unit!r}"
     raise TypeError(msg)
 
@@ -779,6 +804,41 @@ def _pointer(spec: Spec, unit: str, index: int, kind: Pointer) -> ValueType:
         )
         raise CompileError(msg)
     return replace(_value(spec, unit, index, kind.type), at=kind.at, consumes=False)
+
+
+def _select(spec: Spec, unit: str, index: int, kind: Select) -> ValueType:
+    """Describe a select: which repetition, which element, and what to take.
+
+    Said in the spec's own words — a field name, a predicate, a projection, a
+    default — and in no language in particular. Rendering the walk is the
+    backend's business, and there is nothing here for it to guess at: the
+    default is required, so "nothing matched" has an answer already.
+
+    The kind is the projection's, typed the way :class:`~kober.spec.Computed`'s
+    is and against the same scope the checker used to accept it — with the
+    element bound, since that is what the projection reads. ``consumes`` is
+    false: the repetition is decoded before this runs, so there is nothing left
+    to read and no position to move.
+
+    Args:
+        spec: The spec being planned.
+        unit: The unit the select is written in.
+        index: The field's position, for scoping.
+        kind: The select.
+
+    Returns:
+        The value type, with ``source``, ``where``, ``expr`` and ``default``.
+
+    """
+    scope = scope_at(spec, unit, index, element_of=kind.source)
+    inferred = infer_type(kind.value, scope, unparse(kind.value))
+    return ValueType(
+        kind=KINDS[inferred],
+        source=kind.source,
+        where=kind.where,
+        expr=kind.value,
+        default=kind.default,
+    )
 
 
 def _size_consumes(size: SizeSpec) -> bool:

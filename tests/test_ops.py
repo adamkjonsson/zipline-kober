@@ -357,3 +357,100 @@ units:
     assert check(spec) == ()
     with pytest.raises(CompileError, match="switch under a pointer"):
         Plan.from_spec(spec)
+
+
+def test_a_plan_carries_a_terminators_bound():
+    """The plan hands a backend the spec's own size object, bound included.
+
+    Dropping it would not make a compiled decoder fail — it would make it
+    *disagree*, reading past a boundary the interpreter stopped at.
+    """
+    spec = Spec.from_yaml(
+        """
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - name: n
+        type:
+          string:
+            size: {terminated: {delimiter: ":", within: "\\r\\n", required: false}}
+"""
+    )
+    size = Plan.from_spec(spec).object("message").fields[0].types[0].size
+    assert size.delimiter == b":"
+    assert size.within == b"\r\n"
+
+
+# --- select ----------------------------------------------------------------
+
+
+SELECT_YAML = """
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: want, type: {int: {bits: 8}}}
+      - {name: inner, type: {unit: inner}}
+  inner:
+    fields:
+      - {name: c, type: {int: {bits: 8}}}
+      - {name: items, type: {unit: item}, repeat: {count: "c"}}
+      - name: picked
+        type:
+          select:
+            from: items
+            where: "items.tag == root.want"
+            value: "items.tag * 2"
+            default: "0"
+  item:
+    fields:
+      - {name: tag, type: {int: {bits: 8}}}
+"""
+
+
+def select_plan() -> Plan:
+    return Plan.from_spec(Spec.from_yaml(SELECT_YAML))
+
+
+def test_a_select_is_described_in_the_specs_own_words():
+    """A repetition, a predicate, a projection, a default — and no Python."""
+    value = select_plan().object("inner").fields[2].types[0]
+    assert value.source == "items"
+    assert unparse(value.where) == "items.tag == root.want"
+    assert unparse(value.expr) == "items.tag * 2"
+    assert unparse(value.default) == "0"
+
+
+def test_a_selects_kind_is_its_projections():
+    """No new kind: the whole reason aggregation went into the model."""
+    assert select_plan().object("inner").fields[2].types[0].kind is Kind.INT
+
+
+def test_a_select_never_advances_the_position():
+    value = select_plan().object("inner").fields[2].types[0]
+    assert value.consumes is False
+
+
+def test_a_select_threads_the_root_value_its_predicate_names():
+    """The walk Q6 warned about, and the one that was in fact wrong.
+
+    `_outer` reads `_unit_exprs`, which reads `_kind_exprs`. A select yielding
+    none of its three expressions leaves `needs_root` empty, and the generated
+    decoder then calls a function without the argument it declares.
+    """
+    plan = select_plan()
+    assert plan.object("inner").needs_root == ("want",)
+    assert plan.object("message").needs_root == ("want",)
+
+
+def test_a_select_names_no_unit():
+    """It decodes nothing, so it adds nothing to what a spec reaches."""
+    from kober.ops import _referenced
+
+    value = Spec.from_yaml(SELECT_YAML).unit("inner").field("picked").type
+    assert list(_referenced(value)) == []

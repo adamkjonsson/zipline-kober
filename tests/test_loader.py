@@ -24,6 +24,7 @@ from kober.spec import (
     IntType,
     Pointer,
     Remaining,
+    Select,
     Spec,
     StringType,
     Switch,
@@ -526,3 +527,107 @@ def test_pointer_rejects_an_unknown_key():
 def test_pointer_errors_carry_a_path():
     with pytest.raises(SpecError, match=r"units\.message\.fields\[0\]\.type\.pointer\.at"):
         sole_field({"name": "t", "type": {"pointer": {"at": "??", "type": {"int": {"bits": 8}}}}})
+
+
+# --- select ----------------------------------------------------------------
+
+
+SELECT_BODY = {
+    "from": "headers",
+    "where": "lower(headers.name) == 'content-length'",
+    "value": "to_int(headers.value)",
+    "default": "-1",
+}
+
+
+def test_select_loads():
+    field = sole_field({"name": "length", "type": {"select": dict(SELECT_BODY)}})
+    assert isinstance(field.type, Select)
+    assert field.type.source == "headers"
+    assert unparse(field.type.where) == "lower(headers.name) == 'content-length'"
+    assert unparse(field.type.value) == "to_int(headers.value)"
+    assert unparse(field.type.default) == "-1"
+
+
+@pytest.mark.parametrize("missing", ["from", "where", "value", "default"])
+def test_select_requires_all_four_keys(missing: str):
+    """`default` included: totality is what makes the construct total."""
+    body = dict(SELECT_BODY)
+    del body[missing]
+    with pytest.raises(SpecError, match=f"missing required key\\(s\\) '{missing}'"):
+        sole_field({"name": "length", "type": {"select": body}})
+
+
+def test_select_names_every_missing_key_at_once():
+    """An author writing a new construct wants the whole shape, not one key a run."""
+    with pytest.raises(SpecError, match="'default', 'value'"):
+        sole_field({"name": "length", "type": {"select": {"from": "h", "where": "true"}}})
+
+
+def test_select_rejects_an_unknown_key():
+    """A misspelled key must not load and quietly do nothing."""
+    with pytest.raises(SpecError, match="otherwise"):
+        sole_field(
+            {"name": "length", "type": {"select": {**SELECT_BODY, "otherwise": "0"}}}
+        )
+
+
+def test_select_errors_carry_a_path():
+    body = {**SELECT_BODY, "where": "??"}
+    with pytest.raises(SpecError, match=r"fields\[0\]\.type\.select\.where"):
+        sole_field({"name": "length", "type": {"select": body}})
+
+
+def test_select_from_must_be_text():
+    body = {**SELECT_BODY, "from": 3}
+    with pytest.raises(SpecError, match=r"select\.from"):
+        sole_field({"name": "length", "type": {"select": body}})
+
+
+def test_terminated_loads_a_bound():
+    field = sole_field(
+        {
+            "name": "n",
+            "type": {
+                "string": {
+                    "size": {"terminated": {"delimiter": ":", "within": "\r\n"}}
+                }
+            },
+        }
+    )
+    assert field.type.size.delimiter == b":"
+    assert field.type.size.within == b"\r\n"
+
+
+def test_terminated_has_no_bound_by_default():
+    field = sole_field(
+        {"name": "n", "type": {"string": {"size": {"terminated": {"delimiter": ":"}}}}}
+    )
+    assert field.type.size.within is None
+
+
+def test_a_bound_accepts_byte_values_like_a_delimiter():
+    field = sole_field(
+        {
+            "name": "n",
+            "type": {
+                "string": {
+                    "size": {"terminated": {"delimiter": [58], "within": [13, 10]}}
+                }
+            },
+        }
+    )
+    assert field.type.size.within == b"\r\n"
+
+
+def test_an_empty_bound_is_refused():
+    """Omitting it means "the whole run"; writing nothing means a mistake."""
+    with pytest.raises(SpecError, match="bound must not be empty"):
+        sole_field(
+            {
+                "name": "n",
+                "type": {
+                    "string": {"size": {"terminated": {"delimiter": ":", "within": ""}}}
+                },
+            }
+        )

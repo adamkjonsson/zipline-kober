@@ -16,7 +16,7 @@ ignored, because a misspelled key that loads and does nothing is a decoder
 silently doing the wrong thing. Errors carry a path:
 
 ```
-spec.units.message.fields[0].type: unknown key(s) 'enum'; allowed here: int, bytes, string, unit, switch, computed
+spec.units.message.fields[0].type: unknown kind 'enum'; expected one of: bytes, computed, int, pointer, select, string, switch, unit
 ```
 
 Two complete specs ship with the project and are exercised by the test suite,
