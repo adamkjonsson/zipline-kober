@@ -51,7 +51,7 @@ an impossibility that generated code ends. The cursor rule is now a property of
 one program rather than of the language, and what makes that defensible is that
 the two implementations are compared on every input the suite can produce. Which
 also produced the revision's other content: five bugs, four of them in the
-interpreter or in code both share.
+interpreter or in code both share — since joined by a sixth, in revision 9.
 
 Revision 8 closes the two things §13 left open, or tries to. `Pointer` (§3.2)
 is built, in both implementations, and §13.1 is closed: a whole DNS message
@@ -66,6 +66,36 @@ are stated: §2 gives up "leaves tile the input", since a pointed-at region is
 cited twice, and §2.1 admits a second cursor. The pattern from revision 7 held
 again — the guarantee stays, the impossibility does not, and what replaces it
 is a bound the runtime applies rather than a promise the spec makes.
+
+Revision 9 closes the last of §13 and answers §11 question 6. `Select` (§3.2)
+lets a spec ask a question about a **repeated** field, and `within` lets a
+delimited read stop at one boundary without running past another — between them
+`examples/http.yaml` chooses its framing instead of assuming it, and the
+capture that had never been run decodes 2000 messages with no undecoded region
+where it used to leave 405 421 of its 414 460 bytes `undecodable`.
+
+The revision's real content is the same shape as revision 8's, one level in.
+Aggregation went into the **model** rather than into the expression language,
+which is the third real gap closed by making the declarative language say more
+— and §11 question 5's line moves accordingly, with hooks weaker still.
+
+Two corrections, both kept visible because a tidy document would be worth less:
+
+- **§13.2's diagnosis was wrong a second time**, in the other direction. The
+  fix looked complete because every measurement agreed with it, and every
+  measurement was taken on the arm that worked. The corpus holds exactly one
+  chunked message against 1151 counted ones, and a `trim` missing from §3.3's
+  table made the spec read that one as unframed for the whole phase.
+- **A byte count is not a criterion**, which this is the proof of: the wrong
+  decode accounted for every byte, because a message that stops early leaves
+  its tail to the driver and the driver's records cite it. Coverage whole,
+  conformance clean, decode nonsense. What answers it is asserting the shape.
+
+And §2.1 gains the general form of that lesson. A select that *consumed* input
+passes every coverage-shaped invariant the suite has — the byte it took would
+simply be covered by whatever followed — so the rule it is supposed to obey is
+asserted directly and each assertion is checked against an implementation that
+breaks it.
 
 Claims below marked **[verified]** were executed, not reasoned about: against
 `zpf` 0.16 by the script in §10, and against real captures as recorded in §13.
@@ -210,10 +240,10 @@ regions. A generator that emitted a position error would have to make the
 interpreter make the same one, and the interpreter still cannot.
 
 The evidence that this is not wishful is which way the disagreements have gone.
-Four of the five bugs the comparison has found were in the **interpreter** or in
+Four of the six bugs the comparison has found were in the **interpreter** or in
 code both share — two places a partial decode was discarded, a `switch` case
-that wrote no record, a computed value that raised out of the emitter — and one
-was in the compiler. The cursor rule survives as a claim about a *pair* of
+that wrote no record, a computed value that raised out of the emitter — and two
+were in the compiler. The cursor rule survives as a claim about a *pair* of
 implementations that agree, which is a different and more testable thing than a
 claim about one.
 
@@ -255,6 +285,41 @@ region decoded in place and reached again by reference is cited twice. Nothing
 about *coverage* weakens — every byte is still cited or named, and never both —
 and the compiled implementation agrees with the interpreter on all of it,
 including which bytes a pointer cites and where a failed one stopped.
+
+#### Where `Select` sits, and why it is the easy case — revision 9
+
+`Select` (§3.2) is the second construct to reach values it did not read where it
+stands, and unlike `Pointer` it needs no argument at all: it reads **nothing**.
+The repetition is decoded before it runs, so there is no position to move and
+no byte to claim. It is value computation, which the table above puts on the
+unconstrained side, and it is on that side for the same reason `Computed` is.
+
+**Totality** is the one thing worth stating rather than assuming, because a
+construct with a loop in it invites the question. Every element is visited at
+most once and a decoded repetition is finite, so a select terminates on any
+input. It cannot be made to spin, and `default` being required means it cannot
+be made to have no answer either.
+
+Two consequences follow, and both are enforced rather than hoped for:
+
+1. **A repetition of selects cannot terminate**, exactly as a repetition of
+   pointers cannot, and for the same reason: neither advances the position. The
+   runtime's progress check is what says so, in both implementations.
+2. **The checker's exemption reaches two expressions and no further.** A
+   repeated field may be named inside a select's `where` and `value`, where it
+   means one element, and nowhere else — not in its `default`, which matched
+   nothing and so has no element to mean. The language still has no list type
+   and gains none: nothing anywhere can hold a list, pass one, or return one.
+
+**The claim that a select moves nothing is asserted directly, and it has to
+be.** No coverage-shaped invariant can catch a select that consumed a byte —
+the byte it took would simply be covered by whatever followed, leaving coverage
+whole and conformance clean. A deliberately consuming implementation was run
+against the whole invariant set and passed every one of them. So both
+implementations compare the position either side of a select and require it
+unchanged, and each check is verified against the consuming version. This is
+the general lesson of §2.1 arriving again: what makes a rule defensible is the
+check, and a check has to be aimed at the rule rather than near it.
 
 ## 3. Spec model
 
@@ -326,7 +391,9 @@ honest `undecodable` region instead of a fabricated field tree.
 ### 3.2 Field types
 
 ```python
-FieldType = IntType | BytesType | StringType | UnitRef | Switch | Computed
+FieldType = (
+    IntType | BytesType | StringType | UnitRef | Switch | Computed | Pointer | Select
+)
 
 
 @dataclass(frozen=True)
@@ -418,15 +485,84 @@ regions and none of them raise. A short read *inside* a target is converted to
 `undecodable` rather than propagated as `truncated`, because `truncated` is
 hole-class (§5) and would claim the stream had a gap it did not have.
 
-`Terminated(delimiter, consume, required)` and `Remaining()` both need a
-truncation answer: in `STREAM` shape, a missing terminator at the end of the
+#### `Select` — asking a question about a repetition, revision 9
+
+```python
+@dataclass(frozen=True)
+class Select:
+    source: str      # a repeated field, declared earlier in this unit
+    where: Expr      # a predicate over one element
+    value: Expr      # the projection of the first element it holds for
+    default: Expr    # what to say when nothing matched — required
+```
+
+The construct §11 question 6 asked for, and the one that lets a message frame
+its own body. Before it, `headers` was a repetition and the checker refused
+every reference to one, so nothing could ask whether *any* header said
+`chunked` — and `examples/http.yaml` had to assume a framing and call every
+other body `truncated` (§13.2).
+
+**Aggregation went into the model rather than into the grammar**, which is the
+choice §11.5 keeps making and the reason to state it again. The obvious answer
+was an expression form — `any(headers, …)`, `first(headers, …)` — and it costs
+more than it looks:
+
+- **A select needs no new expression type.** Its result is a scalar whose type
+  is its projection's, so `check` types it with machinery that already existed
+  and a later field references it like any other value. `first(headers, …)`
+  returning an *element* has nowhere to go: `ExprType` has four members and
+  none of them is "an instance of a unit".
+- **The binding stays inside one construct.** `where` and `value` see the
+  element and `default` does not, which `check` knows structurally. An
+  expression form would put a binding into the general grammar — a lambda in
+  everything but name, in a language whose case for being small is that it is
+  cheap to check and portable to a non-Python reader.
+- **Totality is structural.** `default` is a required key, so "nothing matched"
+  has an answer the author wrote. There is no partial function to argue about
+  and no case a backend must invent a value for.
+
+**A keyed repeat was considered and refused** — `repeat: {key: "lower(name)"}`,
+then `headers["content-length"]`. It reads beautifully for headers and badly
+for everything else, it introduces a map type *and* an indexing syntax, and it
+has no answer for duplicate keys, which HTTP has (`Set-Cookie`).
+
+The element binds under **the repetition's own name**, which is not merely
+consistent with `until` but is `until`'s mechanism: the checker already had
+`element_of`, and the decode loop already wrote the element under that name
+before evaluating a repeat clause. Neither half needed a concept it lacked.
+
+It cites **the element it selected**, not the whole repetition — this value came
+from *that* header, and citing every element would be the weaker claim. A
+default matched nothing, so it cites nothing: zero width, on the path
+`Computed` already exercised.
+
+An expression in `where` or `value` that cannot be evaluated makes the field
+`undecodable`, on the same path an unevaluable size takes. It is deliberately
+**not** treated as "no match", which would report the author's default as
+though it had been read off the wire.
+
+`Terminated(delimiter, consume, required, within)` and `Remaining()` both need
+a truncation answer: in `STREAM` shape, a missing terminator at the end of the
 available data means *truncated*, which may simply mean the message continues
 in a segment we don't have. That is a normal outcome, not an error.
+
+**`within` bounds the search**, and it is what lets one line split into two
+fields. Reading a header's name as "up to the next colon" without a bound runs
+into the *next* header, or past the end of the headers entirely, on any line
+that has no colon in it. The rule is **whichever comes first**: a delimiter
+beginning after the bound reads as though it were absent, and `required` still
+decides what that means. The bound is a limit on the search and never a second
+terminator — letting the value run to it would be reading under a delimiter
+that was never found, which is the class of quiet guess §2 exists to refuse.
+
+The blank line ending a header block falls out of that with no special case: it
+has no colon before its CRLF, so an optional bounded terminator takes nothing
+and both halves come back empty.
 
 ### 3.3 Expressions
 
 Small, total, side-effect free: arithmetic, comparison, boolean ops, field
-references, literals, and **calls to a closed table of two functions**. No
+references, literals, and **calls to a closed table of three functions**. No
 loops, and nothing an author can add to. Authored as strings
 (`size: "header.length * 4"`), parsed to an AST at load time so `check` can
 type them and scope them against the spec before any data exists.
@@ -443,15 +579,17 @@ dangerous. Growing it is §11 question 5, and the parser is built from a
 whitelist precisely so that growing it is a list change.
 
 **Real HTTP is the first thing that needed it grown** (§13.2), and it is what
-the two functions are for. HTTP frames its body from a header **value**:
+these functions are for. HTTP frames its body from a header **value**:
 `Content-Length` is a decimal string, a chunk size is a hexadecimal one, and
-whether chunked framing applies depends on matching a header
-case-insensitively. Those three needs are the table:
+whether chunked framing applies depends on matching a header value whose case
+varies and which carries whatever whitespace followed the colon. Those needs
+are the table:
 
 | Call | Result |
 | --- | --- |
 | `to_int(s)`, `to_int(s, base)` | int |
 | `lower(s)` | str |
+| `trim(s)` | str |
 
 `to_int` is deliberately stricter than a typical library conversion: leading
 and trailing whitespace is allowed, because an HTTP field value carries
@@ -460,6 +598,17 @@ Reading `1_0` as ten would turn a malformed wire length into a plausible one.
 Text that is not a number makes the field `undecodable` on the path a size
 expression that cannot be evaluated already takes — **partial at the value
 level, total at the decode level**.
+
+**`trim` is the third row, and it was added late for a reason worth keeping.**
+Revision 8 argued that `to_int`'s whitespace allowance was what "saves the
+language a fourth function". That was true only of *conversion*. The moment a
+field value is **compared** — `== 'chunked'` — nothing strips the space the
+sender was entitled to put there, and the comparison quietly answers false.
+This project shipped exactly that bug: `examples/http.yaml` read every real
+chunked response as unframed while accounting for every byte, and it survived
+five stages of measurement because the corpus holds one chunked message against
+1151 counted ones. The table is closed, not finished, and the thing that reopens
+it is a use the previous entry did not have in view.
 
 **What admitting calls did not open.** The whitelist never bought "no
 functions"; it bought no author-supplied code and no unbounded work, and a
@@ -881,11 +1030,27 @@ Q5 a per-field record can carry its name — via `comment=`, with §4.1's caveat
    is the property that would have been lost by letting a caller register one:
    a spec would be valid in one process and invalid in another.
 
-   On the near side, and still owed: **speaking about a repetition** (§11.6).
-   That is more declarative language, not less, and it is what §13.2 turns out
-   to need.
+   On the near side, and taken since — revision 9: **speaking about a
+   repetition** (§11.6), which §13.2 turned out to need. It landed as a *field
+   type* rather than as an expression form, which moves the line in a direction
+   worth being precise about: the declarative model grew, and the expression
+   language did not. `check` still types every expression before any data
+   exists; a select is one more construct with a total, declared failure
+   behaviour, which is exactly what §2.1's first bullet asks of the vocabulary.
 
-   On the far side, and still deferred: **hooks**. But their concrete case has
+   That this was the third real gap closed by *making the declarative language
+   say more* — after `Pointer` and after the builtins — is the strongest
+   evidence the question has accumulated. Three concrete needs arrived from
+   real captures and none of them wanted a hook. The language was under-built;
+   the approach was not wrong.
+
+   The one qualification is honest and small: the closed table did have to grow
+   again, and late (`trim`, §3.3). That is not a hook and not a wedge — an
+   author still cannot add to it, `check` still answers statically — but it is
+   a reminder that "closed" describes who may extend the table, not that the
+   table is finished.
+
+   On the far side, and still deferred: **hooks**. Their concrete case has
    arrived after all, and it is not the one this question expected. Byte
    transforms — decompression, decryption — cannot come from a closed table,
    because nobody can ship every proprietary codec. What they want is the shape
@@ -903,12 +1068,13 @@ Q5 a per-field record can carry its name — via `comment=`, with §4.1's caveat
    Still on the far side and still refused: **specs are Python**. Nothing here
    moved it.
 
-6. **How does a spec say anything about a repeated field?** It cannot, and that
-   is what stops HTTP choosing its own framing (§13.2). `headers` is a repeat,
-   the checker refuses references to repeated fields because there is no list
-   type, and so no expression can ask whether *any* element said something.
+6. ~~**How does a spec say anything about a repeated field?**~~ **Closed:
+   `Select` (§3.2).** It could not, and that is what stopped HTTP choosing its
+   own framing (§13.2). `headers` is a repeat, the checker refuses references
+   to repeated fields because there is no list type, and so no expression could
+   ask whether *any* element said something.
 
-   Three shapes suggest themselves and none is obviously right: a total
+   Three shapes suggested themselves and none was obviously right: a total
    quantifier (`any(headers, lower(this.line) == 'transfer-encoding: chunked')`),
    a count, or naming an element by a key. All three widen the expression
    language in a way the two builtins did not — they need a binding form, and
@@ -916,6 +1082,23 @@ Q5 a per-field record can carry its name — via `comment=`, with §4.1's caveat
 
    It also has to stay total: whatever is added must terminate on any input and
    must not reach the cursor, or §2.1 has a new hole in it.
+
+   **The answer was none of the three, and the reason is the interesting part.**
+   All three are shapes for the *expression language*, and the construct went
+   into the **model** instead: a field type naming a repetition, a predicate, a
+   projection and a required default. That is what avoids the binding form the
+   question worried about — the binding lives inside one construct, where
+   `check` knows structurally where it applies — and it is why no new
+   `ExprType` member was needed. A select yields a scalar; the language it is
+   written in did not grow a list type and gains none.
+
+   `any` falls out of it (`value: "true"`, `default: "false"`) and got no
+   shorthand, because the finished spec never asks for one: HTTP wants to know
+   what a header *says*, not whether it is there.
+
+   Both totality conditions hold and are enforced rather than promised — see
+   §2.1's revision 9, which also says why the second one needed its own
+   assertion instead of the invariant set that could not see it.
 
 ## 12. Prior art
 
@@ -933,6 +1116,12 @@ the part that constrains the design.
 Both boundaries below are about **what the language can say**, and neither is
 about coverage. That distinction is the useful one: the guarantee §2 rests on
 survived contact with real traffic unchanged, while the vocabulary did not.
+
+**Both are closed as of revision 9**, by four constructs between them —
+`Pointer`, a table of three functions, `Select`, and a bounded terminator — and
+every one of those is the declarative language saying more rather than code
+being let in beside it. What did not survive unchanged is a habit of
+measurement, and §13.2 records why.
 
 ### 13.1 DNS name compression — closed
 
@@ -958,7 +1147,7 @@ Record data stays opaque bytes, which is a choice rather than a boundary: what
 is inside RDATA depends on the record type, and a switch over the type registry
 would be most of that file for none of the point.
 
-### 13.2 HTTP body framing — half closed, and the diagnosis was wrong
+### 13.2 HTTP body framing — closed, and the diagnosis was wrong twice
 
 `http_example.pcapng` carries `Transfer-Encoding: chunked` *and* a gzip body,
 so both of HTTP's framing mechanisms appear in one exchange.
@@ -979,20 +1168,61 @@ the second is larger than anything it named.
   *any* header said `chunked`. Even with a substring builtin, choosing between
   the two framings would still be unsayable.
 
-So the chunked half is closed and the choosing is not. `examples/http.yaml`
-frames a chunked body into its chunks with `to_int` on the hexadecimal size
-line, and **[verified]** decodes both messages of the capture with nothing left
-over, conformance and coverage clean at both granularities.
+Both of those are now closed, by `Select` and by `within` (§3.2), and
+`examples/http.yaml` chooses its framing rather than assuming it. The paragraph
+above stays because a diagnosis that was wrong for four revisions is worth more
+than a tidy section — and it was wrong a second time, in the other direction,
+which is the part below.
 
-It **assumes** chunked framing rather than choosing it, and the cost is stated
-in its own `doc:` and asserted in a test: a body that is not chunk-formatted
-comes back `truncated`, which is hole-class (§5) and claims a gap the stream
-did not have. That is the least comfortable thing this design currently ships,
-and it is written where a reader meets it rather than left to be discovered.
+**What closing it is worth, measured.** The capture this section was written
+against was never the hard one. Two that had never been run are:
 
-**What is actually owed here is a way to speak about a repetition** — an
-`any`/`count` over its elements, or naming one by a key. That is a language
-question of a different size from three builtins, and it is question 6 of §11.
+| | Before | After |
+| --- | --- | --- |
+| `http_stream_1.pcap` — 2000 messages, 40 runs | 309 records, **405 421 of 414 460 bytes `undecodable`** | 30 761 records, **no undecoded region at all** |
+| `http.pcap` — the 18 364-byte response | 294 bytes of headers, then **18 070 bytes `truncated`** | the whole body, read by its declared length |
+
+**[verified]** at both granularities, interpreted and compiled agreeing in every
+record, span and reason, and — the criterion that matters — every one of the
+2000 messages framed at the same boundary an independent RFC 7230 reader gives
+it, with 853 / 1147 framing counts matching exactly.
+
+The old failure is worth naming precisely, because it is the one this project
+cares most about: a body that was not chunk-formatted had no size line, so the
+read for one came back `truncated` — hole-class (§5), declaring a gap in a
+stream that had none. Two fifths of real messages have no framing header at
+all, so that was not an edge case.
+
+#### The second wrong diagnosis, and what it says about measuring
+
+The corrected diagnosis above named two things, and it named them right. What
+it got wrong was believing the fix was complete when the numbers agreed.
+
+`trim` (§3.3) was missing, so `lower(value) == 'chunked'` was false on every
+real chunked message — the value carries the whitespace RFC 7230 permits, and
+`to_int` strips that internally only for a *conversion*. The spec read chunked
+responses as unframed for five stages of this phase while every measurement
+agreed with it.
+
+Three things kept it hidden, and each is a lesson about evidence rather than
+about HTTP:
+
+- **The corpus cannot exercise the arm.** Across all sixteen captures and
+  everything the traffic generator produces there is exactly **one** chunked
+  message, against 1151 with a `Content-Length`. The arm with 1151 examples ran
+  constantly; the arm with one was checked by a count.
+- **A byte count is not a criterion.** The chunked response decoded 834 of its
+  2756 bytes; the driver then read the body as further HTTP messages, and those
+  cited every remaining byte. Zero undecoded regions, conformance clean,
+  coverage whole, decode nonsense.
+- **The prediction existed and was filed under the wrong option.** The phase's
+  own plan wrote *"the moment a header value is compared rather than converted,
+  the fourth function is back"* — as an argument against a design that was not
+  chosen. It was true of the one that was.
+
+What answers all three is asserting the **shape**: one message consuming its
+whole extent, its body in the parts it should have. That is what the tests do
+now, and it is the general form of §2's complaint about silence.
 
 ### 13.3 Gaps at scale — the design held
 
@@ -1153,7 +1383,7 @@ ends part-way through one. Such a spec is nearly always a fault already — the
 interpreter carries on mid-byte and then raises out of the decode at the next
 `bytes` field.
 
-And five bugs, four of them in the interpreter or in code both implementations
+And six bugs, four of them in the interpreter or in code both implementations
 share:
 
 - a nested unit that failed part-way was **discarded whole**, so the emitter
@@ -1163,8 +1393,12 @@ share:
 - a `switch` with both a unit case and an integer case wrote no record for the
   integer;
 - a computed value too wide for `prim:` raised `ValueError` out of the emitter;
-- and one in the compiler: a signed sub-byte field called a helper that was
-  never emitted.
+- and two in the compiler: a signed sub-byte field called a helper that was
+  never emitted, and — revision 9 — a `select` whose *extent* was the empty
+  range where it stood rather than the element it chose, which the interpreter
+  had right. A decoded element carries no offsets, so the backend has to keep
+  them as the repetition goes past; the differential is the only thing that
+  asks.
 
 None had a failing test. They were found by writing a second implementation and
 insisting the two agree, which is what §2.1's restatement now rests on.

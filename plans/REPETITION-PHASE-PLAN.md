@@ -1,6 +1,6 @@
 # Phase plan: speaking about repetitions
 
-**State: Stages 1-7 done, Stage 8 open.** Written after the language
+**State: complete. All eight stages done.** Written after the language
 phase landed ([`POINTER-PHASE-PLAN.md`](POINTER-PHASE-PLAN.md)), against
 `DESIGN.md` revision 8 and `zpf` 0.2.x.
 
@@ -925,7 +925,7 @@ rather than worked around here, per the testing rule in `CLAUDE.md`:
   also cannot exercise. Between them these two are why the chunked path has a
   hand-written seed rather than a capture behind it.
 
-### Stage 8 — documentation, and what has to be restated
+### Stage 8 — documentation, and what has to be restated — **done**
 
 - **§13.2 becomes closed**, and its correction from revision 8 stays visible:
   the record of a diagnosis that was wrong for four revisions is worth more
@@ -936,6 +936,48 @@ rather than worked around here, per the testing rule in `CLAUDE.md`:
 - **§3.3 or §3.2 gains the new construct**, and the format reference gains its
   key. `test_docs.py` fails if the second is forgotten.
 - **The totality argument** from Q5, stated once where §2.1 can point at it.
+
+**Done, as `DESIGN.md` revision 9**, and with one thing this list did not
+anticipate. §13.2 closes carrying **two** wrong diagnoses rather than one: the
+revision-8 correction stays, and beside it the record that the corrected
+diagnosis was also believed complete too early, because every measurement
+agreed with it and every measurement ran the arm that worked.
+
+- §3.2 gains `Select` and the bounded terminator, with the refutation of the
+  keyed-repeat alternative kept — it will occur to someone.
+- §3.3 gains `trim` and, more usefully, the reason a *closed* table reopened:
+  closed describes who may extend it, not that it is finished.
+- §2.1's revision 9 carries the totality argument, and the general lesson
+  behind it — that a check has to be aimed at a rule rather than near it.
+- §11 question 5's line moves for the third time, and in a direction worth
+  naming precisely: the declarative model grew, the expression language did
+  not. Question 6 is struck through and closed.
+- §13's own introduction now says both boundaries are shut, and §14.6's tally
+  goes from five bugs to six.
+
+## The phase, closed
+
+Every acceptance criterion is met, in the restated forms Stage 1 and Stage 6
+gave them. What the phase actually cost and found:
+
+| | |
+| --- | --- |
+| Constructs added | `select:`, `within:`, `trim()` |
+| Bugs found in existing code | 2 — the nested-`computed` checker bug, and an unwrapped record call |
+| Bugs found in this phase's own work | 2 — a compiled select's extent, and the `chunked` comparison |
+| Plan facts corrected | 4 — the message count, runs-per-message, Q3's builtin claim, and "coverage-clean" |
+| Tests added | ~70, across nine modules |
+
+**The two lessons worth carrying out of it** are both about evidence rather
+than about HTTP, and both are now written where the next person meets them
+(`docs/dev/testing.md`, §2.1, §13.2):
+
+1. **A seed is only worth the code it reaches.** The HTTP fuzz seed entered
+   neither framing arm, and the corpus holds one chunked message against 1151
+   counted ones.
+2. **A byte count is not a criterion.** A message that stops early leaves its
+   tail to the driver, whose records cite it — so coverage stays whole while
+   the decode is nonsense. Assert the shape.
 
 ## What this phase does not do
 

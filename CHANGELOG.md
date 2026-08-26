@@ -891,6 +891,21 @@ installed from a checkout (see the README).
 
 ### Documentation
 
+- **`DESIGN.md` revision 9.** §13.2 is **closed** — its wrong diagnosis kept
+  visible, and a second wrong one recorded beside it — and §11 question 6 is
+  answered by `Select`. §3.2 gains the construct and the bounded terminator,
+  §3.3 gains `trim` and the reason a closed table reopened, and §2.1 gains the
+  totality argument along with the general lesson behind it: a select that
+  consumed input passes every coverage-shaped invariant, so the rule it obeys
+  is asserted directly and each assertion is checked against an implementation
+  that breaks it.
+
+  §11 question 5's line moves once more. This was the third real gap closed by
+  making the declarative language say more rather than letting code in beside
+  it, and aggregation landed in the *model* rather than the expression
+  language — so the declarative vocabulary grew and the expression language did
+  not. Hooks stay deferred and are weaker still.
+
 - **`docs/dev/testing.md` gains two rules this phase paid for.** *A seed is
   only worth the code it reaches* — the HTTP fuzz seed had no framing header,
   so every variant took the third path and neither framing arm was ever
