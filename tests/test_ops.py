@@ -359,12 +359,11 @@ units:
         Plan.from_spec(spec)
 
 
-def test_a_bounded_terminator_is_refused_rather_than_dropped():
-    """The plan carries the spec's own size object straight to a backend.
+def test_a_plan_carries_a_terminators_bound():
+    """The plan hands a backend the spec's own size object, bound included.
 
-    So a bound no backend reads would go missing in silence, and the compiled
-    decoder would not fail — it would *disagree*, reading past a boundary the
-    interpreter stopped at. Refusing says so at compile time instead.
+    Dropping it would not make a compiled decoder fail — it would make it
+    *disagree*, reading past a boundary the interpreter stopped at.
     """
     spec = Spec.from_yaml(
         """
@@ -380,16 +379,78 @@ units:
             size: {terminated: {delimiter: ":", within: "\\r\\n", required: false}}
 """
     )
-    with pytest.raises(TypeError, match="bounded terminator is not yet compilable"):
-        Plan.from_spec(spec)
+    size = Plan.from_spec(spec).object("message").fields[0].types[0].size
+    assert size.delimiter == b":"
+    assert size.within == b"\r\n"
 
 
-def test_a_select_is_refused_by_the_compiler_for_now():
-    """Same reason, stated the same way: the interpreter has it, no backend does."""
-    import sys
+# --- select ----------------------------------------------------------------
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from fuzzing import SELECT_SPEC
 
-    with pytest.raises(TypeError, match="unsupported field type Select"):
-        Plan.from_spec(Spec.from_yaml(SELECT_SPEC))
+SELECT_YAML = """
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: want, type: {int: {bits: 8}}}
+      - {name: inner, type: {unit: inner}}
+  inner:
+    fields:
+      - {name: c, type: {int: {bits: 8}}}
+      - {name: items, type: {unit: item}, repeat: {count: "c"}}
+      - name: picked
+        type:
+          select:
+            from: items
+            where: "items.tag == root.want"
+            value: "items.tag * 2"
+            default: "0"
+  item:
+    fields:
+      - {name: tag, type: {int: {bits: 8}}}
+"""
+
+
+def select_plan() -> Plan:
+    return Plan.from_spec(Spec.from_yaml(SELECT_YAML))
+
+
+def test_a_select_is_described_in_the_specs_own_words():
+    """A repetition, a predicate, a projection, a default — and no Python."""
+    value = select_plan().object("inner").fields[2].types[0]
+    assert value.source == "items"
+    assert unparse(value.where) == "items.tag == root.want"
+    assert unparse(value.expr) == "items.tag * 2"
+    assert unparse(value.default) == "0"
+
+
+def test_a_selects_kind_is_its_projections():
+    """No new kind: the whole reason aggregation went into the model."""
+    assert select_plan().object("inner").fields[2].types[0].kind is Kind.INT
+
+
+def test_a_select_never_advances_the_position():
+    value = select_plan().object("inner").fields[2].types[0]
+    assert value.consumes is False
+
+
+def test_a_select_threads_the_root_value_its_predicate_names():
+    """The walk Q6 warned about, and the one that was in fact wrong.
+
+    `_outer` reads `_unit_exprs`, which reads `_kind_exprs`. A select yielding
+    none of its three expressions leaves `needs_root` empty, and the generated
+    decoder then calls a function without the argument it declares.
+    """
+    plan = select_plan()
+    assert plan.object("inner").needs_root == ("want",)
+    assert plan.object("message").needs_root == ("want",)
+
+
+def test_a_select_names_no_unit():
+    """It decodes nothing, so it adds nothing to what a spec reaches."""
+    from kober.ops import _referenced
+
+    value = Spec.from_yaml(SELECT_YAML).unit("inner").field("picked").type
+    assert list(_referenced(value)) == []

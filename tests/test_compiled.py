@@ -27,7 +27,16 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import zpf
-from fuzzing import DNS_RESPONSE, SEEDS, cases, pointer_cases, variants
+from fuzzing import (
+    DNS_RESPONSE,
+    SEEDS,
+    SELECT_MESSAGE,
+    SELECT_SPEC,
+    cases,
+    pointer_cases,
+    select_cases,
+    variants,
+)
 from zpf.blocks import UNDECODED_REASONS, Record, Undecoded
 
 from kober.cli import main
@@ -1417,3 +1426,163 @@ def test_the_shapes_the_backend_refuses_say_so(fragment: str, source: str):
     assert Decoder(spec) is not None
     with pytest.raises(CompileError, match=fragment):
         compiled(spec)
+
+
+# --- select ----------------------------------------------------------------
+#
+# The construct the compiler was written for second, which is where this
+# project's differential has found something every time.
+
+
+def select_spec() -> Spec:
+    return Spec.from_yaml(SELECT_SPEC)
+
+
+def test_a_select_decodes_the_same_both_ways():
+    compare(select_spec(), SELECT_MESSAGE)
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_a_select_writes_the_same_records(emit: Emit):
+    """Field granularity is where the citation is compared, and it is the point.
+
+    A select cites the element it chose, and a decoded element carries no
+    offsets — so the compiled side has to keep them as the repetition goes past.
+    Getting that wrong shows up here as a range and nowhere else.
+    """
+    writes(select_spec(), SELECT_MESSAGE, emit)
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_every_prefix_of_a_select_message_agrees(emit: Emit):
+    """Walks truncation across every field boundary, the repetition's included."""
+    spec = select_spec()
+    for length in range(len(SELECT_MESSAGE) + 1):
+        writes(spec, SELECT_MESSAGE[:length], emit)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_a_select_agrees_on_adversarial_input(seed: int, emit: Emit):
+    """Including a predicate that cannot be evaluated, which must fail alike."""
+    spec = select_spec()
+    for data in select_cases(seed):
+        writes(spec, data, emit)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_select_fails_at_the_same_offset(seed: int):
+    spec = select_spec()
+    for data in select_cases(seed):
+        compare(spec, data)
+
+
+def test_a_select_that_matches_nothing_agrees():
+    """The majority case on real HTTP, and the one with no element to cite."""
+    message = bytes([1, 4]) + b"Host" + bytes([3]) + b"abc"
+    writes(select_spec(), message, Emit.FIELD)
+    compare(select_spec(), message)
+
+
+def test_a_select_over_an_empty_repetition_agrees():
+    writes(select_spec(), bytes([0]), Emit.FIELD)
+
+
+def test_a_select_cites_the_element_it_chose_in_both():
+    """Stated as a value, not only as an agreement, so a shared bug is visible."""
+    records, _ = emitted(select_spec(), SELECT_MESSAGE, Emit.FIELD)
+    size = next(record for record in records if record.comment.endswith(".size"))
+    items = [record for record in records if ".items[1]" in record.comment]
+    assert (size.off_start, size.off_end) == (
+        min(record.off_start for record in items),
+        max(record.off_end for record in items),
+    )
+
+
+def test_a_switch_mixing_a_select_with_another_type_is_refused():
+    """Its extent would come from two places, and one pair of span locals cannot say that.
+
+    Refused rather than miscompiled: it decodes under the interpreter, and only
+    this compilation is impossible — the same trade `pointer` under a switch
+    already makes.
+    """
+    spec = inline(
+        """
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: items, type: {unit: item}, repeat: {count: "n"}}
+      - name: mixed
+        type:
+          switch:
+            on: "n"
+            cases:
+              1: {select: {from: items, where: "items.tag == 1", value: "items.tag", default: "0"}}
+              2: {int: {bits: 8}}
+  item:
+    fields:
+      - {name: tag, type: {int: {bits: 8}}}
+"""
+    )
+    with pytest.raises(CompileError, match="mixes a select"):
+        compiled(spec)
+
+
+# --- bounded terminator ----------------------------------------------------
+
+BOUNDED = """
+name: t
+version: "1.0"
+entry: message
+input: stream
+units:
+  message:
+    fields:
+      - name: name
+        type:
+          string:
+            size: {terminated: {delimiter: ":", within: "\\r\\n", required: false}}
+      - name: value
+        type: {string: {size: {terminated: {delimiter: "\\r\\n"}}}}
+"""
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"Content-Length: 68\r\n",
+        b"\r\n",
+        b"no-colon-here\r\nnext: value\r\n",
+        b"no-colon-here\r\ntail",
+        b"nothing at all",
+        b"name: value with no line ending",
+        b"",
+    ],
+    ids=lambda d: str(len(d)),
+)
+def test_a_bounded_terminator_agrees_both_ways(data: bytes):
+    """Every absence case, including the one the two spellings differ on.
+
+    An optional bounded terminator that finds nothing reads *nothing*, where an
+    unbounded one reads the rest of the run — so a backend that let the value
+    run to the bound would disagree here and nowhere else.
+    """
+    compare(inline(BOUNDED), data)
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_a_bounded_terminator_writes_the_same_records(emit: Emit):
+    spec = inline(BOUNDED)
+    for data in (b"Content-Length: 68\r\n", b"\r\n", b"no-colon\r\n"):
+        writes(spec, data, emit)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_a_bounded_terminator_agrees_on_adversarial_input(seed: int):
+    spec = inline(BOUNDED)
+    for data in variants(b"Content-Length: 68\r\n", seed=seed):
+        compare(spec, data)

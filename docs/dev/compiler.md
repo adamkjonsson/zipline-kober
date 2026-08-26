@@ -126,6 +126,10 @@ All deliberate, each with a message naming the spec's own words:
   written down before the branch is chosen.
 - **A repeated pointer.** A pointer reads no input where it stands, so a repeat
   of one cannot make progress.
+- **A `switch` with a `select` in only some cases.** A select's extent is the
+  element it chose, and an ordinary read's is where it stands; one pair of span
+  locals cannot hold both, written down as they are before the branch is
+  chosen. Every case a select compiles, and so does none.
 
 Each is narrower than what the interpreter accepts. That is the honest cost of
 compiling, and it is stated rather than worked around — a refusal naming the

@@ -154,6 +154,26 @@ ROOT_PREFIX = "_root_"
 #: names the field it repeats, and means the one instance just decoded.
 ELEMENT_LOCAL = "_element"
 
+#: The local holding the element a ``select`` is testing. Distinct from
+#: :data:`ELEMENT_LOCAL` because the two can be live at once: a select is a
+#: field like any other, so it may itself be repeated, and it would then be
+#: walking one repetition while its own element is being appended to another.
+SELECT_LOCAL = "_pick"
+
+#: The local holding one element's byte range while a ``select`` walks.
+SELECT_SPAN = "_pspan"
+
+
+def _spans_local(name: str) -> str:
+    """Return the local holding a repetition's per-element byte ranges.
+
+    Only repetitions a ``select`` asks about get one, and only where the select
+    writes records — see :meth:`Generator.tracked`. A select cites **the element
+    it chose**, and a decoded element does not carry the offsets it came from,
+    so they are kept alongside as the repetition is read.
+    """
+    return f"_spans_{name}"
+
 #: The local a generated decoder keeps its read position in, as a byte offset
 #: into the run. Generated code owns the position rather than a cursor, which is
 #: what ``DESIGN.md`` §2.1 has to be restated around: the invariant becomes a
@@ -464,20 +484,29 @@ def _rule(title: str) -> str:
     return f"# --- {title} ".ljust(RULE_WIDTH, "-")
 
 
-def _call(head: str, arguments: Sequence[str], indent: int) -> list[str]:
+def _call(
+    head: str, arguments: Sequence[str], indent: int, suffix: str = ""
+) -> list[str]:
     """Render a call, widening it only as far as the line length forces.
 
     One line if it fits, then all the arguments on one continued line, then one
     argument per line. Generated code is read, and a call broken across six lines
     when it would fit on two is harder to read than the protocol it decodes.
+
+    ``suffix`` is appended after the closing bracket, for the callers where the
+    call is the head of a statement rather than the whole of one.
     """
     pad = " " * indent
     joined = ", ".join(arguments)
-    if len(pad) + len(head) + len(joined) + 2 <= LINE_LENGTH:
-        return [f"{pad}{head}({joined})"]
+    if len(pad) + len(head) + len(joined) + 2 + len(suffix) <= LINE_LENGTH:
+        return [f"{pad}{head}({joined}){suffix}"]
     if len(pad) + 4 + len(joined) <= LINE_LENGTH:
-        return [f"{pad}{head}(", f"{pad}    {joined}", f"{pad})"]
-    return [f"{pad}{head}(", *(f"{pad}    {argument}," for argument in arguments), f"{pad})"]
+        return [f"{pad}{head}(", f"{pad}    {joined}", f"{pad}){suffix}"]
+    return [
+        f"{pad}{head}(",
+        *(f"{pad}    {argument}," for argument in arguments),
+        f"{pad}){suffix}",
+    ]
 
 
 def _dict_call(prefix: str, entries: Sequence[str], indent: int) -> list[str]:
@@ -869,6 +898,16 @@ class _Function:
         self.lines: list[str] = []
         self.values: list[str] = []
         self.spans: list[str] = []
+        #: Repetitions whose per-element byte ranges have to be kept, because
+        #: some ``select`` in this unit takes its extent from one of them. Kept
+        #: at every granularity: it is the *field's* extent, which a consumer of
+        #: the decoded object can ask for whether or not any record was written.
+        self.tracked: frozenset[str] = frozenset(
+            value.source
+            for item in obj.fields
+            for value in item.types
+            if value.source is not None
+        )
         #: Bits read since :data:`ANCHOR` was last set. **The compiler tracks
         #: this so the generated code does not have to**: every read, every
         #: bounds check and every byte range below is the anchor plus a number
@@ -1173,7 +1212,13 @@ class _Function:
             for item in self.obj.fields
         )
 
-    def evaluate(self, expr: Expr, indent: int, element_of: str | None = None) -> str:
+    def evaluate(
+        self,
+        expr: Expr,
+        indent: int,
+        element_of: str | None = None,
+        element: str = ELEMENT_LOCAL,
+    ) -> str:
         """Render an expression, catching the two ways one can fail for this input.
 
         Division by zero and a shift count off the wire are the only failures a
@@ -1184,7 +1229,9 @@ class _Function:
         Nothing else can — the position is a local in this function.
         """
         pad = " " * indent
-        rendered = render_expr(expr, self.binding(self.index_of, element_of=element_of))
+        rendered = render_expr(
+            expr, self.binding(self.index_of, element_of=element_of, element=element)
+        )
         if not _fallible(rendered):
             return rendered
         self.emit(f"{pad}try:")
@@ -1256,7 +1303,12 @@ class _Function:
 
     # --- one field ---------------------------------------------------------
 
-    def binding(self, index: int, element_of: str | None = None) -> Binding:
+    def binding(
+        self,
+        index: int,
+        element_of: str | None = None,
+        element: str = ELEMENT_LOCAL,
+    ) -> Binding:
         """Return the binding for an expression at one field's position."""
         return Binding(
             self.plan,
@@ -1264,6 +1316,7 @@ class _Function:
             self.obj.unit,
             parent=self.obj.parents[0] if self.obj.parents else None,
             element_of=element_of,
+            element=element,
             index=index,
         )
 
@@ -1376,7 +1429,10 @@ class _Function:
     ) -> None:
         """Emit one ``sink.record`` call, with everything known baked into it."""
         pad = " " * indent
-        if value.expr is not None:
+        if value.source is None and value.expr is not None:
+            # A computed only. A select carries an ``expr`` too, but its span
+            # locals already hold the element it chose — where `cites` would
+            # give the whole repetition, that being what its predicate read.
             start, end = self.cites(index, value, start, end, indent)
         if value.kind is Kind.INT and value.bits is None:
             # The one payload a compiler cannot bake: nothing declares the width
@@ -1384,7 +1440,9 @@ class _Function:
             # too wide for the vocabulary gets no record at all.
             self.emit(f"{pad}_labelled = prim_int({local})")
             self.emit(f"{pad}if _labelled is not None:")
-            self.emit(f"{pad}    _sink.record(*_labelled, {start}, {end}, {comment})")
+            self.lines.extend(
+                _call("_sink.record", ["*_labelled", start, end, comment], indent + 4)
+            )
             return
         payload = payload_of(value, local)
         content = _literal(content_type_of(self.plan, value))
@@ -1449,9 +1507,12 @@ class _Function:
             return
         if target is None:
             self.emit(f"{pad}# Anonymous: read and accounted for, but never named.")
-        if target is not None:
+        if target is not None and not self.selected(item):
             # Written down before the read, because a read that does not know
-            # its own length moves the anchor the range is measured from.
+            # its own length moves the anchor the range is measured from. A
+            # select is the exception: it reads nothing and takes its extent
+            # from the element it chose, so a placeholder here would only be
+            # overwritten.
             self.emit(f"{pad}_s_{target} = {self.start()}")
         if item.repeat is not None:
             self.settle(indent)
@@ -1460,7 +1521,14 @@ class _Function:
             self.value(index, item, target, indent)
         if target is None:
             return
-        self.emit(f"{pad}_e_{target} = {self.end()}")
+        if self.selected(item):
+            # A select's extent is the element it chose, not the empty range
+            # where it stands. It read nothing, so `self.end()` here would say
+            # only that it happened, and §3.2 wants a value to say where it came
+            # from.
+            self.emit(f"{pad}_s_{target}, _e_{target} = _cite_{target}")
+        else:
+            self.emit(f"{pad}_e_{target} = {self.end()}")
         if item.repeat is None and not self.container(item):
             self.account(
                 index,
@@ -1471,6 +1539,29 @@ class _Function:
                 f"_e_{target}",
                 indent,
             )
+
+    def selected(self, item: FieldPlan) -> bool:
+        """Whether this field's value is chosen from a repetition rather than read.
+
+        All of its alternatives or none: a ``switch`` mixing a select with an
+        ordinary read would need its extent taken from two different places on
+        two different branches, and a single pair of span locals cannot say
+        that. Refused rather than miscompiled — it decodes under the
+        interpreter, and only this compilation is impossible.
+
+        Raises:
+            CompileError: If a switch mixes a select with anything else.
+
+        """
+        sources = [value.source is not None for value in item.types]
+        if any(sources) and not all(sources):
+            msg = (
+                f"unit {self.obj.unit!r}: the compiler cannot express a switch that "
+                f"mixes a select with another type; make every case a select, or "
+                f"use the interpreter"
+            )
+            raise CompileError(msg)
+        return bool(sources) and all(sources)
 
     def redirected(self, item: FieldPlan) -> bool:
         """Whether this field is read at an offset rather than where it stands.
@@ -1595,6 +1686,9 @@ class _Function:
         indexed = self.threads
         if target is not None:
             self.emit(f"{pad}{target}: list[{_value_annotation(item.types, self.names)}] = []")
+        keeping = item.name is not None and item.name in self.tracked
+        if keeping:
+            self.emit(f"{pad}{_spans_local(item.name)}: list[tuple[int, int]] = []")
         if indexed and not counted:
             self.emit(f"{pad}_index = 0")
         if counted:
@@ -1605,6 +1699,8 @@ class _Function:
             self.emit(f"{pad}while True:")
         if not item.consumes:
             self.emit(f"{inner}_before = {ANCHOR}")
+        if keeping:
+            self.emit(f"{inner}_pmark = {ORIGIN}")
         marked = not self.container(item) and (self.emits(item) or self.skips(item))
         if marked:
             self.emit(f"{inner}_emark = {ORIGIN}")
@@ -1620,6 +1716,8 @@ class _Function:
                 "_ee",
                 indent + 4,
             )
+        if keeping:
+            self.emit(f"{inner}{_spans_local(item.name)}.append((_pmark, {self.end()}))")
         if target is not None:
             self.emit(f"{inner}{target}.append({ELEMENT_LOCAL})")
         self.settle(indent + 4)
@@ -1708,6 +1806,9 @@ class _Function:
     ) -> None:
         """Emit the statements that read one value into ``target``."""
         pad = " " * indent
+        if value.source is not None:
+            self.select(index, value, target, indent)
+            return
         if value.expr is not None:
             # Computed: it reads nothing, so an anonymous one leaves no trace.
             if target is not None:
@@ -1733,6 +1834,60 @@ class _Function:
             self.emit(f"{pad}    # failure of the decoder: §3.2. The bytes are accounted")
             self.emit(f"{pad}    # for either way, so the region stays decoded.")
             self.emit(f'{pad}    {target} = _raw.decode({encoding}, errors="replace")')
+
+    def select(self, index: int, value: ValueType, target: str | None, indent: int) -> None:
+        """Emit a select as a small function of its own, and the call to it.
+
+        **A walk over a list yielding one value is what a function is for.** In
+        one it can simply `return`, so "the first match" is a return inside the
+        loop and "nothing matched" is the line after it — no flag to clear, and
+        no ``for``/``else`` clause half of Python's readers misread. Inlined, the
+        same thing is six lines of loop sitting between two ordinary reads that
+        *do* move the position, which is the last place a reader wants it.
+
+        Nested rather than module-level so it closes over what it reads. Working
+        out a helper's free values and passing them is precisely the mistake this
+        backend has made twice — a generated module calling something it had not
+        handed everything to — and a closure cannot make it.
+
+        It reads no input and never touches :data:`ANCHOR`: it is given the
+        position only to say where a failure happened. That is how §2.1's rule
+        survives compilation here — no statement that *could* move the position
+        is emitted at all.
+
+        Like a computed, a select nothing can name leaves no trace.
+        """
+        if target is None:
+            return
+        pad = " " * indent
+        self.index_of = index
+        # The repetition itself, rendered without the element binding: inside
+        # `where` and `value` its name means one element, and out here it is
+        # still the list.
+        source = self.binding(index).render((value.source or "",))
+        spans = _spans_local(value.source or "")
+        name = f"_select_{target}"
+        returns = f"tuple[{ANNOTATIONS[value.kind]}, tuple[int, int]]"
+        self.emit(f"{pad}def {name}() -> {returns}:")
+        self.emit(f'{pad}    """Choose the first matching {_safe(value.source or "")}."""')
+        self.lines.extend(
+            _call("for " + SELECT_LOCAL + ", " + SELECT_SPAN + " in zip",
+                  [source, spans, "strict=True"], indent + 4, suffix=":")
+        )
+        matched = self.evaluate(
+            value.where, indent + 8, element_of=value.source, element=SELECT_LOCAL
+        )
+        self.emit(f"{pad}        if {matched}:")
+        projected = self.evaluate(
+            value.expr, indent + 12, element_of=value.source, element=SELECT_LOCAL
+        )
+        self.emit(f"{pad}            return {projected}, {SELECT_SPAN}")
+        self.emit(f"{pad}    # Nothing matched, so there is nothing to point at.")
+        fallback = self.evaluate(value.default, indent + 4)
+        here = self.start()
+        self.emit(f"{pad}    return {fallback}, ({here}, {here})")
+        self.emit("")
+        self.emit(f"{pad}{target}, _cite_{target} = {name}()")
 
     def statement(self, call: str, target: str | None, indent: int) -> None:
         """Emit a read, assigning it only if anything can name the value."""
@@ -1825,12 +1980,27 @@ class _Function:
         self.rebase(f"{start} + _want", indent)
 
     def terminated(self, size: Terminated, prefix: str, indent: int) -> None:
-        """Emit a delimited read, with only the branch the spec asked for."""
+        """Emit a delimited read, with only the branch the spec asked for.
+
+        A ``within`` bound is a second search and a comparison, and it makes
+        the delimiter *absent* when it falls past the bound rather than
+        clamping to it — the interpreter's rule, and the one that matters:
+        clamping would read under a delimiter that was never found.
+
+        Note what the optional branch then does, because it is where the two
+        spellings part company. Unbounded, an absent terminator means the value
+        is the rest of the run. Bounded, it means the value is **empty and the
+        position does not move**, so ``_stop`` stays where it was.
+        """
         pad = " " * indent
         delimiter = _literal(size.delimiter)
         start = self.byte()
         past = len(size.delimiter) if size.consume else 0
         self.emit(f"{pad}_found = _data.find({delimiter}, {start})")
+        if size.within is not None:
+            self.emit(f"{pad}_bound = _data.find({_literal(size.within)}, {start})")
+            self.emit(f"{pad}if 0 <= _bound < _found:")
+            self.emit(f"{pad}    _found = -1")
         self.emit(f"{pad}if _found < 0:")
         if size.required:
             # Not an error: in STREAM shape the value may continue in a segment
@@ -1843,8 +2013,12 @@ class _Function:
             self.emit(f"{pad}{prefix}_data[{start}:_found]")
             self.rebase(f"_found + {past}" if past else "_found", indent)
             return
-        self.emit(f"{pad}    {prefix}_data[{start}:]")
-        self.emit(f"{pad}    _stop = _size")
+        if size.within is not None:
+            self.emit(f"{pad}    {prefix}b''")
+            self.emit(f"{pad}    _stop = {start}")
+        else:
+            self.emit(f"{pad}    {prefix}_data[{start}:]")
+            self.emit(f"{pad}    _stop = _size")
         self.emit(f"{pad}else:")
         self.emit(f"{pad}    {prefix}_data[{start}:_found]")
         self.emit(f"{pad}    _stop = _found + {past}" if past else f"{pad}    _stop = _found")

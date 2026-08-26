@@ -80,6 +80,18 @@ installed from a checkout (see the README).
   "no match", which would report the author's default as though it had been
   read off the wire.
 
+  Both implementations have it. The compiler renders a select as a small nested
+  function — a walk over a list yielding one value is what a function is for,
+  and in one it can simply `return`, so "the first match" is a return inside the
+  loop and "nothing matched" is the line after it. It is nested rather than
+  module-level so that it closes over what it reads, which is the only way to be
+  sure a generated helper was handed everything it needs.
+
+  `kober.pygen` refuses one shape the interpreter accepts: a `switch` with a
+  select in only *some* cases. A select's extent is the element it chose and an
+  ordinary read's is where it stands, and one pair of span locals cannot hold
+  both, written down as they are before the branch is chosen.
+
 - `within:` on a `terminated` size — a second byte sequence the search must
   not run past, so one line can split into two fields:
 
@@ -109,7 +121,7 @@ installed from a checkout (see the README).
   `kober.cursor.Cursor.find` takes the bound as a second argument, and the
   checker's "a non-required terminator on a string makes truncation invisible"
   warning no longer fires when `within` is set — the bound *is* the guarantee
-  that warning exists to notice the absence of.
+  that warning exists to notice the absence of. Both implementations have it.
 
 - `kober.spec.Pointer` and the `pointer:` spec key — a back-reference:
   *read this type at that offset, and carry on where you were*
@@ -702,6 +714,12 @@ installed from a checkout (see the README).
   field.
 
 ### Fixed
+
+- **A record for a computed integer was written on one line however long it
+  got.** Every other `sink.record` call the compiler emits is wrapped to the
+  line length; the one for a value whose width is not declared was not, so a
+  field with a long enough name generated a module that failed this project's
+  own lint. Found by compiling a spec with a field called `content_length`.
 
 - **A `computed` field of a nested unit could not be referenced from outside
   it.** Typing the reference re-checked that computed's own expression against

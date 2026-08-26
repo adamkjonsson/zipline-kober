@@ -1,6 +1,6 @@
 # Phase plan: speaking about repetitions
 
-**State: Stages 1-4 done, Stages 5-8 open.** Written after the language
+**State: Stages 1-5 done, Stages 6-8 open.** Written after the language
 phase landed ([`POINTER-PHASE-PLAN.md`](POINTER-PHASE-PLAN.md)), against
 `DESIGN.md` revision 8 and `zpf` 0.2.x.
 
@@ -729,11 +729,56 @@ it would not fail, it would *disagree*, reading past a boundary the interpreter
 stopped at. It now raises at plan time, as it already did for `Select`. Stage 5
 implements both.
 
-### Stage 5 — the compiler
+### Stage 5 — the compiler — **done**
 
 `ops.py` then `pygen.py`, per Q6. The differential is the acceptance test, and
 on the last two phases' record it will find something; expect it in whichever
 implementation was written second.
+
+**Done, and the prediction held twice over.**
+
+- **Q6's named walk was in fact wrong.** `_kind_exprs` yielded none of a
+  select's three expressions, so `_unit_exprs` did not see them and `_outer`
+  left `needs_root` empty — a select naming `root.x` in its predicate compiled
+  to a function without the argument, which is the exact failure Q6 described.
+  The other walks were fine: `_referenced` correctly yields nothing (a select
+  names no unit), `_kind_consumes` correctly says False, and `_types` flattens
+  it to itself.
+- **The differential found the citation**, in the implementation written
+  second, as predicted. A select's *extent* is the element it chose — not only
+  what its record cites — and the compiled side had it zero-width at the
+  cursor. A decoded element carries no offsets, so the backend has to keep them
+  as the repetition goes past: a parallel span list, at every granularity, since
+  a consumer can ask a decoded object where a field came from whether or not
+  any record was written.
+
+**A select renders as a small nested function**, not an inline loop, and this
+was a design decision rather than a formatting one. Three reasons, in order of
+weight: in a function it can simply `return`, so "the first match" is a return
+inside the loop and "nothing matched" is the line after it — no flag to clear
+and no `for`/`else` clause half of Python's readers misread. It is *nested*
+rather than module-level so it closes over what it reads, which removes the
+free-variable analysis outright — and getting that wrong is precisely the
+mistake this backend has made twice. And it keeps the branch count of the
+decode function down, which is not cosmetic: generated modules are linted with
+this project's own configuration, and the finished spec inlined pushed
+`_decode_message` to 25 branches against a limit of 20.
+
+**One shape the backend refuses**, and it is documented with the others: a
+`switch` with a select in only *some* cases. A select's extent is the element
+it chose and an ordinary read's is where it stands; one pair of span locals
+cannot hold both, written down as they are before the branch is chosen.
+
+**One unrelated bug fell out.** The `sink.record` call for a computed integer
+was emitted on one line however long it got, where every other record call is
+wrapped — so a field named `content_length` generated a module that failed this
+project's own lint.
+
+**The acceptance number:** the compiled decoder and the interpreter produce
+identical output — every record, span and reason — on all three captures, on
+every prefix of the fuzz seed, on four seeds of mutations at both
+granularities, and through the README's deeper pipeline (`packeteer fuzz` →
+`zpfwire` → both), which puts real gaps and truncations in front of them.
 
 ### Stage 6 — `examples/http.yaml` finished
 
