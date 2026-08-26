@@ -52,6 +52,7 @@ from kober.spec import (
     Param,
     Pointer,
     Remaining,
+    Select,
     Spec,
     StringType,
     Switch,
@@ -470,8 +471,12 @@ def _field(document: object, where: str) -> Field:
 # --- types, sizes, repeats -------------------------------------------------
 
 _TYPE_KINDS = frozenset(
-    {"int", "bytes", "string", "unit", "switch", "computed", "pointer"}
+    {"int", "bytes", "string", "unit", "switch", "computed", "pointer", "select"}
 )
+#: Every key of a ``select``, and all four are required. There is no default
+#: for ``default``: the whole case for putting aggregation in the model is that
+#: "nothing matched" has an answer the author wrote (:class:`~kober.spec.Select`).
+_SELECT_KEYS = frozenset({"from", "where", "value", "default"})
 _SIZE_KINDS = frozenset({"fixed", "expr", "terminated", "remaining"})
 _REPEAT_KINDS = frozenset({"count", "until", "to_end"})
 
@@ -501,6 +506,8 @@ def _field_type(document: object, where: str) -> FieldType:
         return _switch(value, site)
     if tag == "pointer":
         return _pointer(value, site)
+    if tag == "select":
+        return _select(value, site)
     return Computed(expr=_expr(value, site))
 
 
@@ -534,6 +541,43 @@ def _unit_ref(document: object, where: str) -> UnitRef:
     return UnitRef(
         unit=_require_str(mapping["name"], f"{where}.name"),
         args=[_expr(item, f"{where}.args[{index}]") for index, item in enumerate(args)],
+    )
+
+
+def _select(document: object, where: str) -> Select:
+    """Build a select: which repetition, which element, and what to take from it.
+
+    All four keys are required, ``default`` included, and the error names every
+    one that is missing rather than the first — an author writing a new
+    construct wants the whole shape, not one key at a time.
+
+    ``from`` is spelled that way in a document and stored as
+    :attr:`~kober.spec.Select.source`, because ``from`` is a Python keyword and
+    cannot be a field name.
+
+    Args:
+        document: The mapping under the ``select`` tag.
+        where: Dotted location, for error messages.
+
+    Returns:
+        The select.
+
+    Raises:
+        SpecError: If a key is missing, unknown, or the wrong shape.
+
+    """
+    mapping = _require_mapping(document, where)
+    _reject_unknown(mapping, _SELECT_KEYS, where)
+    missing = sorted(_SELECT_KEYS - set(mapping))
+    if missing:
+        listed = ", ".join(repr(key) for key in missing)
+        msg = f"{where}: missing required key(s) {listed}"
+        raise SpecError(msg)
+    return Select(
+        source=_require_str(mapping["from"], f"{where}.from"),
+        where=_expr(mapping["where"], f"{where}.where"),
+        value=_expr(mapping["value"], f"{where}.value"),
+        default=_expr(mapping["default"], f"{where}.default"),
     )
 
 

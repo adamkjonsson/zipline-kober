@@ -99,8 +99,10 @@ back.
 
 - **Anonymous fields** — they have no name, which is what makes them safe for
   padding.
-- **Repeated fields**, except inside their own `until`, where the name means
-  the element just decoded. The language has no list type.
+- **Repeated fields**, except inside their own `until`, or inside the `where`
+  and `value` of a `select` that names them — in all three the name means one
+  element rather than the list. The language has no list type, and those
+  bindings do not add one: nothing can hold a list, pass one, or return one.
 - **Switch fields**, whose type depends on the value dispatched on, so they
   have no single type to give.
 

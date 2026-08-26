@@ -142,6 +142,54 @@ region `undecodable`, and never raises. That rule is also what makes chains
 finite: each hop must land strictly earlier than the last, so a cycle cannot be
 constructed.
 
+### `select`
+
+```yaml
+type:
+  select:
+    from: headers
+    where: "lower(headers.name) == 'content-length'"
+    value: "to_int(headers.value)"
+    default: "-1"
+```
+
+Ask a question about a **repeated** field, and get one scalar back. All four
+keys are required.
+
+`from` names a repeated field declared earlier in the same unit. `where` is a
+boolean predicate over one element, and the **first** element it holds for is
+the one selected. `value` projects that element, and is the field's value.
+`default` is the value when nothing matched.
+
+Inside `where` and `value`, the repeated field's own name means **the element
+being tested**, not the list — the same binding an `until` uses, and spelled
+the same way. `default` does not get that binding: nothing matched, so there is
+no element for it to mean.
+
+A select's type is its projection's, so `value` and `default` must agree on
+one, and a later field may reference the result like any other scalar:
+
+```yaml
+- {name: body, type: {bytes: {size: {expr: "content_length"}}}, condition: "content_length > 0"}
+```
+
+This is the one construct that can ask about a repetition, and the reason it
+exists is that a message often cannot be framed without one: choosing between
+`Content-Length` and chunked encoding means asking whether *any* header said
+so. Because `default` is required, "nothing matched" always has an answer the
+spec wrote — there is no case left over to guess at.
+
+It consumes no input and moves no position; the repetition is already decoded
+by the time it runs. At field granularity it cites **the element it selected**,
+which is the honest evidence — this value came from *that* header, not from all
+of them. When nothing matched there is nothing to point at, so the default
+cites no bytes at all.
+
+An expression in `where` or `value` that cannot be evaluated — `to_int` on a
+value that is not a number, say — makes the field `undecodable`, exactly as an
+unevaluable size does. It is not quietly treated as "no match", because that
+would report the author's default as though it were read from the input.
+
 ## Sizes
 
 | Kind | Form | Meaning |
@@ -182,9 +230,11 @@ larger than what remains is `truncated`.
 | `to_end` | `{to_end: true}` | Repeat until the run is exhausted. |
 
 An `until` expression sees the field it repeats, and there it means **the
-element just decoded** rather than the list. That is the one place a repeated
-field may be referenced; everywhere else it is refused, because the expression
-language has no list type.
+element just decoded** rather than the list. A [`select`](#select)'s `where`
+and `value` bind the same way. Those are the only places a repeated field may
+be referenced; everywhere else it is refused, because the expression language
+has no list type — and neither binding gives it one, since each names a single
+element for the length of one expression.
 
 Two guards, both reachable from crafted input:
 

@@ -31,6 +31,44 @@ installed from a checkout (see the README).
 
 ### Added
 
+- `kober.spec.Select` and the `select:` spec key — ask a question about a
+  **repeated** field, and get one scalar back. Four required keys: `from`
+  names the repetition, `where` is a predicate over one element, `value`
+  projects the first element it holds for, and `default` is what to say when
+  nothing matched.
+
+  ```yaml
+  - name: content_length
+    type:
+      select:
+        from: headers
+        where: "lower(headers.name) == 'content-length'"
+        value: "to_int(headers.value)"
+        default: "-1"
+  ```
+
+  This is what lets a message frame its own body. Choosing between
+  `Content-Length` and chunked encoding means asking whether *any* header said
+  so, and until now nothing could: `headers` is repeated, and the expression
+  language has no list type (`DESIGN.md` §11 question 6).
+
+  **Aggregation went into the model rather than the grammar**, the same choice
+  §11.5 made for `pointer:`. An `any(headers, …)` form would need a binding
+  construct in the general grammar — a lambda in all but name — and a
+  `first(headers, …)` would have to return an *element*, which `ExprType` has
+  no member for. A select yields a scalar whose type is its projection's, so a
+  later field references it like any other value, and `check` types it with
+  machinery that already existed. Because `default` is required, "nothing
+  matched" always has an answer the author wrote.
+
+  Inside `where` and `value` the repeated field's own name means the element
+  being tested, which is the binding `until` already uses and spelled the same
+  way. `default` does not get that binding. **The language still has no list
+  type and gains none:** nothing can hold a list, pass one, or return one.
+
+  At field granularity a select cites **the element it selected** — this value
+  came from *that* header, not from all of them. A default cites no bytes.
+
 - `kober.spec.Pointer` and the `pointer:` spec key — a back-reference:
   *read this type at that offset, and carry on where you were*
   (`DESIGN.md` §3.2). Real DNS needs it; without it the answer section of
@@ -622,6 +660,22 @@ installed from a checkout (see the README).
   field.
 
 ### Fixed
+
+- **A `computed` field of a nested unit could not be referenced from outside
+  it.** Typing the reference re-checked that computed's own expression against
+  the *referrer's* visible names — which, once the path had crossed into
+  another unit, belonged to the wrong unit entirely, so every field of the
+  inner one was reported as "declared later":
+
+  ```
+  error: probe.outer.probe: computed: 'raw' is declared later in unit 'leaf'
+  ```
+
+  The ordering rule is about where the *reference* stands, and it is applied
+  where the reference is written; a computed's own ordering is checked at its
+  own declaration site. Nothing is loosened by not asking twice. Found while
+  writing the `select:` example, where `until: "chunks.length == 0"` is the
+  natural way to end a chunked body and was refused.
 
 - **A field path in a compiled decoder carried the backend's identifier, not
   the spec's.** A field named `class` is a Python keyword, so the attribute

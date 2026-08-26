@@ -823,3 +823,30 @@ def test_a_builtin_makes_a_case_insensitive_match_expressible():
         tree = decode(fields, text + b"rest")
         assert tree.find("body") is not None, text
         assert tree.find("body").value == b"rest"
+
+
+def test_a_field_type_the_engine_does_not_implement_is_undecodable_not_a_raise():
+    """The model may gain a type before the engine does; a decode still cannot raise.
+
+    `select` is that type until the interpreter lands. What the checker cannot
+    say — the spec is well formed and valid — the decoder has to, and the way
+    it says it is an honest `undecodable` region rather than an `AttributeError`
+    out of a decode that promises never to raise.
+    """
+    fields = """\
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: items, type: {unit: item}, repeat: {count: "n"}}
+      - name: picked
+        type:
+          select: {from: items, where: "items.tag == 1", value: "items.tag", default: "0"}
+"""
+    extra = """\
+  item:
+    fields:
+      - {name: tag, type: {int: {bits: 8}}}
+"""
+    tree = decode(fields, bytes([2, 1, 5]), extra_units=extra)
+    assert tree.status is NodeStatus.UNDECODABLE
+    assert "not implemented" in tree.detail
+    # What it did read before stopping is kept, exactly as any other stop.
+    assert tree.find("n").value == 2

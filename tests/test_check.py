@@ -19,6 +19,7 @@ from kober.spec import (
     Param,
     Pointer,
     Remaining,
+    Select,
     Spec,
     StringType,
     Switch,
@@ -748,3 +749,261 @@ def test_a_builtin_cannot_reach_a_later_field():
         ]
     )
     assert any("tail" in message for message in errors(spec))
+
+
+# --- select ----------------------------------------------------------------
+
+
+def select_spec(
+    *,
+    source: str = "items",
+    where: str = "items.tag == 1",
+    value: str = "items.tag",
+    default: str = "0",
+    extra: list[Field] | None = None,
+) -> Spec:
+    """Build a unit with a repeated `items` and a select over it."""
+    return build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="n", type=IntType(bits=8)),
+                    Field(
+                        name="items",
+                        type=UnitRef(unit="item"),
+                        repeat=Count(parse("n")),
+                    ),
+                    Field(
+                        name="picked",
+                        type=Select(
+                            source=source,
+                            where=parse(where),
+                            value=parse(value),
+                            default=parse(default),
+                        ),
+                    ),
+                    *(extra or []),
+                ],
+            ),
+            Unit(name="item", fields=[Field(name="tag", type=IntType(bits=8))]),
+        ]
+    )
+
+
+def test_a_valid_select_has_no_findings():
+    assert check(select_spec()) == ()
+
+
+def test_select_source_must_be_repeated():
+    """Without a repetition there is nothing to select from."""
+    assert "not repeated" in only_error(
+        select_spec(source="n", where="n == 1", value="n")
+    )
+
+
+def test_select_source_must_exist():
+    assert "unknown name" in only_error(
+        select_spec(source="absent", where="true", value="1")
+    )
+
+
+def test_select_source_may_not_be_a_parameter():
+    """A parameter holds a scalar, so there is no repetition behind it."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[Field(name="inner", type=UnitRef(unit="leaf", args=[parse("1")]))],
+            ),
+            Unit(
+                name="leaf",
+                params=[Param(name="p", type=ExprType.INT)],
+                fields=[
+                    Field(
+                        name="picked",
+                        type=Select(
+                            source="p",
+                            where=parse("true"),
+                            value=parse("1"),
+                            default=parse("0"),
+                        ),
+                    )
+                ],
+            ),
+        ]
+    )
+    assert "not a repeated field" in only_error(spec)
+
+
+def test_select_cannot_reach_a_later_repetition():
+    """The ordinary ordering rule: the repetition must already be decoded."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(
+                        name="picked",
+                        type=Select(
+                            source="items",
+                            where=parse("items.tag == 1"),
+                            value=parse("items.tag"),
+                            default=parse("0"),
+                        ),
+                    ),
+                    Field(
+                        name="items",
+                        type=UnitRef(unit="item"),
+                        repeat=Until(parse("items.tag == 0")),
+                    ),
+                ],
+            ),
+            Unit(name="item", fields=[Field(name="tag", type=IntType(bits=8))]),
+        ]
+    )
+    assert "declared later" in only_error(spec)
+
+
+def test_select_where_must_be_boolean():
+    assert "must be bool" in only_error(select_spec(where="items.tag"))
+
+
+def test_select_value_and_default_must_agree():
+    """Either one can end up being the field's value, so both must be one type."""
+    assert "must agree" in only_error(select_spec(default="'none'"))
+
+
+def test_select_default_cannot_see_the_element():
+    """Nothing matched, so there is no element for a default to mean."""
+    assert "no list type" in only_error(select_spec(default="items.tag"))
+
+
+def test_select_result_is_a_scalar_a_later_field_can_use():
+    """The whole case for putting aggregation in the model."""
+    assert check(
+        select_spec(extra=[Field(name="doubled", type=Computed(parse("picked * 2")))])
+    ) == ()
+
+
+def test_select_result_types_as_its_projection():
+    """A str projection makes the field str, and sizing on it is an error."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="n", type=IntType(bits=8)),
+                    Field(
+                        name="items",
+                        type=UnitRef(unit="item"),
+                        repeat=Count(parse("n")),
+                    ),
+                    Field(
+                        name="picked",
+                        type=Select(
+                            source="items",
+                            where=parse("items.text == 'x'"),
+                            value=parse("items.text"),
+                            default=parse("''"),
+                        ),
+                    ),
+                    Field(name="body", type=BytesType(size=FromExpr(parse("picked")))),
+                ],
+            ),
+            Unit(name="item", fields=[Field(name="text", type=StringType(size=Fixed(1)))]),
+        ]
+    )
+    assert "size must be int, got str" in only_error(spec)
+
+
+def test_the_element_binding_does_not_leak_to_other_expressions():
+    """A select exempts its own `where` and `value`, and nothing else."""
+    assert "no list type" in only_error(
+        select_spec(extra=[Field(name="bad", type=Computed(parse("items.tag")))])
+    )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        Computed(parse("1")),
+        Pointer(at=parse("0"), type=IntType(bits=8)),
+        Select(
+            source="items",
+            where=parse("items.tag == 1"),
+            value=parse("items.tag"),
+            default=parse("0"),
+        ),
+    ],
+    ids=["computed", "pointer", "select"],
+)
+def test_a_repeated_zero_width_field_is_a_decode_time_finding(kind: FieldType):
+    """All three consume nothing, and the checker lets all three through.
+
+    A repetition of any of them cannot terminate, and the decoder's own guard
+    is what says so — *"consumed no input; the repetition cannot terminate"*.
+    Pinned as one test over all three rather than asserted for `select` alone,
+    so that whoever decides to catch this statically moves the family together
+    instead of leaving `select` inconsistent with its two siblings.
+    """
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="n", type=IntType(bits=8)),
+                    Field(name="items", type=UnitRef(unit="item"), repeat=Count(parse("n"))),
+                    Field(name="picked", type=kind, repeat=Until(parse("true"))),
+                ],
+            ),
+            Unit(name="item", fields=[Field(name="tag", type=IntType(bits=8))]),
+        ]
+    )
+    assert errors(spec) == []
+
+
+def test_a_nested_units_computed_can_be_referenced_from_outside():
+    """Regression: typing the reference used the *referrer's* visible names.
+
+    Reached through `inner`, `doubled`'s own expression was re-checked against
+    `outer`'s names, where `raw` is not declared — so a valid spec was refused
+    with *"'raw' is declared later in unit 'leaf'"*. The ordering rule is about
+    where the reference stands, and `doubled` was checked at its own site.
+    """
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="alpha", type=IntType(bits=8)),
+                    Field(name="inner", type=UnitRef(unit="leaf")),
+                    Field(name="probe", type=Computed(parse("inner.doubled"))),
+                ],
+            ),
+            Unit(
+                name="leaf",
+                fields=[
+                    Field(name="raw", type=IntType(bits=8)),
+                    Field(name="doubled", type=Computed(parse("raw * 2"))),
+                ],
+            ),
+        ]
+    )
+    assert check(spec) == ()
+
+
+def test_ordering_still_holds_inside_the_unit_that_declares_a_computed():
+    """The fix must not buy the above by dropping the rule where it belongs."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="early", type=Computed(parse("later * 2"))),
+                    Field(name="later", type=IntType(bits=8)),
+                ],
+            )
+        ]
+    )
+    assert "declared later" in only_error(spec)

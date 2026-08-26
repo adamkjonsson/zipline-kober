@@ -545,7 +545,19 @@ class Decoder:
             value = cursor.read_int(kind.bits, signed=kind.signed, endian=kind.endian)
             start, end = cursor.span(mark)
             return self._leaf(item, kind, value, start, end)
-        return self._sized(item, kind, cursor, mark, env)
+        if isinstance(kind, (BytesType, StringType)):
+            return self._sized(item, kind, cursor, mark, env)
+        # A field type the engine does not implement. Said out loud rather
+        # than reached by falling off the end of the chain: this used to be an
+        # unguarded `_sized` call, so a type the model gained before the engine
+        # did raised an `AttributeError` out of a decode that promises never to
+        # raise. An honest `undecodable` region is the right answer, and it is
+        # the answer the checker cannot give — a spec using such a type is
+        # well formed and valid.
+        raise _Stop(
+            NodeStatus.UNDECODABLE,
+            f"{type(kind).__name__} is not implemented by this decoder",
+        )
 
     def _pointer(
         self,

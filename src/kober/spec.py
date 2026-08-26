@@ -339,7 +339,59 @@ class Pointer:
     type: FieldType
 
 
-FieldType = IntType | BytesType | StringType | UnitRef | Switch | Computed | Pointer
+@dataclass(frozen=True)
+class Select:
+    """Ask a question about a repeated field, and get one scalar back.
+
+    The construct that lets a spec choose its own framing. Without it a body
+    cannot depend on whether *any* header said ``chunked``, because ``headers``
+    is repeated and the expression language has no list type — so
+    ``examples/http.yaml`` had to *assume* a framing and call the bytes it then
+    misread ``truncated``, declaring a hole in a stream that had none
+    (``DESIGN.md`` §13.2).
+
+    **It is aggregation in the model rather than in the grammar**, which is the
+    same choice §11.5 made for :class:`Pointer` and for the same reason. An
+    ``any(headers, …)`` expression form would need a binding construct in the
+    general grammar — a lambda in all but name — and a ``first(headers, …)``
+    would have to return *an element*, which :class:`~kober.expr.ExprType` has
+    no member for. A select sidesteps both: it yields a scalar whose type is
+    its projection's, so the checker types it with machinery that already
+    exists, and a later field may reference it like any other value.
+
+    **Totality is structural.** :attr:`default` is required, so "nothing
+    matched" always has an answer the author wrote. There is no partial
+    function here to argue about, and no need for one.
+
+    It reads no input and moves no position — the repetition is complete before
+    it runs — so it stays on the unconstrained side of §2.1's table, exactly as
+    :class:`Computed` does.
+
+    Attributes:
+        source: Name of the repeated field to ask about, spelled ``from:`` in a
+            document. It must be declared earlier in the same unit and must be
+            repeated.
+        where: A boolean predicate over one element. The **first** element it
+            holds for is the one selected.
+        value: The projection of that element, and the field's value.
+        default: The value when no element matched. Required.
+
+    """
+
+    source: str
+    where: Expr
+    value: Expr
+    default: Expr
+
+    def __post_init__(self) -> None:
+        if not self.source.strip():
+            msg = "select 'from' must name a repeated field"
+            raise SpecError(msg)
+
+
+FieldType = (
+    IntType | BytesType | StringType | UnitRef | Switch | Computed | Pointer | Select
+)
 
 
 # --- units and specs -------------------------------------------------------
