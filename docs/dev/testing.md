@@ -141,7 +141,7 @@ The compiled path is worth running over the same file, since both drive the same
 ```
 
 - [`python-zipline-wire`](https://github.com/adamkjonsson/python-zipline-wire)
-  converts real captures to `.zpf`. Its `tests/captures/` holds fourteen,
+  converts real captures to `.zpf`. Its `tests/captures/` holds sixteen,
   including DNS, HTTP, and packet loss.
 - [`packeteer`](https://github.com/adamkjonsson/packeteer) generates synthetic
   traffic and adversarial variants, and can produce impairments directly

@@ -906,6 +906,29 @@ installed from a checkout (see the README).
   language — so the declarative vocabulary grew and the expression language did
   not. Hooks stay deferred and are weaker still.
 
+- **The `README` says what a spec can express**, which it never did: eight
+  field types with each one's answer for what happens when it does not match,
+  the three ways a field repeats, and why constructs get added rather than
+  hooks. `tests/test_docs.py` now guards that table the way it already guarded
+  the format reference — against the table rows rather than the whole file,
+  since the prose underneath names the same constructs and a first attempt
+  passed a deliberately broken table.
+
+- **Corrected in the reference docs:** the format index quoted a schema error
+  whose wording and type list had both drifted (`pointer` and `select` were
+  missing from it), `docs/dev/testing.md` said fourteen captures in one place
+  and sixteen in another, and the `README`'s pointer at `packeteer stream
+  --packet-loss` now says that HTTP is the one payload where those options are
+  ignored.
+
+- **`docs/dev/decisions.md` is current again.** Its `DESIGN.md` revision list
+  stopped at 7 and now runs to 9; the §11 tally said four questions and there
+  are six, of which three are open; and it gains a section for what is *owed*
+  rather than open — byte transforms, and the `Transfer-Encoding: gzip,
+  chunked` form `examples/http.yaml` deliberately does not recognise. The
+  upstream-issues rule now covers the test tooling too, with the three
+  `packeteer` issues this phase filed.
+
 - **`docs/dev/testing.md` gains two rules this phase paid for.** *A seed is
   only worth the code it reaches* — the HTTP fuzz seed had no framing header,
   so every variant took the third path and neither framing arm was ever
