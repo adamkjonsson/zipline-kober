@@ -1,8 +1,14 @@
 # Phase plan: speaking about repetitions
 
-**State: not started.** Written after the language phase landed
-([`POINTER-PHASE-PLAN.md`](POINTER-PHASE-PLAN.md)), against `DESIGN.md`
-revision 8 and `zpf` 0.2.x.
+**State: Stage 1 settled, Stages 2-8 not started.** Written after the language
+phase landed ([`POINTER-PHASE-PLAN.md`](POINTER-PHASE-PLAN.md)), against
+`DESIGN.md` revision 8 and `zpf` 0.2.x.
+
+Q1-Q6 are answered below, each with the spike behind it. The spike itself is
+scratch and is not checked in; what it established is here. **Three of this
+plan's own stated facts were wrong and are corrected in place**, the largest
+being that no run holds more than one message - every run of
+`http_stream_1.pcap` holds exactly fifty.
 
 `kober` gains a way for a spec to ask a question about a **repeated** field.
 That is the last thing standing between `examples/http.yaml` and framing its
@@ -55,34 +61,62 @@ half of them leaves `examples/http.yaml` exactly where it is.
 
 ## The corpus, and it is bigger than what has been used
 
-| Capture | What it holds | What only it has |
-| --- | --- | --- |
-| `http_example.pcapng` | 2 messages: a request with no body, a chunked gzip response | The chunked path. Framing works here *because* the spec assumes chunked. |
-| `http_stream_1.pcap` | **1645 messages** — 645 requests, 1000 responses, 692 with `Content-Length` (65–70 B), 308 with no framing header at all | Scale, and the *absence* case. Never been run. |
-| `http.pcap` | 4 HTTP messages and a DNS-over-UDP session. Two `Content-Length` responses, both **exact** once reassembled: 18 070 B plain, and 1 272 B gzip | A body two orders of magnitude larger than anything else, spanning several transport records — and `Content-Length` **with** a transformed body, which separates two variables `http_example.pcapng` confounds. |
+**Remeasured in Stage 1, and the first table was wrong.** The numbers below
+come from walking every reassembled run to its last byte and checking that the
+walk lands exactly on the end — 46 runs, 0 bytes left over — cross-checked
+against a raw count of header terminators. The figures the plan first carried
+are kept in the notes underneath, because what they got wrong shaped the plan.
+
+| Capture | Runs | Messages | Framing | What only it has |
+| --- | --- | --- | --- | --- |
+| `http_example.pcapng` | 2 | 2 (1 request, 1 response) | 1 chunked, 1 neither | The chunked path. Framing works here *because* the spec assumes chunked. |
+| `http_stream_1.pcap` | 40 | **2000** (1000 requests, 1000 responses) | 1147 `Content-Length` (63–70 B, 77 722 B total), 853 neither, 0 chunked | Scale, pipelining, and the *absence* case. Never been run. |
+| `http.pcap` | 4 (+2 DNS datagrams) | 4 (2 requests, 2 responses) | 2 `Content-Length` (18 070 B and 1 272 B), 2 neither | A body two orders of magnitude larger than anything else, spanning several transport records — and `Content-Length` **with** a transformed body, which separates two variables `http_example.pcapng` confounds. Also the only capture that is not all one protocol. |
 
 All three live in `python-zipline-wire`'s `tests/captures/`, beside the
 fourteen the earlier phases used, so the pipeline in the README reaches them
 without a special case.
 
-Established by reading them before planning, and each shapes the work:
+What the remeasurement changed, and each of these shapes the work:
 
-- **No run holds more than one message**, in any of the three. So the phase
-  does not have to solve pipelining as well, and `to_end` on the body is not
-  immediately wrong.
-- **308 of `http_stream_1.pcap`'s responses have neither framing header.** A
-  bodyless response is normal (`204`, `304`, a `HEAD` reply), so "no framing
-  header at all" is a case the spec must get right — and getting it wrong is
-  how a decoder invents a hole. It is not an edge case; it is a third of them.
+- **Every run of `http_stream_1.pcap` holds exactly fifty messages**, not one.
+  The plan's stated finding — "no run holds more than one message, in any of
+  the three" — is **false**, and it was the premise under which pipelining was
+  set aside. What survives is the conclusion, for a different reason: the
+  driver's `_decode_run` already loops until the run is exhausted, so
+  pipelining is not something this phase has to *build*. What is gone is the
+  safety margin. Exact framing is now load-bearing rather than merely tidy: a
+  body that overruns by one byte does not spoil one message, it spoils the
+  other forty-nine behind it. `http.pcap` and `http_example.pcapng` do hold
+  one message per run, which is presumably where the original claim came from.
+- **2000 messages, not 1645.** The response-side figures the plan quoted were
+  right and are why the error went unnoticed: 692 responses with
+  `Content-Length` and 308 with neither are both exactly correct. It was the
+  request side that was miscounted — 1000, not 645 — and requests carry
+  `Content-Length` too, 455 of them.
+- **853 of 2000 messages have neither framing header**, over two fifths rather
+  than the third the plan estimated from responses alone. A bodyless message is
+  normal (a `GET`, a `204`, a `304`), so "no framing header at all" is a case
+  the spec must get right — and getting it wrong is how a decoder invents a
+  hole.
+- **`http_stream_1.pcap` has no chunked message at all.** So it and
+  `http_example.pcapng` are complementary rather than overlapping, and neither
+  alone covers the construct.
 - **Bodies are complete once reassembled, and short per record.** Measuring a
   body inside one transport record says it is truncated when it is not; the
-  driver's reassembled run is the only honest place to look. Worth stating
-  because the first measurement made for this plan made exactly that mistake.
-- **`http.pcap` is where today's spec fails loudest**, and it is a ready-made
-  acceptance number: the 18 364-byte response decodes 294 bytes of headers and
-  then claims the remaining **18 070 bytes `truncated`** — a hole declared on a
-  stream where nothing was missing. That single region is larger than every
-  body in `http_stream_1.pcap` put together.
+  driver's reassembled run is the only honest place to look. Confirmed, and
+  still the trap: the first measurement made *for this settlement* also got it
+  wrong, reporting 87 messages, before the walk was made to prove itself by
+  landing on the run's end.
+- **`http.pcap` is where today's spec fails loudest**, and the acceptance
+  number is confirmed exactly: the 18 364-byte response decodes 294 bytes of
+  headers and then claims the remaining **18 070 bytes `truncated`**.
+- **`http_stream_1.pcap` fails far worse, and nobody had looked.** Today's spec
+  decodes 309 records and marks **405 421 of its 414 460 bytes `undecodable`** —
+  97.8% of the capture — in 40 regions, one per run. The mechanism is the
+  pipelining above: the first message of each run decodes its start line and
+  headers, then `to_end` reads the *next request* as a chunk size line,
+  `to_int` refuses it, and the remaining forty-nine messages are lost with it.
 
 **`http_gzip.pcap` is deliberately not in this table.** Its one response is
 gzip under `Content-Length`, which `http.pcap` already provides, so it adds
@@ -92,12 +126,14 @@ test, which is what the suite's rule about not depending on the sibling
 checkout will want. It is the right fixture for the **transforms** phase and
 should be kept for it.
 
-## Design questions to settle first
+## Design questions — all settled
 
-None of these is settled. Stage 1 settles them with a spike, as the previous
-two phases settled theirs — a written answer with code behind it.
+Settled in Stage 1 by a spike: `Select` and a bounded terminator patched into
+an installed `kober` from a scratch module, no production code touched, run
+over all three captures and 1600 fuzz cases. Each leaning is marked as it
+survived or did not.
 
-### Q1 — Does aggregation belong in the expression language or the spec model?
+### Q1 — Does aggregation belong in the expression language or the spec model? — **settled: the model**
 
 The pivotal question, and the two answers lead to different projects.
 
@@ -145,7 +181,22 @@ It reads beautifully for headers and badly for everything else, it introduces a
 map type *and* indexing syntax, and it has no answer for duplicate keys — which
 HTTP has (`Set-Cookie`).
 
-### Q2 — What does the element binding look like, and what else is in scope?
+**Settled: (2), and the leaning's first reason is the one that carried it.**
+The spike's `select` needed no change to `ExprType` and no new expression form.
+Its result is an ordinary scalar the moment it exists: a following field can
+say `computed: "picked * 2"` and the checker types it through the projection
+with machinery that was already there. That is the whole of the argument, and
+it held.
+
+**No shorthand for `any`, on the evidence.** `value: "true"` / `default:
+"false"` was written out and it reads acceptably — "when one matches, the
+answer is true". But the stronger finding is that **the finished spec never
+needs it**. Neither select in it is a bare `any`: one projects the length, the
+other tests the value. HTTP asks *what does it say*, not *is it there*. A
+shorthand would be surface with nothing behind it, which is what §3.3's table
+already refuses on its own account.
+
+### Q2 — What does the element binding look like, and what else is in scope? — **settled: the field's name**
 
 `until` already binds one: `repeat: {until: "labels.length == 0"}` resolves
 `labels` to *the element just decoded*, through `element_of` in
@@ -161,7 +212,28 @@ Settle also what else `where:` and `value:` may see. The enclosing unit's
 earlier fields, certainly. `parent` and `root` are the open part, and the
 answer should be whatever costs the checker least to be sure about.
 
-### Q3 — How does a header's value get separated from its line?
+**Settled: the repetition's own field name, and the leaning held for a better
+reason than the one given.** It is not merely consistent with `until` — it
+reuses `until`'s mechanism outright, on both sides. The checker already has
+`element_of`, and passing the source field's name through it is the entire
+change. The interpreter side is the same: the decode loop already writes
+`frame.named[item.name] = element` before evaluating an `until`, and a select
+does exactly that per element and restores the container afterwards. Neither
+half needed a concept it did not have.
+
+**Scope settled as: the enclosing unit's earlier fields, plus the element.**
+`parent` and `root` come along for free, because the scope object is the
+existing `_Scope` with one extra argument and those words are resolved by it
+already. Nothing had to be added and nothing had to be excluded.
+
+**One asymmetry, and it is deliberate: `default:` does not see the element.**
+It is evaluated with the plain scope, so naming the repetition inside a
+`default:` is refused with the ordinary "is repeated; the expression language
+has no list type". That is right — a default is what there is to say when
+*nothing* matched, so there is no element for it to mean. Verified in both
+directions.
+
+### Q3 — How does a header's value get separated from its line? — **settled: a bounded terminator**
 
 Two genuinely different answers, and this is the one where the obvious choice
 may be wrong.
@@ -192,7 +264,117 @@ itself is missing.
 Option (1) is the fallback and should be measured against (2) by writing both
 header units out and reading them.
 
-### Q4 — What does a `select` cite?
+#### Settled: (2). Both were written and both were run.
+
+Both decode all three captures, and on `http_stream_1.pcap` they **agree on the
+framing of all 2000 messages** — same `content_length`, same `chunked`, same
+end offset, zero disagreements. So the choice is not about correctness on this
+corpus. It is about what each costs, and there the gap is wider than the plan
+guessed.
+
+**Option (1) costs three new builtins, not two.**
+
+```yaml
+  header:
+    fields:
+      - name: line
+        type: {string: {size: {terminated: {delimiter: "\r\n"}}}}
+```
+
+```yaml
+      - name: content_length
+        type:
+          select:
+            from: headers
+            where: "starts_with(lower(headers.line), 'content-length:')"
+            value: "to_int(after(headers.line, ':'))"
+            default: "-1"
+      - name: chunked
+        type:
+          select:
+            from: headers
+            where: "starts_with(lower(headers.line), 'transfer-encoding:')"
+            value: "trim(lower(after(headers.line, ':'))) == 'chunked'"
+            default: "false"
+```
+
+`starts_with` and `after` are the two the plan named. **`trim` is the one it
+did not**, and it is not optional: `Transfer-Encoding: chunked` needs an
+*equality* test on the value, and `after(line, ':')` yields `" chunked"` with
+the leading space RFC 7230 permits. `Content-Length` gets away without it only
+because `to_int` strips whitespace internally — a decision the last phase made
+explicitly "to save the language a fourth function", and which turns out to
+have been saving it from exactly this. The moment a header value is compared
+rather than converted, the fourth function is back.
+
+**Option (2) costs one key on one size spec, and no builtins.**
+
+```yaml
+  header:
+    doc: >
+      One header line, split into its name and its value. The blank line that
+      ends the headers has no colon before its CRLF, so an optional bounded
+      terminator takes nothing and both come back empty.
+    fields:
+      - name: name
+        type:
+          string:
+            size: {terminated: {delimiter: ":", within: "\r\n", required: false}}
+      - name: value
+        type: {string: {size: {terminated: {delimiter: "\r\n"}}}}
+```
+
+```yaml
+      - name: content_length
+        type:
+          select:
+            from: headers
+            where: "lower(headers.name) == 'content-length'"
+            value: "to_int(headers.value)"
+            default: "-1"
+      - name: chunked
+        type:
+          select:
+            from: headers
+            where: "lower(headers.name) == 'transfer-encoding'"
+            value: "lower(headers.value) == 'chunked'"
+            default: "false"
+```
+
+The prediction held exactly: **only `lower` and `to_int`**, the two the last
+phase shipped, and §3.3's table does not grow.
+
+**And the blank line falls out as predicted**, which was the part that had to
+be checked rather than argued. `\r\n` has no `:` before its `\r\n`, so the
+optional bounded terminator takes nothing, `name` is `""`, `value` is `""`, and
+the repeat's `until` sees both empty. It needed no special case.
+
+**A third argument the plan did not anticipate, and it may be the strongest.**
+Option (2) splits the header *in the output*, not only inside expressions. On
+`http_stream_1.pcap` it emits 30 761 records against option (1)'s 18 954 — the
+difference being one record per header line, because a name and a value are
+each cited separately. A consumer reading the `.zpf` gets `Content-Length` and
+`68` as two addressable, separately-cited values. Under option (1) that split
+exists only for the duration of an expression and never reaches the file. For a
+project whose entire output is cited decoded data, that is not a side effect;
+it is the point.
+
+**What a bounded search does when the bound is missing** — the question the
+plan set for the spike. Answer: `within` is checked the same way the delimiter
+is, and the rule is *whichever comes first*. If neither is present, or the bound
+is present and the delimiter is not before it, the read behaves as though the
+delimiter were absent — so `required: false` yields the empty value and
+`required: true` is a truncation. That makes `within` orthogonal to `required`
+rather than a second spelling of it.
+
+**One loose end for Stage 4.** `required: false` on `header.name` trips an
+existing checker warning: *"a non-required terminator on a string makes
+truncation invisible"*. On a bounded terminator the warning is wrong — `within`
+*is* the guarantee the warning says is missing, since the read cannot run past
+the bound and swallow the rest of the input. Stage 4 should suppress it when
+`within` is set, and not by loosening the warning for the unbounded case.
+
+### Q4 — What does a `select` cite? — **settled: the element it selected**
 
 It decodes nothing, so it has the shape `Computed` already has (§3.2) — and
 `Computed`'s answer was "the fields its expression read", because citing its
@@ -206,7 +388,27 @@ zero-width-emission path `Computed` already exercises.
 Whatever the answer, the fuzz invariant is unchanged and must stay so: a byte
 is never both cited and marked undecoded.
 
-### Q5 — Does this stay inside §2.1's cursor rule?
+**Settled, both halves as leaned, and both paths exercised.** A match cites the
+selected element's own range — for `Content-Length: 5\r\n` at the head of a
+message, `[0, 19)`, the whole header line. A default cites nothing: zero width
+at the cursor, `[11, 11)`, on the `Computed` path that already existed.
+
+Not academic: **853 of the 2000 messages have no framing header**, so the
+default path is the majority case for `content_length` and runs on real input
+rather than on a contrived test.
+
+**The fuzz invariant holds and is unchanged.** 1600 mutated cases across four
+seeds — a bodyless request, a `Content-Length` request, a chunked response, and
+a `204` — with zero raises, zero over-claims, zero bytes both cited and marked,
+and every reason one `zpf` classifies. Both paths were reached: 348 matched,
+1605 defaulted.
+
+**Deliberately *not* `Computed`'s answer.** Citing "the fields the expression
+read" would cite the whole repetition, since `where:` names it — every header,
+for a value that came from one. The element is the narrower and truer claim,
+and it is why `select` wants its own citation rule rather than inheriting one.
+
+### Q5 — Does this stay inside §2.1's cursor rule? — **settled: yes, and it needs its own assertion**
 
 It should, and the argument is short: a `select` reads no input, moves no
 position, and evaluates over a repetition that has **already been decoded**.
@@ -223,7 +425,58 @@ Two things to confirm rather than assume:
   so a select terminates. That is worth one sentence in the design and one
   fuzz case, not an argument.
 
-### Q6 — What does the compiler generate, and what does the plan carry?
+**Ordering: settled, and the exemption does not leak.** Eight cases, run in
+both directions:
+
+| Spec says | Result |
+| --- | --- |
+| a select names the repetition | accepted |
+| an ordinary `computed` names the same repetition | refused — *"'items' is repeated; the expression language has no list type"* |
+| a select names a field that is not repeated | refused — *"there is nothing to select from"* |
+| a select names a field declared later | refused — *"a select may only ask about a repetition already decoded"* |
+| a select names a field that does not exist | refused |
+| `where:` is not boolean | refused |
+| `value:` and `default:` disagree on type | refused — *"either can be the field's value"* |
+| `default:` names the element | refused, per Q2 |
+| a later field references the select's result | accepted, typed through the projection |
+
+The exemption is scoped to `where:` and `value:` and reaches nothing else.
+
+**Totality: settled, but the plan's proposed evidence would not have proved
+it.** "One fuzz case" is not enough, and this is the settlement's sharpest
+finding. A deliberately broken select that *consumes a byte* was run against
+the full invariant set — no raises, no over-claim, no byte both cited and
+marked, coverage whole. **It passed everything.** The byte it ate is simply
+covered by whatever field or undecoded region follows, so the coverage
+guarantee, which is what those invariants protect, is undisturbed by a select
+that quietly reads.
+
+So §2.1's claim needs asserting **directly, at the seam where it is made**:
+record `cursor.tell()` either side of decoding a select and require equality.
+That assertion catches the broken implementation immediately — 579 movements
+across 977 selects — where every indirect invariant saw nothing. Stage 3 owes
+that test, and it must be checked against a consuming implementation, not
+merely observed to pass.
+
+**A second break, and it settles a design question the plan had not asked.**
+An implementation letting an `EvalError` escape from `where:` was also not
+caught — because `Decoder._one` already wraps `_value` and turns an `EvalError`
+into an `undecodable` node. Totality is therefore *structural*, exactly as Q1
+argued, provided the select is dispatched from inside `_value`.
+
+Which makes the spike's own `try/except EvalError: matched = False` around the
+predicate not merely redundant but **wrong**, and it should not be carried into
+Stage 3. With a predicate of `to_int(headers.value) > 100` and a header reading
+`Length: not-a-number`:
+
+- guarded: `value=0, status=ok` — a fabricated, plausible answer,
+- unguarded: `status=undecodable` — the truth.
+
+The guarded reading is the precise failure this project exists to avoid. An
+unevaluable predicate must make the field undecodable, exactly as an
+unevaluable size already does.
+
+### Q6 — What does the compiler generate, and what does the plan carry? — **unchanged, and Stage 5 still owes it**
 
 The neutral layer (`ops.py`) should describe a select as *what it means* — a
 repetition, a predicate, a projection, a default — with the spec's own names
@@ -235,20 +488,146 @@ consume — so `_referenced`, `_kind_exprs`, and `_kind_consumes` all have to
 learn about it, and forgetting one produced a module that called a function it
 had not generated.
 
+**Not settled by the spike, deliberately: it built no compiler side.** The
+interpreter was enough to answer Q1–Q5, and Q6 is a question about generated
+code that only writing it answers. What the spike did establish is that the
+list of walks is **longer than three**. Reading [`ops.py`](../src/kober/ops.py)
+against the construct, a `select` also has to reach:
+
+- `_unit_exprs`, which yields every expression a unit evaluates — a select has
+  three (`where`, `value`, `default`), and `_outer` reads *that* walk to decide
+  what `parent`/`root` values a unit needs threading in. Miss it and a select
+  naming `root.x` compiles to a function without the argument.
+- `_types`, which flattens a field type to the alternatives it can decode as.
+  A select decodes none, and it is not a `Switch`, so it flattens to itself —
+  fine by default, but it should be a decision rather than an accident.
+
+`_referenced` needs nothing added: a select names no unit. `_kind_consumes`
+returns `False` for it, which is the existing fall-through — and, per Q5's
+finding, that answer is *load-bearing* rather than incidental. A unit whose
+only field is a select cannot terminate a repeat, exactly as for a `Pointer`.
+The existing comment there says so about pointers and should be widened.
+
+## What the spike measured
+
+The headline: **the construct works, and on the corpus it closes the boundary
+completely.**
+
+| Capture | Today | With `select` |
+| --- | --- | --- |
+| `http_stream_1.pcap` | 309 records, **405 421 B undecodable** in 40 regions | 30 761 records, **0 undecoded regions** |
+| `http.pcap` (HTTP sessions) | 42 records, **19 342 B truncated** — the 18 070 B region among them | 90 records, **0 undecoded regions** |
+| `http_example.pcapng` | 32 records, 0 undecoded | 59 records, 0 undecoded |
+
+- Acceptance 1's sharp form is met: the 18 070-byte `truncated` region is gone,
+  because the body is there and a length-framed decode reads it.
+- Acceptance 2 holds: the chunked capture still decodes with nothing left over.
+  The record count rises because a header is now a name and a value rather than
+  a line, which is Q3's third argument showing up as a number.
+- All 2000 messages of the big capture decode, including the 1147 with
+  `Content-Length` and the 853 with neither, and including all fifty in each
+  run.
+
+## Three findings the spike turned up, none of them about `select`
+
+### 1. A pre-existing bug in the checker, and it blocks the phase's own spec
+
+Referencing a `computed` field of a **nested** unit from outside re-types that
+computed's expression against the *referrer's* visible-name set. It belongs to
+the inner unit, so every field of the inner unit looks "declared later".
+Reproduced on stock `kober` with no spike loaded:
+
+```yaml
+units:
+  outer:
+    fields:
+      - {name: alpha, type: {int: {bits: 8}}}
+      - {name: inner, type: {unit: leaf}}
+      - {name: probe, type: {computed: "inner.doubled"}}
+  leaf:
+    fields:
+      - {name: raw, type: {int: {bits: 8}}}
+      - {name: doubled, type: {computed: "raw * 2"}}
+```
+
+```
+error: probe.outer.probe: computed: 'raw' is declared later in unit 'leaf'
+```
+
+It is in `_Scope._type_of` in [`check.py`](../src/kober/check.py), whose
+`Computed` branch builds `_Scope(self.checker, unit, self.visible)` — right
+unit, wrong visible set. The `UnitRef` branch immediately above already makes
+the argument for the fix, in a comment: *ordering inside a nested unit is that
+unit's business, because by the time it can be referenced, all of it has been
+decoded.* Passing `None` does not weaken the ordering rule — a computed's own
+expression is checked in its own position by `_check_field`, and the head of
+the path is checked against the referrer's visible set by `_in_unit`.
+
+**Why it blocks this phase:** `until: "chunks.length == 0"` is the natural way
+to end a chunked body, and it is refused. No test covers it — the suite's 1047
+tests pass with the bug present. It should be fixed with its own regression
+test, checked against the bug, before or during Stage 2.
+
+### 2. `http_stream_1.pcap` cannot be "coverage-clean", and never could
+
+Acceptance 1 asks for coverage-clean at both granularities. The capture's TCP
+streams **never close** — 20 sessions, no FIN — so their declared extent runs
+to `4294967295` and `check_coverage` reports the tail of all 40 participants as
+a `coverage-gap`. Baseline and spike produce the **same 80 findings**, and a
+DNS control produces 0, so this is the capture and not the spec. `http.pcap`
+carries the same thing at smaller scale: 4 findings, identical before and
+after, including `extent-mismatch`.
+
+`http_example.pcapng` is the only capture in the corpus whose streams close,
+and both spikes are conformance- and coverage-clean on it with 0 findings.
+
+Acceptance 1 needs restating as *no coverage finding other than the unterminated
+stream tails, which are identical to the baseline's* — or the criterion should
+move to a capture that closes. Choosing between those is Stage 7's, but it must
+be a decision, not a surprise at the end.
+
+### 3. The framing lie is closed; a smaller one remains at the dispatch boundary
+
+`http.pcap` holds a DNS-over-UDP session beside its HTTP. Running the HTTP spec
+over those two datagrams reports **193 bytes `truncated`** — and `truncated` is
+**hole**-class, so it declares a seam and says the stream had a gap. It did
+not: those bytes are simply not HTTP. This is the same lie the phase exists to
+remove, relocated from framing to dispatch.
+
+It is **pre-existing and unchanged by the spike** — baseline `http.pcap` is
+19 535 B truncated, being 19 342 B of HTTP bodies plus exactly these 193 B, and
+after the spike only the 193 B remain. The mechanism is `start_line`'s required
+terminator: DNS bytes contain no CRLF, so the read is a `TruncatedRead` before
+any `confirm:` guard could run.
+
+Out of scope for this phase, and it should not be smuggled in. But Stage 7
+runs `http.pcap` whole precisely to exercise shape dispatch on a file that is
+not all one protocol, so it will meet this — and the phase should say plainly
+that it met it and left it, rather than letting the number look like a
+regression. It is a candidate for its own work: a unit needs a way to decline
+input before a required read turns a mismatch into a hole.
+
 ## Stages
 
-### Stage 1 — settle Q1–Q6, with a spike
+### Stage 1 — settle Q1–Q6, with a spike — **done**
 
 Write the finished `examples/http.yaml` **by hand, twice** — once under Q3's
 option (1) and once under option (2) — and read them against each other. Then
 prototype whichever `select` shape Q1 lands on, in scratch, and run it over
-`http_stream_1.pcap`'s 1645 messages.
+`http_stream_1.pcap`'s messages.
 
 No production code. The deliverable is this file's Q sections marked settled,
 the two hand-written header units, and the numbers from the big capture.
 
 The spike is what says whether `value: "true"` / `default: "false"` is an
 acceptable spelling for `any`, which is not a question prose can answer.
+
+**Done.** Q1–Q6 are settled above, the two header units are written out under
+Q3, and the numbers are in the two sections above. Every leaning survived,
+which is worth stating plainly because the last two phases each had one that
+did not — the corrections this stage produced were to the plan's *facts about
+the corpus*, not to its design judgment. `git status` was clean throughout and
+the 1047-test suite passes unchanged.
 
 ### Stage 2 — the construct in the model, loader, and checker
 
@@ -263,11 +642,26 @@ Evaluate it: walk the decoded elements, test the predicate, project the first
 match, fall back to the default. It reads no input and moves no position, and
 a fuzz case should hold it to that.
 
-### Stage 4 — Q3's answer, whichever it is
+Two things Stage 1 pins down, both from Q5:
 
-A bounded terminator in `cursor.py` and the size model, or two more rows in
-§3.3's table. Either way it lands with the tests that pin what it does when
-what it looks for is not there.
+- **The no-movement claim needs a direct assertion**, not a fuzz case. Record
+  `cursor.tell()` either side and require equality; the indirect invariants do
+  not catch a select that consumes. Check it against a consuming implementation.
+- **Do not guard the predicate.** Let an `EvalError` out of `where:` and
+  `value:` — `Decoder._one` turns it into an `undecodable` node, which is the
+  honest answer. Swallowing it yields a fabricated default.
+
+### Stage 4 — Q3's answer: the bounded terminator
+
+`within:` on a `terminated` size, in the size model and the decoder's
+`_read_terminated`. The rule is *whichever comes first*: if the delimiter does
+not occur before the bound, the read behaves as though it were absent, so
+`required` still decides between an empty value and a truncation.
+
+It lands with the tests that pin what it does when what it looks for is not
+there — no delimiter, no bound, neither, and the bound before the delimiter —
+and with the checker-warning fix from Q3: the "non-required terminator makes
+truncation invisible" warning must not fire when `within` is set.
 
 ### Stage 5 — the compiler
 
@@ -280,21 +674,31 @@ implementation was written second.
 The body framed by `Content-Length` **or** chunked encoding **or** neither, by
 asking the headers rather than assuming. The assumption disclaimer is deleted.
 
+Stage 1 wrote it; it is the option-(2) listing under Q3, and it decodes the
+whole corpus. What Stage 6 owes beyond transcribing it is the prose: the doc
+strings that say *why* `-1` and not `0` is the "no such header" sentinel
+(`Content-Length: 0` is a real header meaning something else), and why chunked
+wins over a length when both are present.
+
 This is the phase's acceptance criterion, and the measurable form of it is the
-big capture: 1645 messages decoding with no `truncated` region that is not a
+big capture: 2000 messages decoding with no `truncated` region that is not a
 real truncation.
 
 ### Stage 7 — fuzz, and the corpus that has never been run
 
 `http_stream_1.pcap` and `http.pcap` through `zpfwire` and the full pipeline,
-at both granularities, conformance- and coverage-clean. Mutated variants
-through the fuzz suite and the differential. A capture with 1645 real messages
+at both granularities, conformance-clean and coverage-clean **in the restated
+sense of finding 2** — the unterminated stream tails are the capture's, and the
+finding set must match the baseline's rather than being empty. Mutated variants
+through the fuzz suite and the differential. A capture with 2000 real messages
 is a better adversary than anything hand-built, and this project's findings
 have all come from that kind of input.
 
 `http.pcap` also carries a DNS-over-UDP session beside its HTTP, so running it
 whole exercises the driver's shape dispatch on a file that is not all one
-protocol — which no capture used so far does.
+protocol — which no capture used so far does. Finding 3 is what that turns up,
+and Stage 7 should record that it met it and left it rather than treating the
+193 bytes as a regression.
 
 ### Stage 8 — documentation, and what has to be restated
 
@@ -318,29 +722,53 @@ protocol — which no capture used so far does.
   expression can pass around. The construct asks a question and yields a
   scalar, and that is the whole of it.
 - **Hooks.** Still deferred, still for the reason §11.5 gives.
-- **Pipelining.** No run in either capture holds two messages, so the `to_end`
-  body and the message-per-run assumption stay as they are. If a capture turns
-  up that does, it is a finding and its own work.
+- **Pipelining — and this entry was written on a false premise.** Every run of
+  `http_stream_1.pcap` holds fifty messages, so the capture that "turns up" was
+  in the corpus from the start. It is still not work this phase does, but for
+  the opposite reason to the one given: the driver's `_decode_run` already
+  loops until a run is exhausted, so pipelining works as soon as a message
+  stops claiming bytes that are not its own. That is precisely what `select`
+  makes possible, and the spike decodes all fifty per run without touching the
+  driver. What does go is the `to_end` body — not as an enhancement but as the
+  thing that was eating the other forty-nine.
 - **A release.** 0.1.0 is still entangled with §11.4.
 
 ## Acceptance
 
-1. `examples/http.yaml` frames its body by asking the headers, and decodes
-   **all 1645 messages** of `http_stream_1.pcap` — including the 692 with
-   `Content-Length` and the 308 with no framing header — conformance- and
-   coverage-clean at both granularities, with no `truncated` region that is not
-   a real truncation. Its assumption disclaimer is deleted.
+Restated against Stage 1's measurements. Items 1 and 4 changed materially;
+the spike meets 1, 2 and the interpreter half of 4 already.
 
-   And the sharper form of the same criterion, on `http.pcap`: the 18 070-byte
-   region today's spec calls `truncated` is **gone**, because the body is there
-   and a length-framed decode reads it.
+1. `examples/http.yaml` frames its body by asking the headers, and decodes
+   **all 2000 messages** of `http_stream_1.pcap` — including the 1147 with
+   `Content-Length`, the 853 with no framing header, and all fifty in every
+   run — conformance-clean at both granularities, with **no undecoded region at
+   all**, which is the stronger claim the spike showed is reachable. Its
+   assumption disclaimer is deleted.
+
+   **Coverage** on this capture is clean *except* the unterminated stream
+   tails, which are the capture's and not the spec's: the finding set must be
+   identical to the baseline's 80. `http_example.pcapng` is the capture that
+   closes its streams and it must be coverage-clean outright, 0 findings.
+
+   And the sharper form, on `http.pcap`: the 18 070-byte region today's spec
+   calls `truncated` is **gone**, because the body is there and a length-framed
+   decode reads it. The 193 bytes of DNS-over-UDP that today's spec also calls
+   `truncated` remain, unchanged and out of scope — finding 3 above.
 2. `http_example.pcapng` still decodes exactly as it does today: the chunked
    body into its chunks, nothing left over. Closing the general case must not
-   cost the case that already works.
+   cost the case that already works. Its record count *rises* (32 → 59), which
+   is the header split and not a regression.
 3. The differential agrees on every input in both corpora and their mutations,
    at both granularities.
 4. Fuzzing a select-bearing spec raises nothing, never cites and marks the same
    byte, and terminates. Checked against a broken implementation, not merely
-   observed to pass.
+   observed to pass — **and Stage 1 showed those invariants are not sufficient
+   on their own.** A select that consumes input passes every one of them. So
+   the criterion additionally requires a direct assertion that decoding a
+   select leaves the cursor where it found it, itself checked against a
+   consuming implementation.
 5. `DESIGN.md` closes §13.2 and answers §11 question 6, and the format
-   reference documents whatever key was added.
+   reference documents both keys added — `select:` and `within:`.
+6. The nested-computed checker bug (finding 1) is fixed with a regression test
+   checked against the bug. It is not part of this construct, but this phase's
+   own spec cannot be written without it.
