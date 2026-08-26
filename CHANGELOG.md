@@ -69,6 +69,17 @@ installed from a checkout (see the README).
   At field granularity a select cites **the element it selected** — this value
   came from *that* header, not from all of them. A default cites no bytes.
 
+  It reads no input and moves no read position, so it stays on the
+  unconstrained side of §2.1 exactly as `computed:` does. That claim is
+  asserted directly, cursor either side, rather than inferred from coverage
+  staying whole: a select that *did* consume would leave coverage whole anyway,
+  the byte it took being covered by whatever followed.
+
+  An expression in `where` or `value` that cannot be evaluated makes the field
+  `undecodable`, exactly as an unevaluable size does. It is **not** treated as
+  "no match", which would report the author's default as though it had been
+  read off the wire.
+
 - `kober.spec.Pointer` and the `pointer:` spec key — a back-reference:
   *read this type at that offset, and carry on where you were*
   (`DESIGN.md` §3.2). Real DNS needs it; without it the answer section of

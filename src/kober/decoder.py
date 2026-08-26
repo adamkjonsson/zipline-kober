@@ -40,6 +40,7 @@ from kober.spec import (
     IntType,
     Pointer,
     Remaining,
+    Select,
     StringType,
     Switch,
     Terminated,
@@ -541,6 +542,8 @@ class Decoder:
             return self._leaf(item, kind, value, start, end)
         if isinstance(kind, Pointer):
             return self._pointer(item, kind, frame, cursor, read, env)
+        if isinstance(kind, Select):
+            return self._select(item, kind, frame, cursor, mark)
         if isinstance(kind, IntType):
             value = cursor.read_int(kind.bits, signed=kind.signed, endian=kind.endian)
             start, end = cursor.span(mark)
@@ -717,6 +720,68 @@ class Decoder:
         if size.consume:
             cursor.read_bytes(len(size.delimiter))
         return value
+
+    def _select(
+        self,
+        item: Field,
+        kind: Select,
+        frame: _Frame,
+        cursor: Cursor,
+        mark: int,
+    ) -> Node:
+        """Walk a decoded repetition, project the first match, else the default.
+
+        **It reads nothing and moves nothing.** The repetition is complete
+        before this runs, so there is no position to advance and no input to
+        claim — which is why the construct sits on the unconstrained side of
+        §2.1's table, exactly as :class:`~kober.spec.Computed` does. The claim
+        is asserted directly in the tests rather than inferred from coverage
+        staying whole, because a select that *did* consume would leave coverage
+        whole anyway: the byte it took would simply be covered by whatever
+        followed.
+
+        The element binds under the repetition's own name for the length of one
+        expression, which is what :meth:`_elements` already does for an
+        ``until``. The name is put back afterwards however this returns, so a
+        failure part-way cannot leave an element standing where the container
+        belongs.
+
+        Citations are the selected element's own range. That is the honest
+        evidence — this value came from *that* header, not from all of them —
+        and it is why a select does not inherit ``Computed``'s "cite what the
+        expression read", which here would cite every element. A default
+        matched nothing, so it cites nothing: zero width at the cursor.
+        """
+        container = frame.named.get(kind.source)
+        chosen: Node | None = None
+        try:
+            if container is not None and container.is_repetition:
+                for element in container.children:
+                    frame.named[kind.source] = element
+                    # Deliberately unguarded. An expression that cannot be
+                    # evaluated makes the field `undecodable` by way of
+                    # `_one`, exactly as an unevaluable size does. Treating it
+                    # as "no match" would report the author's default as though
+                    # it had been read off the wire, which is the one failure
+                    # this project exists to avoid.
+                    if self._bool(kind.where, _Environment(frame), "select where"):
+                        chosen = element
+                        break
+            if chosen is None:
+                frame.named.pop(kind.source, None)
+                if container is not None:
+                    frame.named[kind.source] = container
+                value = evaluate(kind.default, _Environment(frame))
+                start, end = cursor.span(mark)
+            else:
+                value = evaluate(kind.value, _Environment(frame))
+                start, end = chosen.off_start, chosen.off_end
+        finally:
+            if container is None:
+                frame.named.pop(kind.source, None)
+            else:
+                frame.named[kind.source] = container
+        return self._leaf(item, kind, value, start, end)
 
     def _switch(
         self,

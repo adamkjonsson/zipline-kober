@@ -16,15 +16,16 @@ differ.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
-from fuzzing import SEEDS, cases, pointer_cases
+from fuzzing import SEEDS, SELECT_SPEC, cases, pointer_cases, select_cases
 
 from kober.cursor import Cursor
 from kober.decoder import Decoder
 from kober.emit import plan
 from kober.node import Node, NodeStatus
-from kober.spec import Emit, Spec
+from kober.spec import Emit, Field, Select, Spec
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
@@ -285,3 +286,123 @@ def test_no_node_reaches_past_the_message_it_belongs_to(seed: int):
                 f"{node.name} cites [{node.off_start}, {node.off_end}) past the "
                 f"message's own end at {tree.off_end} on {data!r}"
             )
+
+
+# --- select ----------------------------------------------------------------
+#
+# A select asks about a repetition rather than reading input, so the promise it
+# could plausibly break is not "did it read too much" but "did it read at all".
+# That one is invisible to every coverage-shaped invariant: a select that
+# consumed a byte would leave coverage whole, the byte simply being covered by
+# whatever followed. So it is asserted directly, and checked against an
+# implementation that does consume.
+
+
+def select_spec() -> Spec:
+    return Spec.from_yaml(SELECT_SPEC)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_selecting_never_raises(seed: int):
+    """Including an unevaluable predicate, which must become a status not an escape."""
+    decoder = Decoder(select_spec())
+    for data in select_cases(seed):
+        try:
+            tree = decoder.decode_bytes(data)
+        except Exception as exc:
+            exc.add_note(f"escaped a decode: select seed={seed} on {data!r}")
+            raise
+        check_tree(tree, data)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+@pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD])
+def test_a_select_never_makes_a_byte_both_cited_and_undecoded(seed: int, emit: Emit):
+    """It cites an element it did not itself read, which is where the two could confuse."""
+    spec = select_spec()
+    decoder = Decoder(spec)
+    for data in select_cases(seed):
+        tree = decoder.decode_bytes(data)
+        emissions, unclaimed = plan(spec, tree, data, emit=emit)
+        cited: set[int] = set()
+        for record in emissions:
+            cited.update(range(record.off_start, record.off_end))
+        named: set[int] = set()
+        for region in unclaimed:
+            named.update(range(region.off_start, region.off_end))
+        overlap = cited & named
+        assert not overlap, (
+            f"select {emit.value}: {len(overlap)} byte(s) both cited and "
+            f"undecoded on {data!r}"
+        )
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_select_never_moves_the_read_position(seed: int):
+    """§2.1's claim, asserted at the seam where it is made.
+
+    Not derivable from any invariant above: see this section's note. Held to it
+    over adversarial input as well as the examples, because the interesting
+    case is the one where the predicate fails part-way and the walk unwinds.
+    """
+    decoder = Decoder(select_spec())
+    moved: list[tuple[str | None, int, int]] = []
+    original = Decoder._select
+
+    def watched(
+        self: Decoder, item: Field, kind: Select, frame: Any,
+        cursor: Cursor, mark: int,
+    ) -> Node:
+        before = cursor.tell()
+        node = original(self, item, kind, frame, cursor, mark)
+        if cursor.tell() != before:
+            moved.append((item.name, before, cursor.tell()))
+        return node
+
+    Decoder._select = watched
+    try:
+        for data in select_cases(seed):
+            decoder.decode_bytes(data)
+    finally:
+        Decoder._select = original
+    assert not moved, f"select moved the position: {moved[:4]}"
+
+
+def test_the_position_check_catches_a_select_that_consumes():
+    """The assertion above must fail against a consuming select, or it proves nothing."""
+    decoder = Decoder(select_spec())
+    original = Decoder._select
+    moved: list[tuple[int, int]] = []
+
+    def greedy(
+        self: Decoder, item: Field, kind: Select, frame: Any,
+        cursor: Cursor, mark: int,
+    ) -> Node:
+        node = original(self, item, kind, frame, cursor, mark)
+        before = cursor.tell()
+        if cursor.remaining_bytes() > 0:
+            cursor.read_bytes(1)
+        if cursor.tell() != before:
+            moved.append((before, cursor.tell()))
+        return node
+
+    Decoder._select = greedy
+    try:
+        for data in select_cases(1):
+            decoder.decode_bytes(data)
+    finally:
+        Decoder._select = original
+    assert moved, "the consuming implementation was never reached"
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_select_uses_the_documented_vocabulary(seed: int):
+    """An unevaluable predicate is `undecodable`, never a reason `zpf` does not know."""
+    spec = select_spec()
+    decoder = Decoder(spec)
+    allowed = {member.value for member in NodeStatus if member is not NodeStatus.OK}
+    for data in select_cases(seed):
+        tree = decoder.decode_bytes(data)
+        _, unclaimed = plan(spec, tree, data, emit=Emit.FIELD)
+        for region in unclaimed:
+            assert region.reason in allowed, f"{region.reason!r} on {data!r}"

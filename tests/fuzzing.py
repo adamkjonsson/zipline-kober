@@ -145,3 +145,75 @@ def pointer_cases(seed: int) -> list[bytes]:
 
     """
     return variants(DNS_RESPONSE, seed)
+
+
+#: A spec whose body is framed by a ``select``, and its seed input.
+#:
+#: No shipped example uses one until ``examples/http.yaml`` is finished, and the
+#: construct's promises need fuzzing before then — so the spec lives here beside
+#: the mutators, for the same reason they do: both implementations have to be
+#: held to it, over the same inputs.
+#:
+#: Written to reach the parts that can plausibly break. The projection runs
+#: ``to_int`` over text off the wire, so a mutation makes it unevaluable; the
+#: predicate runs ``lower``, so a mutation makes it miss and take the default;
+#: and the result **sizes a later field**, so a select that returned the wrong
+#: number would show up as a claim on bytes rather than as a quiet wrong value.
+SELECT_SPEC = """
+name: select_probe
+version: "1.0"
+entry: message
+input: either
+units:
+  message:
+    fields:
+      - {name: count, type: {int: {bits: 8}}}
+      - {name: items, type: {unit: item}, repeat: {count: "count"}}
+      - name: size
+        type:
+          select:
+            from: items
+            where: "lower(items.key) == 'length'"
+            value: "to_int(items.value)"
+            default: "0"
+      - name: present
+        type:
+          select:
+            from: items
+            where: "lower(items.key) == 'length'"
+            value: "true"
+            default: "false"
+      - {name: payload, type: {bytes: {size: {expr: "size"}}}}
+      - {name: rest, type: {bytes: {size: {remaining: true}}}}
+  item:
+    fields:
+      - {name: klen, type: {int: {bits: 8}}}
+      - {name: key, type: {string: {size: {expr: "klen"}}}}
+      - {name: vlen, type: {int: {bits: 8}}}
+      - {name: value, type: {string: {size: {expr: "vlen"}}}}
+"""
+
+
+def _item(key: bytes, value: bytes) -> bytes:
+    """Encode one length-prefixed key/value pair for :data:`SELECT_MESSAGE`."""
+    return bytes([len(key)]) + key + bytes([len(value)]) + value
+
+
+#: One well-formed message for :data:`SELECT_SPEC`: two items, the second of
+#: which the select matches, and a four-byte body it frames.
+SELECT_MESSAGE = (
+    bytes([2]) + _item(b"Host", b"example") + _item(b"Length", b"4") + b"body" + b"tail"
+)
+
+
+def select_cases(seed: int) -> list[bytes]:
+    """Build one batch of variants of the select-framed message.
+
+    Args:
+        seed: Which batch.
+
+    Returns:
+        The batch.
+
+    """
+    return variants(SELECT_MESSAGE, seed)
