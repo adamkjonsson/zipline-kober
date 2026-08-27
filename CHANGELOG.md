@@ -686,6 +686,14 @@ installed from a checkout (see the README).
   The `zip(…, strict=True)` paid a tuple for every element examined, when the
   span is wanted only for the one that matches.
 
+- **A repetition asks whether its *element* advances, not whether its field
+  does.** `kober.ops.FieldPlan` gains `element_consumes` beside `consumes`, and
+  the compiler's progress guard reads the new one. A conditional repeat used to
+  carry a runtime check it could never need: a condition decides whether the
+  loop runs, and says nothing about whether an iteration of it gets anywhere.
+  `consumes` keeps its meaning for the caller that wants it — an enclosing
+  unit, which a conditional field genuinely cannot make provably advancing.
+
 - **A compiled bounded terminator bounds the search itself** rather than
   searching the whole run and discarding the excess afterwards. Same answer,
   and on a long value with no delimiter in it the difference is between reading

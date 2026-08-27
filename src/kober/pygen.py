@@ -1260,7 +1260,7 @@ class _Function:
             return True
         return any(
             not item.exhaustive
-            or (item.repeat is not None and not item.consumes)
+            or (item.repeat is not None and not item.element_consumes)
             or (isinstance(item.repeat, Count) and not self.provable(item.repeat.expr))
             or any(
                 isinstance(value.size, FromExpr) and not self.provable(value.size.expr)
@@ -1754,7 +1754,7 @@ class _Function:
             self.emit(f"{pad}while {ANCHOR} < _size:")
         else:
             self.emit(f"{pad}while True:")
-        if not item.consumes:
+        if not item.element_consumes:
             self.emit(f"{inner}_before = {ANCHOR}")
         if keeping:
             self.emit(f"{inner}_pmark = {ORIGIN}")
@@ -1778,9 +1778,11 @@ class _Function:
         if target is not None:
             self.emit(f"{inner}{target}.append({ELEMENT_LOCAL})")
         self.settle(indent + 4)
-        if not item.consumes:
+        if not item.element_consumes:
             # A repetition whose element reads nothing would spin forever, and a
-            # count off the wire can ask for billions of them.
+            # count off the wire can ask for billions of them. A *condition* on
+            # the field is not a reason to check: it decides whether the loop
+            # runs, not whether an iteration of it gets anywhere.
             self.emit(f"{inner}if {ANCHOR} == _before:")
             self.emit(
                 f'{inner}    raise Undecodable("a repetition consumed no input", {ANCHOR})'
