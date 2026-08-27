@@ -198,3 +198,65 @@ def test_the_dns_excerpt_is_the_shipped_spec():
     for line in block.group(1).splitlines():
         if line.strip():
             assert line in shipped, f"not in examples/dns.yaml: {line!r}"
+
+
+# --- the construct checklist -----------------------------------------------
+#
+# `contributing.md` names fourteen exact places a new construct has to be
+# wired into. A checklist pointing at a renamed function is worse than none —
+# it reads as authoritative and sends someone to a symbol that is not there.
+
+CONTRIBUTING = DOCS / "dev" / "contributing.md"
+
+#: Every hook the checklist names, as (module, dotted symbol). Both directions
+#: are asserted: the symbol must exist, and the guide must still name it.
+CONSTRUCT_HOOKS = [
+    ("kober.spec", "FieldType"),
+    ("kober.loader", "_TYPE_KINDS"),
+    ("kober.loader", "_field_type"),
+    ("kober.check", "_Checker._check_type"),
+    ("kober.check", "_Scope._type_of"),
+    ("kober.decoder", "Decoder._value"),
+    ("kober.emit", "UNDECLARED_WIDTH"),
+    ("kober.emit", "_leaf"),
+    ("kober.ops", "_value"),
+    ("kober.ops", "_kind_exprs"),
+    ("kober.ops", "_referenced"),
+    ("kober.ops", "_kind_consumes"),
+    ("kober.ops", "_types"),
+    ("kober.pygen", "_Function.read"),
+    ("kober.pygen", "_Function.record"),
+    ("kober.cli", "_render_type"),
+]
+
+
+@pytest.mark.parametrize(
+    ("module", "symbol"), CONSTRUCT_HOOKS, ids=lambda v: v.rsplit(".", 1)[-1]
+)
+def test_every_hook_the_checklist_names_still_exists(module: str, symbol: str):
+    """Rename one of these and the guide starts lying; this fails first."""
+    import importlib
+
+    target = importlib.import_module(module)
+    for part in symbol.split("."):
+        assert hasattr(target, part), f"{module}.{symbol} — {part!r} is gone"
+        target = getattr(target, part)
+
+
+@pytest.mark.parametrize(
+    ("module", "symbol"), CONSTRUCT_HOOKS, ids=lambda v: v.rsplit(".", 1)[-1]
+)
+def test_the_checklist_still_names_every_hook(module: str, symbol: str):
+    """And the other direction: a hook dropped from the guide fails too."""
+    text = CONTRIBUTING.read_text()
+    name = symbol.split(".")[-1]
+    assert f"`{name}`" in text or f"`{symbol}`" in text, (
+        f"contributing.md no longer names {symbol}"
+    )
+
+
+def test_the_checklist_names_the_module_that_was_missed_twice():
+    """The whole reason the checklist exists, so it should not quietly go."""
+    text = CONTRIBUTING.read_text()
+    assert "cli.py" in text
+    assert "missed twice" in text

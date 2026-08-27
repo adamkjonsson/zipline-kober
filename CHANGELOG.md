@@ -944,6 +944,19 @@ installed from a checkout (see the README).
 
 ### Documentation
 
+- **`docs/dev/contributing.md` gains a checklist for adding a construct** — the
+  eight modules a new field type, size kind or repeat kind has to be wired
+  into, each row naming the exact function rather than the file, because
+  "somewhere in `check.py`" is what the two misses had in common. It also says
+  how you find out you missed one, which is never by reading the list: the
+  differential, `test_docs.py`, and `test_cli.py`'s sweep over the shipped
+  examples.
+
+  `tests/test_docs.py` guards it **in both directions** — every hook the
+  checklist names must still exist, and every hook must still be named. A
+  checklist pointing at a renamed function is worse than none, since it reads
+  as authoritative.
+
 - **A new format page, [What a spec describes](docs/format/concepts.md)**, and
   it is the one that was missing: the other three say what every key does and
   none of them said what a **unit** *is*. It now explains units as the boundary
