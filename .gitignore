@@ -12,3 +12,6 @@ _pressure_out/
 
 # Sphinx build output
 docs/_build/
+
+# A decoder compiled into the repository root for a quick look.
+/http.py

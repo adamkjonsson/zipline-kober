@@ -1608,6 +1608,39 @@ def test_a_bounded_terminator_writes_the_same_records(emit: Emit):
         writes(spec, data, emit)
 
 
+OVERLAPPING = """
+name: t
+version: "1.0"
+entry: message
+input: stream
+units:
+  message:
+    fields:
+      - name: a
+        type:
+          string:
+            size: {terminated: {delimiter: "\\r", within: "\\r\\n", required: false}}
+      - name: rest
+        type: {bytes: {size: {remaining: true}}}
+"""
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"abc\r\ndef", b"abc\rdef", b"abcdef", b"\r\nx", b"\rx", b""],
+    ids=lambda d: str(len(d)),
+)
+def test_a_delimiter_starting_at_the_bound_is_found_by_both(data: bytes):
+    """*At* the bound is not past it, and that edge is where the two could part.
+
+    The compiler bounds the search with a slice rather than testing afterwards,
+    so the slice has to end one delimiter *later* than the bound — `find` wants
+    a match to fit entirely inside it. Nothing in either example spec overlaps
+    a delimiter with its bound, so this is the only thing checking that.
+    """
+    compare(inline(OVERLAPPING), data)
+
+
 @pytest.mark.parametrize("seed", [1, 2, 3])
 def test_a_bounded_terminator_agrees_on_adversarial_input(seed: int):
     spec = inline(BOUNDED)
