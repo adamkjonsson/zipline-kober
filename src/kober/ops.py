@@ -216,18 +216,35 @@ class FieldPlan:
         return self.repeat is not None
 
     @property
+    def element_consumes(self) -> bool:
+        """Whether decoding **one value** of this field provably advances the position.
+
+        The question a repetition asks: an element that always reads a byte
+        cannot spin, so the loop needs no runtime progress check. Deliberately
+        blind to :attr:`condition`, which decides whether the loop runs at all
+        and says nothing about whether an iteration of it gets anywhere — the
+        two were one property once, and a conditional repeat carried a guard it
+        could never need.
+
+        A ``switch`` with no default is not exhaustive, so an element could be
+        undecodable rather than read, and the check stays.
+        """
+        return (
+            bool(self.types)
+            and all(value.consumes for value in self.types)
+            and self.exhaustive
+        )
+
+    @property
     def consumes(self) -> bool:
         """Whether decoding this field provably advances the read position.
 
         False for a conditional field however it is typed: the condition may
-        not hold, and then nothing is read.
+        not hold, and then nothing is read. That is the *field's* answer, and
+        it is what an enclosing unit needs; a repetition wants
+        :attr:`element_consumes` instead.
         """
-        return (
-            self.condition is None
-            and bool(self.types)
-            and all(value.consumes for value in self.types)
-            and self.exhaustive
-        )
+        return self.condition is None and self.element_consumes
 
 
 @dataclass(frozen=True)

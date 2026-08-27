@@ -454,3 +454,81 @@ def test_a_select_names_no_unit():
 
     value = Spec.from_yaml(SELECT_YAML).unit("inner").field("picked").type
     assert list(_referenced(value)) == []
+
+
+# --- what a repetition needs to know, which is not what a unit needs --------
+
+
+def repeat_plan(*, condition: str | None = None, element: str = "{unit: item}") -> Plan:
+    """Build a plan whose `items` repeats `element`, optionally conditionally."""
+    guard = f', condition: "{condition}"' if condition else ""
+    return Plan.from_spec(
+        Spec.from_yaml(
+            f"""
+name: t
+version: "1.0"
+entry: message
+input: stream
+units:
+  message:
+    fields:
+      - {{name: flag, type: {{int: {{bits: 8}}}}}}
+      - {{name: items, type: {element}{guard}, repeat: {{to_end: true}}}}
+  item:
+    fields:
+      - {{name: tag, type: {{int: {{bits: 8}}}}}}
+"""
+        )
+    )
+
+
+def items_of(plan: Plan) -> object:
+    return plan.object("message").field("items")
+
+
+def test_a_conditional_repeat_still_knows_its_element_advances():
+    """The two questions a repetition and a unit ask are not the same one.
+
+    `consumes` answers *does decoding this field advance the position*, which a
+    condition makes false — the field may not be decoded at all. A repetition
+    asks something else: *does one iteration get anywhere*, which a condition
+    says nothing about. They were one property, and a conditional repeat
+    carried a runtime progress guard it could never need.
+    """
+    item = items_of(repeat_plan(condition="flag == 1"))
+    assert item.consumes is False, "the field may not be decoded"
+    assert item.element_consumes is True, "but each element reads a byte"
+
+
+def test_an_unconditional_repeat_answers_both_the_same_way():
+    item = items_of(repeat_plan())
+    assert item.consumes is True
+    assert item.element_consumes is True
+
+
+@pytest.mark.parametrize("condition", [None, "flag == 1"], ids=["plain", "conditional"])
+def test_an_element_that_reads_nothing_never_provably_advances(condition: str | None):
+    """A `computed` reads nothing, so a repeat of one needs the guard either way."""
+    item = items_of(repeat_plan(condition=condition, element='{computed: "flag"}'))
+    assert item.element_consumes is False
+    assert item.consumes is False
+
+
+def test_a_switch_with_no_default_is_not_provably_advancing():
+    """Its element may be undecodable rather than read, so the guard stays."""
+    item = items_of(
+        repeat_plan(element='{switch: {on: "flag", cases: {1: {int: {bits: 8}}}}}')
+    )
+    assert item.element_consumes is False
+
+
+def test_a_unit_provably_advances_only_on_an_unconditional_field():
+    """`ObjectPlan.consumes` wants the field's answer, not the element's.
+
+    Guarded because it is the caller that would break if `consumes` were
+    quietly redefined to mean what a repetition wants.
+    """
+    plan = repeat_plan(condition="flag == 1")
+    assert plan.object("item").consumes is True
+    unit = plan.object("message")
+    assert unit.consumes is True, "`flag` reads a byte unconditionally"

@@ -164,6 +164,50 @@ SELECT_LOCAL = "_pick"
 SELECT_SPAN = "_pspan"
 
 
+def _free_values(value: ValueType) -> tuple[tuple[str, ...], ...]:
+    """Return the reference paths a select's expressions name from outside it.
+
+    The *base* of each path and no more: ``parent.header.length`` needs the
+    parent's ``header``, and the rest is reached from it — the same rule
+    :func:`kober.ops._outer` applies one layer up.
+
+    The element is excluded, being what the loop binds. Nothing repeated can
+    appear among the rest: the checker refuses every reference to a repeated
+    field except the source's own, so a free value is always a scalar or a
+    decoded object.
+
+    Order is the order first named, so a regenerated module does not churn.
+    """
+    found: list[tuple[str, ...]] = []
+    for expr in (value.where, value.expr, value.default):
+        if expr is None:
+            continue
+        for ref in references(expr):
+            word = ref.path[0] if ref.path[0] in SCOPE_WORDS else None
+            if word in ("root", "parent"):
+                if len(ref.path) < 2:
+                    continue
+                base = (word, ref.path[1])
+            else:
+                base = (ref.path[1] if word else ref.path[0],)
+            if base[-1] == value.source or base in found:
+                continue
+            found.append(base)
+    return tuple(found)
+
+
+def _signature(head: str, parameters: Sequence[str], returns: str) -> list[str]:
+    """Render a ``def`` line, wrapped only as far as the line length forces."""
+    one = f"{head}({', '.join(parameters)}) -> {returns}:"
+    if len(one) <= LINE_LENGTH:
+        return [one]
+    return [
+        f"{head}(",
+        *(f"    {parameter}," for parameter in parameters),
+        f") -> {returns}:",
+    ]
+
+
 def _spans_local(name: str) -> str:
     """Return the local holding a repetition's per-element byte ranges.
 
@@ -485,7 +529,11 @@ def _rule(title: str) -> str:
 
 
 def _call(
-    head: str, arguments: Sequence[str], indent: int, suffix: str = ""
+    head: str,
+    arguments: Sequence[str],
+    indent: int,
+    suffix: str = "",
+    target: str | None = None,
 ) -> list[str]:
     """Render a call, widening it only as far as the line length forces.
 
@@ -494,9 +542,11 @@ def _call(
     when it would fit on two is harder to read than the protocol it decodes.
 
     ``suffix`` is appended after the closing bracket, for the callers where the
-    call is the head of a statement rather than the whole of one.
+    call is the head of a statement rather than the whole of one. ``target`` is
+    assigned from it, for the callers where it is the right-hand side.
     """
     pad = " " * indent
+    head = head if target is None else f"{target} = {head}"
     joined = ", ".join(arguments)
     if len(pad) + len(head) + len(joined) + 2 + len(suffix) <= LINE_LENGTH:
         return [f"{pad}{head}({joined}){suffix}"]
@@ -899,6 +949,9 @@ class _Function:
         #: functions carry a sink and a path.
         self.module = module
         self.lines: list[str] = []
+        #: Module-level functions this unit's fields compile to, rendered as
+        #: they are reached and emitted beside the decode function.
+        self.helpers: list[str] = []
         self.values: list[str] = []
         self.spans: list[str] = []
         #: Repetitions whose per-element byte ranges have to be kept, because
@@ -1029,6 +1082,7 @@ class _Function:
     def render(self) -> str:
         """Return the function's source."""
         self.lines = []
+        self.helpers = []
         self.delta = 0
         for index, item in enumerate(self.obj.fields):
             self.field(index, item)
@@ -1206,7 +1260,7 @@ class _Function:
             return True
         return any(
             not item.exhaustive
-            or (item.repeat is not None and not item.consumes)
+            or (item.repeat is not None and not item.element_consumes)
             or (isinstance(item.repeat, Count) and not self.provable(item.repeat.expr))
             or any(
                 isinstance(value.size, FromExpr) and not self.provable(value.size.expr)
@@ -1700,7 +1754,7 @@ class _Function:
             self.emit(f"{pad}while {ANCHOR} < _size:")
         else:
             self.emit(f"{pad}while True:")
-        if not item.consumes:
+        if not item.element_consumes:
             self.emit(f"{inner}_before = {ANCHOR}")
         if keeping:
             self.emit(f"{inner}_pmark = {ORIGIN}")
@@ -1724,9 +1778,11 @@ class _Function:
         if target is not None:
             self.emit(f"{inner}{target}.append({ELEMENT_LOCAL})")
         self.settle(indent + 4)
-        if not item.consumes:
+        if not item.element_consumes:
             # A repetition whose element reads nothing would spin forever, and a
-            # count off the wire can ask for billions of them.
+            # count off the wire can ask for billions of them. A *condition* on
+            # the field is not a reason to check: it decides whether the loop
+            # runs, not whether an iteration of it gets anywhere.
             self.emit(f"{inner}if {ANCHOR} == _before:")
             self.emit(
                 f'{inner}    raise Undecodable("a repetition consumed no input", {ANCHOR})'
@@ -1839,19 +1895,24 @@ class _Function:
             self.emit(f'{pad}    {target} = _raw.decode({encoding}, errors="replace")')
 
     def select(self, index: int, value: ValueType, target: str | None, indent: int) -> None:
-        """Emit a select as a small function of its own, and the call to it.
+        """Emit the call to a select's function. The function itself is hoisted.
 
         **A walk over a list yielding one value is what a function is for.** In
         one it can simply `return`, so "the first match" is a return inside the
         loop and "nothing matched" is the line after it — no flag to clear, and
-        no ``for``/``else`` clause half of Python's readers misread. Inlined, the
-        same thing is six lines of loop sitting between two ordinary reads that
-        *do* move the position, which is the last place a reader wants it.
+        no ``for``/``else`` clause half of Python's readers misread. Inlined,
+        the same thing is six lines of loop sitting between two ordinary reads
+        that *do* move the position, which is the last place a reader wants it.
 
-        Nested rather than module-level so it closes over what it reads. Working
-        out a helper's free values and passing them is precisely the mistake this
-        backend has made twice — a generated module calling something it had not
-        handed everything to — and a closure cannot make it.
+        **Module-level rather than nested, and that is a reversal.** It was
+        nested first, so that it closed over what it reads and no free values
+        had to be worked out — the mistake this backend has made twice being a
+        generated module calling something it had not handed everything to. The
+        closure costs a function object and a cell per *message*, which measured
+        a fifth of a whole HTTP decode. Hoisting is worth that, and what makes
+        it safe is not care but the differential: a helper missing an argument
+        cannot decode at all, and one handed a wrong value disagrees with the
+        interpreter on the first input that reaches it.
 
         It reads no input and never touches :data:`ANCHOR`: it is given the
         position only to say where a failure happened. That is how §2.1's rule
@@ -1862,35 +1923,115 @@ class _Function:
         """
         if target is None:
             return
-        pad = " " * indent
         self.index_of = index
-        # The repetition itself, rendered without the element binding: inside
-        # `where` and `value` its name means one element, and out here it is
-        # still the list.
-        source = self.binding(index).render((value.source or "",))
-        spans = _spans_local(value.source or "")
-        name = f"_select_{target}"
-        returns = f"tuple[{ANNOTATIONS[value.kind]}, tuple[int, int]]"
-        self.emit(f"{pad}def {name}() -> {returns}:")
-        self.emit(f'{pad}    """Choose the first matching {_safe(value.source or "")}."""')
+        binding = self.binding(index)
+        free = _free_values(value)
+        name = self.helper(index, value, target, free)
+        arguments = [
+            binding.render((value.source or "",)),
+            _spans_local(value.source or ""),
+            ANCHOR,
+            self.start(),
+            *(binding.render(path) for path in free),
+        ]
         self.lines.extend(
-            _call("for " + SELECT_LOCAL + ", " + SELECT_SPAN + " in zip",
-                  [source, spans, "strict=True"], indent + 4, suffix=":")
+            _call(name, arguments, indent, target=f"{target}, _cite_{target}")
         )
-        matched = self.evaluate(
-            value.where, indent + 8, element_of=value.source, element=SELECT_LOCAL
+
+    def helper(
+        self, index: int, value: ValueType, target: str, free: tuple[tuple[str, ...], ...]
+    ) -> str:
+        """Render the module-level function one select compiles to, and name it.
+
+        Everything its three expressions name is a parameter, which is the only
+        part of hoisting that is real work. The element is excluded — it is what
+        the loop binds — and a repeated field cannot appear among the rest,
+        since the checker refuses every reference to one except the source.
+        """
+        source = value.source or ""
+        name = f"_select_{_safe(self.obj.unit)}_{_safe(target)}"
+        binding = self.binding(index)
+        listed = binding.render((source,))
+        element = _value_annotation(self.element_types(source), self.names)
+        parameters = [
+            f"{listed}: list[{element}]",
+            "_spans: list[tuple[int, int]]",
+            f"{ANCHOR}: int",
+            "_where: int",
+            *(f"{binding.render(path)}: {self.free_annotation(path)}" for path in free),
+        ]
+        returns = f"tuple[{ANNOTATIONS[value.kind]}, tuple[int, int]]"
+
+        # The expressions render into a buffer of their own, and `delta` resets
+        # because the helper reads nothing: every position it names arrives as a
+        # parameter, so there is no offset from an anchor to bake in.
+        lines, delta, index_of = self.lines, self.delta, self.index_of
+        self.lines, self.delta = [], 0
+        try:
+            matched = self.evaluate(
+                value.where, 8, element_of=source, element=SELECT_LOCAL
+            )
+            self.emit(f"        if {matched}:")
+            projected = self.evaluate(
+                value.expr, 12, element_of=source, element=SELECT_LOCAL
+            )
+            self.emit(f"            return {projected}, _spans[_i]")
+            body = self.lines
+            self.lines = []
+            fallback = self.evaluate(value.default, 4)
+            tail = [
+                *self.lines,
+                "    # Nothing matched, so there is nothing to point at.",
+                f"    return {fallback}, (_where, _where)",
+            ]
+        finally:
+            self.lines, self.delta, self.index_of = lines, delta, index_of
+
+        self.helpers.append(
+            "\n".join(
+                [
+                    *_signature(f"def {name}", parameters, returns),
+                    f'    """Choose {_safe(target)} from the first matching '
+                    f'{_safe(source)}."""',
+                    # Indexed rather than zipped: the span is wanted only for
+                    # the element that matches, and zipping pays a tuple for
+                    # every element that does not.
+                    f"    for _i in range(len({listed})):",
+                    f"        {SELECT_LOCAL} = {listed}[_i]",
+                    *body,
+                    *tail,
+                ]
+            )
         )
-        self.emit(f"{pad}        if {matched}:")
-        projected = self.evaluate(
-            value.expr, indent + 12, element_of=value.source, element=SELECT_LOCAL
-        )
-        self.emit(f"{pad}            return {projected}, {SELECT_SPAN}")
-        self.emit(f"{pad}    # Nothing matched, so there is nothing to point at.")
-        fallback = self.evaluate(value.default, indent + 4)
-        here = self.start()
-        self.emit(f"{pad}    return {fallback}, ({here}, {here})")
-        self.emit("")
-        self.emit(f"{pad}{target}, _cite_{target} = {name}()")
+        return name
+
+    def element_types(self, source: str) -> tuple[ValueType, ...]:
+        """Return what one element of a repeated field holds."""
+        for item in self.obj.fields:
+            if item.name == source:
+                return item.types
+        return ()  # pragma: no cover - the checker resolved the name already
+
+    def free_annotation(self, path: tuple[str, ...]) -> str:
+        """Return the Python type of one value a select's expressions name.
+
+        Typed from the *semantic* target rather than from the rendered local,
+        because ``root.x`` inside the entry unit renders as that unit's own
+        local and the two would otherwise be looked up in different places.
+        """
+        word = path[0] if path[0] in SCOPE_WORDS else None
+        name = path[1] if word in ("root", "parent") else path[0 if word is None else 1]
+        if word == "root":
+            unit = self.plan.entry
+        elif word == "parent":
+            unit = self.obj.parents[0] if self.obj.parents else self.obj.unit
+        else:
+            unit = self.obj.unit
+        if unit == self.obj.unit:
+            item = self.obj.field(name)
+            if item is not None:
+                return _annotation(item, self.names)
+        return _outer_annotation(self.plan, self.names, unit, name)
 
     def statement(self, call: str, target: str | None, indent: int) -> None:
         """Emit a read, assigning it only if anything can name the value."""
@@ -1999,11 +2140,21 @@ class _Function:
         delimiter = _literal(size.delimiter)
         start = self.byte()
         past = len(size.delimiter) if size.consume else 0
-        self.emit(f"{pad}_found = _data.find({delimiter}, {start})")
-        if size.within is not None:
+        if size.within is None:
+            self.emit(f"{pad}_found = _data.find({delimiter}, {start})")
+        else:
+            # Bounded at the search rather than after it. The delimiter may
+            # *begin* at the bound but not run past it, so the slice ends one
+            # delimiter later — `find` wants a match to fit entirely inside it.
+            # Testing afterwards gives the same answer and scans the whole run
+            # to do it, which on a long value with no delimiter in it is the
+            # difference between reading a few bytes and reading all of them.
             self.emit(f"{pad}_bound = _data.find({_literal(size.within)}, {start})")
-            self.emit(f"{pad}if 0 <= _bound < _found:")
-            self.emit(f"{pad}    _found = -1")
+            self.emit(
+                f"{pad}_found = _data.find({delimiter}, {start}, "
+                f"_bound + {len(size.delimiter)}) if _bound >= 0 "
+                f"else _data.find({delimiter}, {start})"
+            )
         self.emit(f"{pad}if _found < 0:")
         if size.required:
             # Not an error: in STREAM shape the value may continue in a segment
@@ -2121,9 +2272,14 @@ def render_decoder(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.
     """
     names = names or Names(plan)
     inside = granularity(plan, emit)
-    functions = [
-        _Function(plan, names, obj, inside[obj.unit], emit).render() for obj in plan.objects
-    ]
+    functions: list[str] = []
+    for obj in plan.objects:
+        generator = _Function(plan, names, obj, inside[obj.unit], emit)
+        rendered = generator.render()
+        # A unit's helpers first, so each is defined above the function whose
+        # fields it belongs to and a reader meets them in that order.
+        functions.extend(generator.helpers)
+        functions.append(rendered)
     body = "\n\n\n".join(functions)
     if "_signed(" not in body:
         return body

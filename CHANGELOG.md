@@ -671,6 +671,35 @@ installed from a checkout (see the README).
 
 ### Changed
 
+- **A compiled `select` is a module-level function rather than a nested one**,
+  and walks its repetition by index rather than by `zip`. Together those make a
+  compiled HTTP decode about **15% faster** — 6.6 µs a message to 5.8 µs over
+  2000 real messages — with byte-identical output at both granularities.
+
+  The nesting was deliberate and wrong. It closed over what it read, so no free
+  values had to be worked out; the cost is a function object and a closure cell
+  built on *every message*. Hoisting means computing what a select's three
+  expressions name and passing them, which is the analysis this backend has
+  twice got wrong — and the differential is what makes doing it safe, since a
+  helper handed the wrong value disagrees with the interpreter immediately.
+
+  The `zip(…, strict=True)` paid a tuple for every element examined, when the
+  span is wanted only for the one that matches.
+
+- **A repetition asks whether its *element* advances, not whether its field
+  does.** `kober.ops.FieldPlan` gains `element_consumes` beside `consumes`, and
+  the compiler's progress guard reads the new one. A conditional repeat used to
+  carry a runtime check it could never need: a condition decides whether the
+  loop runs, and says nothing about whether an iteration of it gets anywhere.
+  `consumes` keeps its meaning for the caller that wants it — an enclosing
+  unit, which a conditional field genuinely cannot make provably advancing.
+
+- **A compiled bounded terminator bounds the search itself** rather than
+  searching the whole run and discarding the excess afterwards. Same answer,
+  and on a long value with no delimiter in it the difference is between reading
+  a few bytes and reading all of them. The slice ends one delimiter *past* the
+  bound, because a delimiter may begin at the bound but not run past it.
+
 - **Breaking: `examples/http.yaml` frames its body by asking its headers**, and
   its assumption disclaimer is gone. It chooses between chunked encoding, a
   `Content-Length`, and no body at all, and a `header` unit now has a `name`

@@ -1608,6 +1608,39 @@ def test_a_bounded_terminator_writes_the_same_records(emit: Emit):
         writes(spec, data, emit)
 
 
+OVERLAPPING = """
+name: t
+version: "1.0"
+entry: message
+input: stream
+units:
+  message:
+    fields:
+      - name: a
+        type:
+          string:
+            size: {terminated: {delimiter: "\\r", within: "\\r\\n", required: false}}
+      - name: rest
+        type: {bytes: {size: {remaining: true}}}
+"""
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"abc\r\ndef", b"abc\rdef", b"abcdef", b"\r\nx", b"\rx", b""],
+    ids=lambda d: str(len(d)),
+)
+def test_a_delimiter_starting_at_the_bound_is_found_by_both(data: bytes):
+    """*At* the bound is not past it, and that edge is where the two could part.
+
+    The compiler bounds the search with a slice rather than testing afterwards,
+    so the slice has to end one delimiter *later* than the bound — `find` wants
+    a match to fit entirely inside it. Nothing in either example spec overlaps
+    a delimiter with its bound, so this is the only thing checking that.
+    """
+    compare(inline(OVERLAPPING), data)
+
+
 @pytest.mark.parametrize("seed", [1, 2, 3])
 def test_a_bounded_terminator_agrees_on_adversarial_input(seed: int):
     spec = inline(BOUNDED)
@@ -1633,3 +1666,43 @@ def test_both_implementations_fail_alike_on_a_mutated_framing(seed: int):
     spec = example("http")
     for data in framing_cases(seed):
         compare(spec, data)
+
+
+CONDITIONAL_REPEAT = """
+name: t
+version: "1.0"
+entry: message
+input: stream
+units:
+  message:
+    fields:
+      - {name: flag, type: {int: {bits: 8}}}
+      - {name: items, type: {unit: item}, condition: "flag == 1", repeat: {to_end: true}}
+  item:
+    fields:
+      - {name: tag, type: {int: {bits: 8}}}
+"""
+
+
+def test_a_conditional_repeat_of_a_consuming_element_needs_no_progress_guard():
+    """The guard is emitted where it is needed and not where it is not.
+
+    A condition decides whether the loop runs; it says nothing about whether an
+    iteration of it gets anywhere. Asserted on the *source* because the guard
+    can never fire here — its absence is invisible to any decode.
+    """
+    source = render(Plan.from_spec(inline(CONDITIONAL_REPEAT)))
+    assert "a repetition consumed no input" not in source
+    # And with the same shape over an element that reads nothing, it is there.
+    reading_nothing = CONDITIONAL_REPEAT.replace(
+        '{unit: item}', '{computed: "flag"}'
+    ).replace('repeat: {to_end: true}', 'repeat: {count: "flag"}')
+    assert "a repetition consumed no input" in render(Plan.from_spec(inline(reading_nothing)))
+
+
+@pytest.mark.parametrize(
+    "data", [b"\x01\x0a\x0b", b"\x00", b"\x01", b"\x02\x03"], ids=lambda d: str(len(d))
+)
+def test_a_conditional_repeat_decodes_the_same_both_ways(data: bytes):
+    """Dropping the guard must not change a single decode."""
+    compare(inline(CONDITIONAL_REPEAT), data)
