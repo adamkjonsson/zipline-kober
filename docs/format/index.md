@@ -4,6 +4,9 @@ The YAML (or JSON) document a specification is written in. This is `kober`'s
 real surface: `DESIGN.md` describes the Python *model* the loader builds, while
 these pages describe what an author actually types.
 
+- [What a spec describes](concepts.md) — start here. What a unit *is*, what
+  becomes of one in the decoded tree, in a generated decoder and in the output
+  file, and what a spec deliberately cannot say.
 - [The document](document.md) — the top level, units, fields, enums, emission
   granularity, and two YAML traps that have already caught this project.
 - [Types, sizes, and repeats](types.md) — every field type and what each does
@@ -28,6 +31,7 @@ and
 ```{toctree}
 :hidden:
 
+concepts
 document
 types
 expressions

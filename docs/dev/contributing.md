@@ -58,6 +58,53 @@ Cross-references in docstrings should name the **defining module** —
 `autodoc` documents each symbol, and the docs build treats an unresolved
 reference as an error.
 
+## Adding a construct to the language
+
+A new field type, size kind, or repeat kind touches **eight modules**, and the
+list is here because it has been got wrong twice — a `pointer` and then a
+`select` both reached `kober show` unrenderable, from the same missing branch,
+two phases apart.
+
+Work down it. Each row names the exact place, because "somewhere in `check.py`"
+is what the two misses had in common.
+
+| Module | What has to learn about it |
+| --- | --- |
+| `spec.py` | The frozen dataclass, and **the `FieldType` union** — easy to add the first and forget the second. |
+| `loader.py` | `_TYPE_KINDS`, a builder, and the branch in `_field_type` that dispatches to it. |
+| `check.py` | A branch in `_Checker._check_type` to validate it, and one in `_Scope._type_of` so a *later field can reference it*. The second is the one that gets missed: without it the construct works and nothing may name its value. |
+| `decoder.py` | A branch in `Decoder._value`. The chain ends by naming what it does not implement, so a missing branch is an `undecodable` region rather than a traceback — do not restore a silent fall-through. |
+| `emit.py` | Only if the value is **not read from the bytes it cites**: what it cites (`_leaf`) and, for an integer with no declared width, `UNDECLARED_WIDTH`. |
+| `ops.py` | A branch in `_value`, and then **four walks**, each of which has bitten someone: `_kind_exprs` (its expressions — miss it and `parent`/`root` threading silently breaks), `_referenced` (units it can reach), `_kind_consumes` (whether it advances the position), `_types` (flattening a switch). |
+| `pygen.py` | Rendering in `_Function.read`, citation in `_Function.record`, and the annotation helpers. Or an explicit refusal — a `CompileError` naming the shape is a fine answer and better than generating something subtly different. |
+| `cli.py` | A branch in `_render_type`. **This is the one that has been missed twice.** |
+
+And outside the source:
+
+- **`docs/format/types.md`** — `tests/test_docs.py` fails if a new kind is not
+  documented, so this one enforces itself.
+- **`CHANGELOG.md`**, under `Unreleased`.
+- **`DESIGN.md`** if the construct answers an open question or moves a line in
+  §2.1 or §11 — a construct that reads out of order or asks about a repetition
+  does.
+- **`tests/fuzzing.py`** if no shipped example exercises it. A seed that never
+  enters the new branch proves nothing, and
+  [Testing](testing.md) has the two rules that cost this project a bug each.
+
+### How you find out you missed one
+
+Not by reading the list — by the checks that fail:
+
+- **The differential** catches a compiler that disagrees with the interpreter,
+  which is most of what a missed `ops.py` walk produces.
+- **`test_docs.py`** catches the reference.
+- **`test_cli.py`** now runs every verb over every shipped example, which is
+  what neither `pointer` nor `select` had.
+
+So the useful move after adding a construct is to put it in a **shipped
+example**, or in a spec the suite renders and decodes. Both misses above were
+constructs that existed only in tests written alongside them.
+
 ## Changelog
 
 Every user-visible change gets an entry under `## [Unreleased]` **in the same

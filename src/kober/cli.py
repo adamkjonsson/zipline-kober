@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import textwrap
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -49,7 +50,9 @@ from kober.spec import (
     Fixed,
     FromExpr,
     IntType,
+    Pointer,
     Remaining,
+    Select,
     Spec,
     StringType,
     Switch,
@@ -286,8 +289,8 @@ def _check(spec: Spec, *, strict: bool) -> int:
 def _show(spec: Spec) -> int:
     """Print the field tree the spec describes."""
     print(f"{spec.name} {spec.version} — input: {spec.input.value}, entry: {spec.entry}")
-    if spec.doc:
-        print(f"  {spec.doc}")
+    for line in _doc_lines(spec.doc, "  "):
+        print(line)
     if spec.enums:
         print()
         for name in sorted(spec.enums):
@@ -325,6 +328,43 @@ def _reachable(spec: Spec) -> set[str]:
     return seen
 
 
+#: How wide a rendered tree is allowed to get before a doc string is wrapped.
+DOC_WIDTH = 88
+
+
+def _doc_lines(doc: str | None, prefix: str) -> list[str]:
+    r"""Render a field's documentation as tree lines under it.
+
+    **Every line carries the prefix**, which is the whole point: a ``doc:`` of
+    more than one line used to be interpolated whole, so its second line began
+    at column zero and the tree fell apart from there down. A spec is authored
+    in YAML precisely so a field can carry a paragraph of RFC citation, so that
+    was never a hypothetical shape.
+
+    Only the first paragraph is shown, and the rest is counted rather than
+    printed. ``show`` answers *what shape is this*, and a screen of prose
+    between two fields is the answer to a different question — the file itself
+    is where the whole of it lives.
+
+    Split on a **single** newline, which is what YAML's folded ``>`` leaves
+    between paragraphs: it folds the lines *within* one to spaces and keeps the
+    blank line as a lone ``\n``. A literal ``|`` block splits per line instead,
+    which for a summary is the same intent read one step finer.
+    """
+    if not doc:
+        return []
+    paragraphs = [part.strip() for part in doc.split("\n") if part.strip()]
+    if not paragraphs:
+        return []
+    first = " ".join(paragraphs[0].split())
+    width = max(DOC_WIDTH - len(prefix), 20)
+    lines = [f"{prefix}{line}" for line in textwrap.wrap(first, width)]
+    if len(paragraphs) > 1:
+        rest = len(paragraphs) - 1
+        lines.append(f"{prefix}(+{rest} more paragraph{'s' if rest > 1 else ''})")
+    return lines
+
+
 def _nested(kind: FieldType) -> list[FieldType]:
     """Return a type and every type nested in it."""
     found = [kind]
@@ -344,8 +384,7 @@ def _unit_lines(spec: Spec, unit: Unit, prefix: str, seen: tuple[str, ...]) -> l
         stem = "└── " if last else "├── "
         cont = "    " if last else "│   "
         lines.append(f"{prefix}{stem}{_field_label(item)}")
-        if item.doc:
-            lines.append(f"{prefix}{cont}  {item.doc}")
+        lines.extend(_doc_lines(item.doc, f"{prefix}{cont}  "))
         lines.extend(_descend(spec, item.type, prefix + cont, seen))
     return lines
 
@@ -394,9 +433,22 @@ def _render_type(kind: FieldType) -> str:
         return f"→ {kind.unit}({args})" if args else f"→ {kind.unit}"
     if isinstance(kind, Computed):
         return f"computed {unparse(kind.expr)}"
-    cases = ", ".join(f"{key!r}" for key in kind.cases)
-    tail = "" if kind.default is not None else ", no default"
-    return f"switch on {unparse(kind.on)} [{cases}{tail}]"
+    if isinstance(kind, Pointer):
+        return f"pointer at {unparse(kind.at)}: {_render_type(kind.type)}"
+    if isinstance(kind, Select):
+        return (
+            f"select from {kind.source} where {unparse(kind.where)}"
+            f" → {unparse(kind.value)} else {unparse(kind.default)}"
+        )
+    if isinstance(kind, Switch):
+        cases = ", ".join(f"{key!r}" for key in kind.cases)
+        tail = "" if kind.default is not None else ", no default"
+        return f"switch on {unparse(kind.on)} [{cases}{tail}]"
+    # Named rather than reached by falling off the end of the chain, which is
+    # how a `pointer` went unrenderable from the phase that added it until a
+    # `select` crashed on the same line. `show` prints what a spec describes,
+    # and a type it cannot describe should say so, not raise.
+    return f"<unrendered {type(kind).__name__}>"
 
 
 def _render_size(size: SizeSpec) -> str:
@@ -409,7 +461,8 @@ def _render_size(size: SizeSpec) -> str:
         return "remaining"
     if isinstance(size, Terminated):
         flags = "" if size.required else ", optional"
-        return f"until {size.delimiter!r}{flags}"
+        bound = f" within {size.within!r}" if size.within is not None else ""
+        return f"until {size.delimiter!r}{bound}{flags}"
     return "?"
 
 

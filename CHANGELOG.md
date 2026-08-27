@@ -769,6 +769,30 @@ installed from a checkout (see the README).
 
 ### Fixed
 
+- **`kober show` crashed on a `select`, and on a `pointer` before it.**
+  `_render_type` ended its `isinstance` chain by *assuming* whatever was left
+  was a `switch`, so a type the renderer did not know reached `kind.cases` and
+  raised `AttributeError` out of the CLI. `pointer` had been unrenderable since
+  the phase that added it — masked because the only shipped pointer sits inside
+  a switch case, and `show` does not descend into those. The chain is explicit
+  now, and an unknown type renders as `<unrendered Name>` rather than raising:
+  `show` prints what a spec describes, and one it cannot describe should say so.
+
+  The gap that let both through is that **no test ran a verb against the
+  shipped examples** — the inline specs in `tests/test_cli.py` use none of the
+  constructs those examples exist to demonstrate. Every verb now runs over
+  every shipped example, and every branch of the renderer has a case.
+
+- **A `doc:` of more than one line broke the tree `kober show` prints.** It was
+  interpolated whole, so its second line began at column zero and every line
+  below it lost its place. Each line carries the prefix now, the text is
+  wrapped, and only the first paragraph is shown — with the rest counted, since
+  `show` answers *what shape is this* and the file itself is where the whole of
+  a rationale lives.
+
+- **A bounded terminator rendered identically to an unbounded one** in `show`,
+  so two different specs printed the same line. It now shows its `within`.
+
 - **`examples/http.yaml` read every real chunked response as unframed**, and
   accounted for every byte while doing it. The header value it compared against
   `'chunked'` carries the whitespace RFC 7230 permits, so the comparison was
@@ -919,6 +943,33 @@ installed from a checkout (see the README).
   asked for a committed example and had only test fixtures.
 
 ### Documentation
+
+- **`docs/dev/contributing.md` gains a checklist for adding a construct** — the
+  eight modules a new field type, size kind or repeat kind has to be wired
+  into, each row naming the exact function rather than the file, because
+  "somewhere in `check.py`" is what the two misses had in common. It also says
+  how you find out you missed one, which is never by reading the list: the
+  differential, `test_docs.py`, and `test_cli.py`'s sweep over the shipped
+  examples.
+
+  `tests/test_docs.py` guards it **in both directions** — every hook the
+  checklist names must still exist, and every hook must still be named. A
+  checklist pointing at a renamed function is worse than none, since it reads
+  as authoritative.
+
+- **A new format page, [What a spec describes](docs/format/concepts.md)**, and
+  it is the one that was missing: the other three say what every key does and
+  none of them said what a **unit** *is*. It now explains units as the boundary
+  everything else is expressed at, and shows one spec four ways — as a shape,
+  as a decoded tree, as the Python classes `compile` generates, and as the
+  records and field paths that reach the output file. Also what `params` are
+  for (the real DNS compression-pointer case), why units exist rather than
+  anonymous nesting, what "one message" means when a run holds fifty, and what
+  a spec deliberately cannot say.
+
+  Every console block on it is real output, and `tests/test_docs.py` re-runs
+  the tool and compares, so a page that shows what `kober` prints keeps
+  printing it.
 
 - **`DESIGN.md` revision 9.** §13.2 is **closed** — its wrong diagnosis kept
   visible, and a second wrong one recorded beside it — and §11 question 6 is
