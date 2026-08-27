@@ -920,6 +920,20 @@ installed from a checkout (see the README).
 
 ### Documentation
 
+- **A new format page, [What a spec describes](docs/format/concepts.md)**, and
+  it is the one that was missing: the other three say what every key does and
+  none of them said what a **unit** *is*. It now explains units as the boundary
+  everything else is expressed at, and shows one spec four ways — as a shape,
+  as a decoded tree, as the Python classes `compile` generates, and as the
+  records and field paths that reach the output file. Also what `params` are
+  for (the real DNS compression-pointer case), why units exist rather than
+  anonymous nesting, what "one message" means when a run holds fifty, and what
+  a spec deliberately cannot say.
+
+  Every console block on it is real output, and `tests/test_docs.py` re-runs
+  the tool and compares, so a page that shows what `kober` prints keeps
+  printing it.
+
 - **`DESIGN.md` revision 9.** §13.2 is **closed** — its wrong diagnosis kept
   visible, and a second wrong one recorded beside it — and §11 question 6 is
   answered by `Select`. §3.2 gains the construct and the bounded terminator,
