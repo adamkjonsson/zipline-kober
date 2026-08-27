@@ -769,6 +769,30 @@ installed from a checkout (see the README).
 
 ### Fixed
 
+- **`kober show` crashed on a `select`, and on a `pointer` before it.**
+  `_render_type` ended its `isinstance` chain by *assuming* whatever was left
+  was a `switch`, so a type the renderer did not know reached `kind.cases` and
+  raised `AttributeError` out of the CLI. `pointer` had been unrenderable since
+  the phase that added it — masked because the only shipped pointer sits inside
+  a switch case, and `show` does not descend into those. The chain is explicit
+  now, and an unknown type renders as `<unrendered Name>` rather than raising:
+  `show` prints what a spec describes, and one it cannot describe should say so.
+
+  The gap that let both through is that **no test ran a verb against the
+  shipped examples** — the inline specs in `tests/test_cli.py` use none of the
+  constructs those examples exist to demonstrate. Every verb now runs over
+  every shipped example, and every branch of the renderer has a case.
+
+- **A `doc:` of more than one line broke the tree `kober show` prints.** It was
+  interpolated whole, so its second line began at column zero and every line
+  below it lost its place. Each line carries the prefix now, the text is
+  wrapped, and only the first paragraph is shown — with the rest counted, since
+  `show` answers *what shape is this* and the file itself is where the whole of
+  a rationale lives.
+
+- **A bounded terminator rendered identically to an unbounded one** in `show`,
+  so two different specs printed the same line. It now shows its `within`.
+
 - **`examples/http.yaml` read every real chunked response as unframed**, and
   accounted for every byte while doing it. The header value it compared against
   `'chunked'` carries the whitespace RFC 7230 permits, so the comparison was

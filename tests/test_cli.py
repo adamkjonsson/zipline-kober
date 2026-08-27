@@ -5,15 +5,13 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import pytest
 import zpf
 
 from kober.cli import FAILED, OK, build_parser, main
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 GOOD = """
 name: dns
@@ -450,3 +448,135 @@ def test_every_designed_verb_is_registered():
 
 def test_help_explains_when_a_partial_decode_is_a_failure():
     assert "conformant result, not an error" in build_parser().format_help()
+
+
+# --- the shipped examples, through every verb ------------------------------
+#
+# Nothing here ran a verb against `examples/`, and the inline specs above use
+# none of the constructs those examples are written to demonstrate. So `show`
+# crashed on a `pointer` from the phase that added one, and went on crashing
+# until a `select` hit the same line — both of them falling off the end of an
+# `isinstance` chain that ended by *assuming* `switch`.
+
+EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+SHIPPED = sorted(path.name for path in EXAMPLES.glob("*.yaml"))
+
+
+def test_there_are_shipped_examples_to_check():
+    """Or the sweep below passes by having nothing to do."""
+    assert SHIPPED
+
+
+@pytest.mark.parametrize("name", SHIPPED)
+@pytest.mark.parametrize("verb", ["check", "show"])
+def test_a_shipped_example_survives_every_verb_that_reads_it(
+    verb: str, name: str, capsys: pytest.CaptureFixture[str]
+):
+    assert main([verb, str(EXAMPLES / name)]) == OK
+    assert capsys.readouterr().out.strip()
+
+
+@pytest.mark.parametrize("name", SHIPPED)
+def test_show_renders_every_field_type_a_shipped_example_uses(
+    name: str, capsys: pytest.CaptureFixture[str]
+):
+    """A type the renderer does not know says so, rather than raising.
+
+    Asserted against the marker rather than against a crash, because the point
+    of the fix is that an unhandled type is *named*: a traceback and a silent
+    mislabel are both worse than a line saying which type went unrendered.
+    """
+    main(["show", str(EXAMPLES / name)])
+    assert "<unrendered" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        ("{int: {bits: 8}}", "u8"),
+        ("{bytes: {size: 2}}", "bytes[2]"),
+        ('{string: {size: {terminated: {delimiter: ":"}}}}', "until b':'"),
+        (
+            '{string: {size: {terminated: {delimiter: ":", within: "\\r\\n"}}}}',
+            "within b'\\r\\n'",
+        ),
+        ('{computed: "a"}', "computed a"),
+        ('{pointer: {at: "a", type: {int: {bits: 8}}}}', "pointer at a: u8"),
+        ('{switch: {on: "a", cases: {1: {int: {bits: 8}}}}}', "switch on a"),
+    ],
+)
+def test_show_renders_each_field_type(
+    kind: str, expected: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """Every branch of the renderer, so none can go unreached again."""
+    document = f"""
+name: t
+version: "1.0"
+entry: m
+units:
+  m:
+    fields:
+      - {{name: a, type: {{int: {{bits: 8}}}}}}
+      - {{name: b, type: {kind}}}
+"""
+    main(["show", write(tmp_path, document)])
+    printed = capsys.readouterr().out
+    assert expected in printed
+    assert "<unrendered" not in printed
+
+
+def test_show_renders_a_select(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    document = """
+name: t
+version: "1.0"
+entry: m
+units:
+  m:
+    fields:
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: items, type: {unit: i}, repeat: {count: "n"}}
+      - name: picked
+        type:
+          select: {from: items, where: "items.tag == 7", value: "items.tag", default: "0"}
+  i:
+    fields:
+      - {name: tag, type: {int: {bits: 8}}}
+"""
+    main(["show", write(tmp_path, document)])
+    printed = capsys.readouterr().out
+    assert "select from items where items.tag == 7 → items.tag else 0" in printed
+    assert "<unrendered" not in printed
+
+
+def test_show_keeps_the_tree_intact_through_a_multi_paragraph_doc(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """A `doc:` of more than one line used to start its second at column zero.
+
+    Which is not an exotic shape: a spec is authored in YAML so that a field
+    can carry a paragraph of RFC citation, and the shipped HTTP example does.
+    """
+    document = """
+name: t
+version: "1.0"
+entry: m
+units:
+  m:
+    fields:
+      - name: a
+        type: {int: {bits: 8}}
+        doc: >
+          The first paragraph, which is long enough to need folding across
+          more than one line of the source it is written in.
+
+          The second, which must not appear.
+      - {name: b, type: {int: {bits: 8}}}
+"""
+    main(["show", write(tmp_path, document)])
+    body = capsys.readouterr().out.split("\n")
+    doc_lines = [line for line in body if "paragraph" in line or "folding" in line]
+    assert doc_lines, "the documentation vanished"
+    for line in doc_lines:
+        assert line.startswith("│"), f"line escaped the tree: {line!r}"
+    assert any("(+1 more paragraph)" in line for line in body)
+    assert "The second, which must not appear." not in "\n".join(body)
