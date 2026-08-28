@@ -135,9 +135,10 @@ The compiled path is worth running over the same file, since both drive the same
 
 ```bash
 .venv/bin/kober compile examples/dns.yaml -o /tmp/dns.py --emit field
-.venv/bin/python -c "import sys; sys.path.insert(0, '/tmp'); import dns, kober; \
-    kober.run_compiled(dns, '/tmp/fuzz.zpf', '/tmp/compiled.zpf', \
-                       produced_by='kober', produced_at=0)"
+.venv/bin/python -c "import sys; sys.path.insert(0, '/tmp'); import dns; \
+    from kober.stage import run_compiled; \
+    run_compiled(dns, '/tmp/fuzz.zpf', '/tmp/compiled.zpf', \
+                 produced_by='kober', produced_at=0)"
 ```
 
 - [`python-zipline-wire`](https://github.com/adamkjonsson/python-zipline-wire)
@@ -149,14 +150,59 @@ The compiled path is worth running over the same file, since both drive the same
   and reordering cases than hand-built fixtures. If it lacks a protocol you
   need, that is an issue to file on *that* project.
 
-  Two limits worth knowing before planning around it. **Its TCP anomalies are
-  ignored with `--payload http`** — packet loss, corruption, retransmission,
-  RST and stray packets all warn and do nothing — so impaired *HTTP* streams
-  have to come from `packeteer fuzz` over a real capture instead. And it
-  **cannot generate chunked HTTP**, which matters because the real captures
-  cannot either: across all sixteen of them there is exactly **one** chunked
-  message, against 1151 with a `Content-Length`. Treat the chunked path as
-  having a seed behind it and not a capture.
+  **Its 0.9.0 closed the two limits this project had filed against it**, and
+  both were closed in the direction that matters here. `--payload http` now
+  honours every TCP anomaly rather than warning and ignoring it, so an impaired
+  *HTTP* stream no longer has to come from fuzzing a real capture. And it can
+  now frame a response with `Transfer-Encoding: chunked` — with `--chunked-rate`
+  for the proportion, `--min-chunk` / `--max-chunk` for the split, and
+  `--trailer-rate` for the trailer section after the terminating chunk.
+
+  That last one earns its keep immediately. The chunked path had **one** real
+  message behind it across all sixteen captures, against 1151 with a
+  `Content-Length`, and no capture in reach has a trailer at all — so the
+  spec's handling of one had never been executed by anything. It was wrong:
+  see *A trailer section is not a chunk* below.
+
+  Generate the hard case rather than the average one:
+
+  ```bash
+  ../packeteer/.venv/bin/packeteer stream --payload http \
+      --client-ip 10.0.0.2 --server-ip 10.0.0.1 --requests 30 \
+      --chunked-rate 0.5 --trailer-rate 0.5 --min-chunk 8 --max-chunk 32 \
+      --mss 200 --packet-loss 0.05 --seed 3 --pcap /tmp/http.pcap
+  ```
+
+  `--mss` is doing as much work as `--packet-loss`. At the default 1460 a
+  generated message fits inside one segment, so a loss takes a whole message
+  and never lands mid-body; at 200 a chunk boundary falls across a segment
+  boundary, which is where a streaming decoder is likeliest to be wrong.
+
+  A note on the seed. Its 0.9.0 also made a generated SYN advertise TCP options
+  by default, so **a capture regenerated with an old seed is not the old
+  capture**; `--no-tcp-options` restores the previous bytes. Nothing in this
+  project pins those bytes — the suite depends on no capture at all — so it
+  costs nothing here, but a remembered seed no longer means a remembered file.
+
+### A trailer section is not a chunk
+
+The bug `packeteer` 0.9.0 made reachable, kept here because it is the same
+shape as the one above and was found the same way.
+
+RFC 7230 §4.1 ends a chunked body with `trailer-part CRLF`, and the terminating
+chunk carries **no CRLF of its own** — what follows it is the trailer section,
+not another chunk. `examples/http.yaml` read two bytes after every chunk's
+data, terminating chunk included. With no trailers those two bytes happen to be
+the body's final CRLF, so the spec was right by coincidence on every message any
+capture could show it. With a trailer they are the first two characters of the
+first trailer line, and the remainder was left to the driver, which read it as
+further messages.
+
+Coverage was whole and conformance was clean, on both. What separated them was
+counting start lines: 40 messages from a capture of 20 request/response pairs
+without trailers, **52** from the same capture with them. The fix gives the
+section a unit of its own and reuses `header` for its elements, which is what
+the grammar says it is.
 
 ## A regression test must be checked against its bug
 

@@ -92,18 +92,29 @@ place.
 
 The same rule applies to the **test tooling**, which is upstream in the same
 sense: a gap in what an adversary can generate is a gap in what this project
-can be sure of. Three are filed against
-[`packeteer`](https://github.com/adamkjonsson/packeteer):
+can be sure of. Three were filed against
+[`packeteer`](https://github.com/adamkjonsson/packeteer), and its 0.9.0 fixed
+all three:
 
-| Issue | What | Why it matters here |
-| --- | --- | --- |
-| [#81](https://github.com/adamkjonsson/packeteer/issues/81) | `encode_http_message` adds `Content-Length` beside `Transfer-Encoding`, counting the *encoded* body | A chunked message cannot be hand-built through it, and the result is the RFC 7230 §3.3.3 ambiguity |
-| [#82](https://github.com/adamkjonsson/packeteer/issues/82) | `--payload http` cannot generate a chunked response | The framing arm the real captures also cannot reach — see `docs/dev/testing.md` |
-| [#83](https://github.com/adamkjonsson/packeteer/issues/83) | TCP anomalies are ignored with `--payload http` | Impaired *HTTP* streams have to come from fuzzing a real capture instead |
+| Issue | What | Why it mattered here | State |
+| --- | --- | --- | --- |
+| [#81](https://github.com/adamkjonsson/packeteer/issues/81) | `encode_http_message` adds `Content-Length` beside `Transfer-Encoding`, counting the *encoded* body | A chunked message cannot be hand-built through it, and the result is the RFC 7230 §3.3.3 ambiguity | Fixed in 0.9.0 |
+| [#82](https://github.com/adamkjonsson/packeteer/issues/82) | `--payload http` cannot generate a chunked response | The framing arm the real captures also cannot reach — see `docs/dev/testing.md` | Fixed in 0.9.0, with `--chunked-rate`, `--min-chunk` / `--max-chunk` and `--trailer-rate` |
+| [#83](https://github.com/adamkjonsson/packeteer/issues/83) | TCP anomalies are ignored with `--payload http` | Impaired *HTTP* streams have to come from fuzzing a real capture instead | Fixed in 0.9.0; `--mss` came with it, and matters as much |
 
-#82 is the one with a bug behind it rather than an inconvenience: the chunked
-path had one message of real traffic in reach, and a decoder that read every
-chunked response wrong shipped for a whole phase behind that.
+#82 is the one that has now paid twice. Filing it was prompted by a decoder
+that read every chunked response wrong shipping for a whole phase, behind the
+one message of real chunked traffic in reach. Its fix then found a second bug
+of the same kind on the first run: `--trailer-rate` generates a trailer
+section, no capture in reach has one, and the spec was reading it as part of
+the terminating chunk.
+
+The general point is the one worth keeping. **Both bugs were invisible to every
+check this project runs** — coverage whole, conformance clean, nothing marked
+undecoded — and both were found by traffic that did not exist until the tool
+upstream could make it. That is why a limitation in the test tooling is tracked
+here as an open question about *this* codebase rather than as someone else's
+backlog.
 
 ## Commit messages
 

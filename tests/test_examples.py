@@ -244,6 +244,67 @@ def test_http_lets_chunked_win_over_a_content_length():
     assert tree.off_end == len(message)
 
 
+def test_http_reads_a_trailer_section_after_the_last_chunk():
+    """Regression, and the second bug of exactly the shape coverage cannot see.
+
+    RFC 7230 §4.1 ends a chunked body with `trailer-part CRLF`, and the
+    terminating chunk carries no CRLF of its own. The spec read two bytes after
+    every chunk's data, so on a body with trailers it ate the first two bytes of
+    the first trailer line and left the rest to the driver, which decoded it as
+    further messages. Every byte stayed cited, nothing was marked undecoded, and
+    the decode was nonsense.
+
+    Found by `packeteer` 0.9.0's `--trailer-rate`, which is traffic no capture in
+    reach could supply — the sixteen real ones hold one chunked message between
+    them, and it has no trailer.
+    """
+    spec = load("http.yaml")
+    message = (
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+        b"Trailer: X-Checksum\r\n\r\n"
+        b"4\r\nabcd\r\n0\r\nX-Checksum: deadbeef\r\n\r\n"
+    )
+    tree = Decoder(spec).decode_bytes(message)
+    assert tree.status is NodeStatus.OK
+    assert tree.off_end == len(message), "the trailer was left to the driver"
+    assert [c.find("length").value for c in tree.find("chunks").children] == [4, 0]
+    pairs = [
+        (f.find("name").value, f.find("value").value)
+        for f in tree.find("trailers").find("fields").children
+    ]
+    assert pairs == [("X-Checksum", " deadbeef"), ("", "")]
+
+
+def test_http_reads_a_chunked_body_whose_trailer_section_is_empty():
+    """The common case, and what makes the terminating CRLF need no special case.
+
+    With no trailers the section is one empty element and the two bytes it
+    consumes are the body's final CRLF. This is the half that used to work by
+    coincidence — the chunk CRLF happened to swallow exactly those two bytes —
+    so it is worth pinning now that the coincidence is gone.
+    """
+    spec = load("http.yaml")
+    message = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n0\r\n\r\n"
+    tree = Decoder(spec).decode_bytes(message)
+    assert tree.status is NodeStatus.OK
+    assert tree.off_end == len(message)
+    pairs = [
+        (f.find("name").value, f.find("value").value)
+        for f in tree.find("trailers").find("fields").children
+    ]
+    assert pairs == [("", "")]
+
+
+def test_http_reads_no_trailer_section_on_a_counted_body():
+    """The section belongs to chunked framing, so a counted message has none."""
+    spec = load("http.yaml")
+    message = b"POST /x HTTP/1.1\r\nContent-Length: 4\r\nHost: h\r\n\r\nbody"
+    tree = Decoder(spec).decode_bytes(message)
+    assert tree.status is NodeStatus.OK
+    assert tree.find("trailers") is None
+    assert tree.off_end == len(message)
+
+
 def test_http_matches_a_header_name_whatever_its_case():
     """RFC 7230 §3.2 says the names are case-insensitive, so the spec says `lower`."""
     spec = load("http.yaml")

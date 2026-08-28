@@ -101,6 +101,26 @@ units:
           resolves it by saying `Transfer-Encoding` overrides `Content-Length`.
           Reading the length instead would be the request-smuggling reading.
 
+      - name: trailers
+        type: {unit: trailer_section}
+        condition: "chunked"
+        doc: >
+          The trailer section that closes a chunked body, and the CRLF that
+          ends it — RFC 7230 §4.1's `trailer-part CRLF`.
+
+          It is the same shape as the header block and so is the same unit,
+          read the same way and ended by the same blank line. That blank line
+          is the body's final CRLF, which is why a body with no trailers needs
+          no special case: the repetition reads one empty element and stops,
+          having consumed exactly those two bytes.
+
+          A trailer is legal, is what `Trailer:` announces, and is widely
+          forgotten. Forgetting it here did not look like a hole: the chunk
+          CRLF above swallowed two bytes of the first trailer line and the
+          driver read the rest as further messages, so every byte stayed
+          cited and the decode was nonsense — the failure `docs/dev/testing.md`
+          warns about, found by the traffic `packeteer` 0.9.0 can now generate.
+
       - name: body
         type: {bytes: {size: {expr: "content_length"}}}
         condition: "not chunked and content_length > 0"
@@ -142,6 +162,26 @@ units:
           on the way past, so a length needs nothing; a comparison needs
           `trim`, which is what `chunked` above does and why.
 
+  trailer_section:
+    doc: >
+      The trailer section that closes a chunked body: zero or more header
+      lines, then the blank line that ends them.
+
+      It has a unit of its own rather than being a repetition inside
+      `message` because it *is* one thing — RFC 7230 §4.1's `trailer-part
+      CRLF` — and naming it says so. The elements are `header`, unchanged: a
+      trailer field is a header field, and reading it as anything else would
+      be inventing a difference the grammar does not have.
+    fields:
+      - name: fields
+        type: {unit: header}
+        repeat: {until: "fields.name == '' and fields.value == ''"}
+        doc: >
+          Up to and including the blank line, exactly as the header block
+          above is read. A body with no trailers is not a special case: the
+          repetition reads one empty element and stops, consuming the two
+          bytes of the body's final CRLF and nothing more.
+
   chunk:
     doc: >
       One chunk: a hexadecimal size line, that many bytes, and the CRLF after
@@ -158,4 +198,14 @@ units:
         doc: Opaque, for the reason the length-framed body gives.
       - name: null
         type: {bytes: {size: 2}}
-        doc: The CRLF after the data.
+        condition: "length > 0"
+        doc: >
+          The CRLF after the data — and only after data.
+
+          RFC 7230 §4.1 gives the terminating chunk no such CRLF: it is
+          `1*("0") [chunk-ext] CRLF` and nothing more, because what follows it
+          is the trailer section, not another chunk. Reading two bytes here
+          unconditionally ate the first two of whatever came next, which is
+          harmless only when the trailer section is empty and the bytes eaten
+          happen to be the CRLF that closes it.
+

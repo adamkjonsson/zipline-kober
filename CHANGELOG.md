@@ -769,6 +769,38 @@ installed from a checkout (see the README).
 
 ### Fixed
 
+- **`examples/http.yaml` read a chunked body's trailer section as part of the
+  terminating chunk.** RFC 7230 §4.1 ends a chunked body with `trailer-part
+  CRLF`, and the terminating chunk carries no CRLF of its own — what follows it
+  is the trailer section, not another chunk. The spec read two bytes after
+  *every* chunk's data. With no trailers those two bytes are the body's final
+  CRLF, so it was right by coincidence; with a trailer they are the first two
+  characters of the first trailer line, and everything after them was left to
+  the stage driver, which decoded it as further messages.
+
+  The chunk's trailing CRLF is now conditional on the chunk having carried
+  data, and a new `trailer_section` unit reads what follows: zero or more
+  `header` elements ended by the blank line, which is the same shape and so is
+  the same unit. A body with no trailers needs no special case — the repetition
+  reads one empty element and consumes exactly the final CRLF. A counted
+  message has no trailer section at all.
+
+  **Nothing this project checks could see it.** Coverage was whole, conformance
+  was clean, and no region was marked undecoded, because the leftover bytes were
+  cited by the phantom messages the driver made of them. What separated right
+  from wrong was counting start lines: a generated capture of 20
+  request/response pairs decoded as 40 messages without trailers and **52** with
+  them, and now decodes as 40 either way.
+
+  It was found by [`packeteer`](https://github.com/adamkjonsson/packeteer)
+  0.9.0, whose `--trailer-rate` generates traffic no capture in reach can
+  supply: across the sixteen real captures there is one chunked message and no
+  trailer at all. Its 0.9.0 also closed
+  [#81](https://github.com/adamkjonsson/packeteer/issues/81),
+  [#82](https://github.com/adamkjonsson/packeteer/issues/82) and
+  [#83](https://github.com/adamkjonsson/packeteer/issues/83), the three
+  limitations this project had filed against it.
+
 - **`kober show` crashed on a `select`, and on a `pointer` before it.**
   `_render_type` ended its `isinstance` chain by *assuming* whatever was left
   was a `switch`, so a type the renderer did not know reached `kind.cases` and
@@ -943,6 +975,31 @@ installed from a checkout (see the README).
   asked for a committed example and had only test fixtures.
 
 ### Documentation
+
+- **The deeper pipeline's compiled-path snippet named a function that does not
+  exist.** `README.md` and `docs/dev/testing.md` both said
+  `kober.run_compiled`; the symbol is `kober.stage.run_compiled` and is not
+  re-exported at the package root, so the snippet raised `AttributeError`
+  before decoding anything. Found by running it. `DESIGN.md` and
+  `plans/COMPILER-PHASE-PLAN.md` carry the same name and are left alone as
+  records of what was designed.
+
+- **The `packeteer` notes are rewritten for its 0.9.0**, which fixed all three
+  issues this project had filed against it. `README.md` and
+  `docs/dev/testing.md` now show generating impaired, chunked, trailer-carrying
+  HTTP directly rather than saying it cannot be done, and say why `--mss` is
+  doing as much work as `--packet-loss`: at the default 1460 a generated
+  message fits in one segment, so a loss takes a whole message instead of
+  landing mid-body. `docs/dev/decisions.md` marks the three issues fixed and
+  keeps what they cost, since both bugs they were filed over were invisible to
+  every check this project runs. `docs/dev/testing.md` gains *A trailer section
+  is not a chunk* as the worked example.
+
+  The notes also record that a generated SYN now advertises TCP options by
+  default, so a capture regenerated from a remembered seed is not the
+  remembered capture (`--no-tcp-options` restores the old bytes). Nothing here
+  pins those bytes — the suite depends on no capture — so it costs this project
+  nothing.
 
 - **`docs/dev/contributing.md` gains a checklist for adding a construct** — the
   eight modules a new field type, size kind or repeat kind has to be wired
