@@ -101,11 +101,17 @@ python -m venv .venv
   - `../python-zipline-wire` converts real captures to `.zpf`
     (`zpfwire convert CAPTURE -o OUT.zpf`); its `tests/captures/` holds
     sixteen, including DNS, HTTP, and packet loss. Between them they hold
-    exactly **one** chunked HTTP message, against 1151 with a `Content-Length`
-    — so the chunked path has a seed behind it, not a capture.
+    exactly **one** chunked HTTP message, against 1151 with a `Content-Length`,
+    and no trailer section at all — the chunked path is generated, not captured.
   - `../packeteer` generates synthetic traffic and adversarial variants
     (`packeteer fuzz`, and `packeteer stream --packet-loss --gap-jitter`).
     If it lacks a protocol, that is an issue to file on *that* project.
+    Since its **0.9.0** it can impair `--payload http` and frame a chunked
+    response (`--chunked-rate`, `--min-chunk` / `--max-chunk`,
+    `--trailer-rate`, `--mss`), which is the only source of chunked traffic
+    there is. Two bugs in `examples/http.yaml` have come out of it, both
+    invisible to coverage and conformance — so **assert the shape**, and
+    counting start lines is the cheapest way to.
   - The deeper pipeline is in the README, under Fuzzing. Run it before a
     release or after touching the stage driver — it is the only thing that
     reaches the driver, and it is what found the seam bug.

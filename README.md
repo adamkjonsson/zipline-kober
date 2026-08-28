@@ -252,13 +252,26 @@ truncated messages between whole ones, several records per run — rather than
 one adversarial buffer.
 
 [`packeteer`](https://github.com/adamkjonsson/packeteer) can also generate
-traffic with impairments directly (`packeteer stream --packet-loss
---gap-jitter …`), which is a better source of gap and reordering cases than
-hand-built fixtures — **except for HTTP**, where its TCP anomalies are ignored
-([packeteer#83](https://github.com/adamkjonsson/packeteer/issues/83)) and it
-cannot produce a chunked body
-([#82](https://github.com/adamkjonsson/packeteer/issues/82)). Impaired HTTP has
-to come from `packeteer fuzz` over a real capture instead.
+traffic with impairments directly, which is a better source of gap and
+reordering cases than hand-built fixtures. Since its 0.9.0 that includes
+**HTTP**, which it could not impair or chunk before:
+
+```bash
+# Chunked bodies, with trailers, split small enough to straddle segments,
+# on a lossy wire — none of which any capture in reach can supply.
+../packeteer/.venv/bin/packeteer stream --payload http \
+    --client-ip 10.0.0.2 --server-ip 10.0.0.1 --requests 30 \
+    --chunked-rate 0.5 --trailer-rate 0.5 --min-chunk 8 --max-chunk 32 \
+    --mss 200 --packet-loss 0.05 --seed 3 --pcap /tmp/http.pcap
+```
+
+`--mss` matters as much as the impairment: at the default 1460 a generated
+message fits in one segment, so losing one loses a whole message. Lower it and
+a chunk boundary falls across a segment boundary, which is the case a streaming
+decoder is most likely to get wrong. Assert the **shape** of the result, not
+just its coverage: the first thing this found was a chunked *trailer* section
+that `examples/http.yaml` mis-read, with every byte still cited and nothing
+marked undecoded.
 
 ## License
 
