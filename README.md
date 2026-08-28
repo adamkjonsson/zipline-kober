@@ -151,8 +151,8 @@ dns.py: 5 unit(s), field granularity
 Fields are `int` and `str` rather than a generic tree, so an editor can complete
 them and a typo is an error at import time instead of `None` at runtime. Byte
 ranges live beside the values rather than wrapping them, which is what keeps a
-decode cheap. `kober.run_compiled` drives such a module over a `.zpf` file
-exactly as `run` drives the interpreter.
+decode cheap. `kober.stage.run_compiled` drives such a module over a `.zpf`
+file exactly as `run` drives the interpreter.
 
 The interpreter is not going anywhere: it is what `try` should always use, and
 it is the reference implementation the generated code is tested against — the

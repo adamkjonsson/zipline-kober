@@ -944,6 +944,14 @@ installed from a checkout (see the README).
 
 ### Documentation
 
+- **The deeper pipeline's compiled-path snippet named a function that does not
+  exist.** `README.md` and `docs/dev/testing.md` both said
+  `kober.run_compiled`; the symbol is `kober.stage.run_compiled` and is not
+  re-exported at the package root, so the snippet raised `AttributeError`
+  before decoding anything. Found by running it. `DESIGN.md` and
+  `plans/COMPILER-PHASE-PLAN.md` carry the same name and are left alone as
+  records of what was designed.
+
 - **`docs/dev/contributing.md` gains a checklist for adding a construct** — the
   eight modules a new field type, size kind or repeat kind has to be wired
   into, each row naming the exact function rather than the file, because

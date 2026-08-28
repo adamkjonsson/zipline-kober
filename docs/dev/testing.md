@@ -135,9 +135,10 @@ The compiled path is worth running over the same file, since both drive the same
 
 ```bash
 .venv/bin/kober compile examples/dns.yaml -o /tmp/dns.py --emit field
-.venv/bin/python -c "import sys; sys.path.insert(0, '/tmp'); import dns, kober; \
-    kober.run_compiled(dns, '/tmp/fuzz.zpf', '/tmp/compiled.zpf', \
-                       produced_by='kober', produced_at=0)"
+.venv/bin/python -c "import sys; sys.path.insert(0, '/tmp'); import dns; \
+    from kober.stage import run_compiled; \
+    run_compiled(dns, '/tmp/fuzz.zpf', '/tmp/compiled.zpf', \
+                 produced_by='kober', produced_at=0)"
 ```
 
 - [`python-zipline-wire`](https://github.com/adamkjonsson/python-zipline-wire)
