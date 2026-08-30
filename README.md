@@ -273,6 +273,22 @@ just its coverage: the first thing this found was a chunked *trailer* section
 that `examples/http.yaml` mis-read, with every byte still cited and nothing
 marked undecoded.
 
+Since packeteer 0.12.0 the same is possible for **DNS**, which previously had to
+come from fuzzing a capture. `--payload` takes any registered protocol, and
+`--protocol-messages` says what to send — including bytes of your own, which is
+how a *compressed* response gets into a generated stream:
+
+```bash
+# messages.json: [{"raw": "<query hex>"}, {"raw": "<compressed response hex>"}]
+../packeteer/.venv/bin/packeteer stream --payload dns --protocol udp \
+    --protocol-messages messages.json --client-ip 10.0.0.2 --server-ip 10.0.0.1 \
+    --packets 40 --packet-loss 0.05 --gap-jitter 0.01 --seed 5 --pcap /tmp/dns.pcap
+```
+
+Each element is a protocol **section body** — `{"raw": …}`, not `{"dns": {…}}`.
+The wrapped form is what `packeteer parse` writes and it is accepted in silence,
+building an empty 12-byte header instead of your message.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

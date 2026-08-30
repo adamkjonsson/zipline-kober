@@ -147,8 +147,11 @@ The compiled path is worth running over the same file, since both drive the same
 - [`packeteer`](https://github.com/adamkjonsson/packeteer) generates synthetic
   traffic and adversarial variants, and can produce impairments directly
   (`packeteer stream --packet-loss --gap-jitter …`) — a better source of gap
-  and reordering cases than hand-built fixtures. If it lacks a protocol you
-  need, that is an issue to file on *that* project.
+  and reordering cases than hand-built fixtures. Since its 0.11.0 a protocol it
+  lacks can be **written** rather than filed: it has a protocol spec language of
+  its own, with `packeteer protocol check|show|compile`, and `--load-protocol`
+  puts the result on the command line. Filing an issue is now for what that
+  language cannot express.
 
   **Its 0.9.0 closed the two limits this project had filed against it**, and
   both were closed in the direction that matters here. `--payload http` now
@@ -183,6 +186,47 @@ The compiled path is worth running over the same file, since both drive the same
   capture**; `--no-tcp-options` restores the previous bytes. Nothing in this
   project pins those bytes — the suite depends on no capture at all — so it
   costs nothing here, but a remembered seed no longer means a remembered file.
+  Its 0.12.0 changed rebuilt bytes again, so the caution stands generally.
+
+### Generated DNS, and what 0.12.0 changed about the fuzzed kind
+
+Two things arrived in `packeteer` 0.12.0 that matter here, and both are about
+**compression pointers** — the construct `examples/dns.yaml` follows with
+`pointer:`, and the one no in-suite test can supply adversarially.
+
+**A compressed DNS message now round-trips.** Before, `parse` decoded name
+compression correctly and `build` wrote every name out in full, so a compressed
+message re-encoded larger than captured and no packet carrying one ever rebuilt
+— 118 of 238 in one of packeteer's own captures. Whatever `packeteer fuzz`
+produced from a DNS capture, it was not the compressed majority of it. It is
+now: one run of the pipeline above over `dns_example.pcapng` yields 340 messages
+in which **1932 compression pointers are followed**, conformant and with every
+byte accounted for.
+
+**DNS can now be generated rather than only fuzzed.** `--payload` takes any
+registered protocol, and `--protocol-messages` says which messages to send — so
+the "generate the hard case rather than the average one" that HTTP got in 0.9.0
+is available for DNS, impairments and all:
+
+```bash
+# messages.json: [{"raw": "<query hex>"}, {"raw": "<compressed response hex>"}]
+../packeteer/.venv/bin/packeteer stream --payload dns --protocol udp \
+    --protocol-messages messages.json --client-ip 10.0.0.2 --server-ip 10.0.0.1 \
+    --packets 40 --packet-loss 0.05 --gap-jitter 0.01 --seed 5 --pcap /tmp/dns.pcap
+```
+
+`raw:` is what makes this worth doing. A *generated* DNS message is built from
+decoded fields and writes every name in full, so it carries no pointer at all;
+supplying the bytes yourself is the only way to put a compressed response into
+an impaired stream, and a compressed response behind a lost datagram is exactly
+the case nothing else here can produce.
+
+**One trap, since it cost a run to find.** Each element of the file is a
+protocol **section body** — `{"raw": …}` — not the `{"dns": {…}}` shape that
+`packeteer parse` writes. The wrapped form is accepted in silence and builds an
+empty 12-byte header, so the pipeline runs, the output is conformant, coverage
+is complete, and every message is a bare DNS header. Assert the shape: counting
+`.target` records is the cheapest way to know a pointer was followed at all.
 
 ### A trailer section is not a chunk
 

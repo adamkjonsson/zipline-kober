@@ -105,13 +105,23 @@ python -m venv .venv
     and no trailer section at all — the chunked path is generated, not captured.
   - `../packeteer` generates synthetic traffic and adversarial variants
     (`packeteer fuzz`, and `packeteer stream --packet-loss --gap-jitter`).
-    If it lacks a protocol, that is an issue to file on *that* project.
     Since its **0.9.0** it can impair `--payload http` and frame a chunked
     response (`--chunked-rate`, `--min-chunk` / `--max-chunk`,
     `--trailer-rate`, `--mss`), which is the only source of chunked traffic
     there is. Two bugs in `examples/http.yaml` have come out of it, both
     invisible to coverage and conformance — so **assert the shape**, and
     counting start lines is the cheapest way to.
+    Since its **0.12.0** `--payload` takes any registered protocol with
+    `--protocol-messages FILE` saying what to send, so **DNS can be generated
+    rather than only fuzzed** — and a `raw:` section is the only way to put a
+    *compressed* response into an impaired stream, since a built message writes
+    every name in full. Each element of that file is a section body
+    (`{"raw": …}`), not the `{"dns": {…}}` shape `packeteer parse` writes; the
+    wrapped form is accepted in silence and builds an empty header. 0.12.0 also
+    made compressed DNS round-trip, so a fuzzed capture now carries the
+    pointers it always had — count `.target` records to know.
+    If it lacks a protocol, write one as a `packeteer protocol` spec (0.11.0)
+    rather than filing; file when that language cannot express it.
   - The deeper pipeline is in the README, under Fuzzing. Run it before a
     release or after touching the stage driver — it is the only thing that
     reaches the driver, and it is what found the seam bug.
