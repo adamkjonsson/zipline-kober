@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING
 
-from kober.check import require_valid
+from kober.check import fill_widths, require_valid
 from kober.cursor import Cursor
 from kober.errors import EvalError, TruncatedRead
 from kober.expr import ExprValue, evaluate
@@ -35,6 +35,7 @@ from kober.spec import (
     Computed,
     Count,
     Emit,
+    Fill,
     Fixed,
     FromExpr,
     IntType,
@@ -139,6 +140,11 @@ class _Frame:
     params: dict[str, ExprValue] = dataclass_field(default_factory=dict)
     named: dict[str, Node] = dataclass_field(default_factory=dict)
     parent: _Frame | None = None
+    #: What the field being decoded resolves a ``fill`` to, in bytes. Set per
+    #: field rather than passed down, because a size is read four calls below
+    #: the loop that knows which field it belongs to — and the frame is already
+    #: the thing that travels that distance.
+    fill: int | None = None
 
     def root(self) -> _Frame:
         """Return the outermost frame."""
@@ -229,6 +235,13 @@ class Decoder:
             require_valid(spec)
         self.spec = spec
         self.emit = emit
+        #: What each ``fill`` field resolves to, by ``(unit, field index)``.
+        #: Precomputed rather than asked per decode, and kept here rather than
+        #: taken off a check result: a decoder may run with ``check=False``, so
+        #: it cannot rely on a check having happened. ``None`` is a width the
+        #: spec does not fix, which only reaches here under ``check=False`` and
+        #: becomes an ``undecodable`` field rather than a guess.
+        self._fills = fill_widths(spec)
 
     def decode_bytes(self, data: bytes, *, base: int = 0) -> Node:
         """Decode one buffer as a single instance of the entry unit.
@@ -352,7 +365,8 @@ class Decoder:
         children: list[Node] = []
         status, detail = NodeStatus.OK, None
         try:
-            for item in unit.fields:
+            for index, item in enumerate(unit.fields):
+                frame.fill = self._fills.get((unit.name, index))
                 child = self._field(item, frame, cursor, read)
                 if child is None:
                     continue
@@ -483,8 +497,9 @@ class Decoder:
                     "cannot terminate",
                 )
             if isinstance(repeat, Until):
-                if item.name is not None:
-                    frame.named[item.name] = element
+                bound = repeat.alias or item.name
+                if bound is not None:
+                    frame.named[bound] = element
                 if self._bool(repeat.expr, _Environment(frame), "repeat until"):
                     return
 
@@ -701,7 +716,32 @@ class Decoder:
             return cursor.read_bytes(count)
         if isinstance(size, Remaining):
             return cursor.read_remaining()
+        if isinstance(size, Fill):
+            return self._read_fill(cursor, env)
         return self._read_terminated(size, cursor)
+
+    def _read_fill(self, cursor: Cursor, env: _Environment) -> bytes:
+        """Read everything left except what the fields after this one claim.
+
+        The trailing width was resolved from the spec when the decoder was
+        built, so this is arithmetic rather than a decision. Too little input
+        to hold the trailer is a **truncation** — the message was cut short,
+        which is exactly what a short counted read means — and not a bad spec.
+        """
+        trailing = env.frame.fill
+        if trailing is None:
+            raise _Stop(
+                NodeStatus.UNDECODABLE,
+                "a fill whose trailing width the spec does not fix; run the checker",
+            )
+        available = cursor.remaining_bytes()
+        if available < trailing:
+            msg = (
+                f"a fill leaves {trailing} byte(s) to the fields after it, and only "
+                f"{available} remain"
+            )
+            raise TruncatedRead(msg)
+        return cursor.read_bytes(available - trailing)
 
     def _read_terminated(self, size: Terminated, cursor: Cursor) -> bytes:
         """Read up to a delimiter, treating its absence per ``required``.
@@ -753,11 +793,13 @@ class Decoder:
         whole anyway: the byte it took would simply be covered by whatever
         followed.
 
-        The element binds under the repetition's own name for the length of one
-        expression, which is what :meth:`_elements` already does for an
-        ``until``. The name is put back afterwards however this returns, so a
-        failure part-way cannot leave an element standing where the container
-        belongs.
+        The element binds under the select's ``as:`` name, or under the
+        repetition's own name where there is none — which is what
+        :meth:`_elements` also does for an ``until``. Under the shorthand the
+        binding is temporary and the container is put back afterwards however
+        this returns, so a failure part-way cannot leave an element standing
+        where the repetition belongs. Under an alias nothing is shadowed at
+        all, which is the point of writing one.
 
         Citations are the selected element's own range. That is the honest
         evidence — this value came from *that* header, not from all of them —
@@ -766,11 +808,12 @@ class Decoder:
         matched nothing, so it cites nothing: zero width at the cursor.
         """
         container = frame.named.get(kind.source)
+        bound = kind.alias or kind.source
         chosen: Node | None = None
         try:
             if container is not None and container.is_repetition:
                 for element in container.children:
-                    frame.named[kind.source] = element
+                    frame.named[bound] = element
                     # Deliberately unguarded. An expression that cannot be
                     # evaluated makes the field `undecodable` by way of
                     # `_one`, exactly as an unevaluable size does. Treating it
@@ -781,7 +824,9 @@ class Decoder:
                         chosen = element
                         break
             if chosen is None:
-                frame.named.pop(kind.source, None)
+                # `default` sees no element under either name: nothing matched,
+                # so there is none for it to mean.
+                frame.named.pop(bound, None)
                 if container is not None:
                     frame.named[kind.source] = container
                 value = evaluate(kind.default, _Environment(frame))
@@ -790,9 +835,8 @@ class Decoder:
                 value = evaluate(kind.value, _Environment(frame))
                 start, end = chosen.off_start, chosen.off_end
         finally:
-            if container is None:
-                frame.named.pop(kind.source, None)
-            else:
+            frame.named.pop(bound, None)
+            if container is not None:
                 frame.named[kind.source] = container
         return self._leaf(item, kind, value, start, end)
 
@@ -806,7 +850,7 @@ class Decoder:
         env: _Environment,
     ) -> Node:
         """Dispatch on a value, or mark the region undecodable."""
-        selector = evaluate(kind.on, env)
+        selector = evaluate(kind.dispatch, env)
         chosen = kind.cases.get(selector, kind.default)  # type: ignore[arg-type]
         if chosen is None:
             # §2: no case and no default is "tried and failed", and the

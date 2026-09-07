@@ -58,7 +58,7 @@ def write_transport(path: Path, payload: bytes) -> None:
         writer.add_source("capture", uri="dns.pcap")
         with writer.begin_session(proto="tcp", key="a <-> b") as session:
             client = session.participant("10.0.0.1:51000", isn=1000)
-            session.record(client, ts=1000, payload=payload, seq_start=1001)
+            session.record(client, ts=1000, payload=payload, hints=zpf.Hints(seq_start=1001))
             session.end(reason="fin")
 
 
@@ -74,7 +74,6 @@ def run_stage(source: Path, sink: Path, spec: Spec, emit: Emit) -> None:
     ) as stage:
         for stream in stage.streams():
             data = stream.reassembled()
-            ts = max(segment.ts for segment in stream.segments())
             tree = decoder.decode_bytes(data, base=stream.off_start)
             emissions, unclaimed = plan(
                 spec, tree, data, emit=emit, base=stream.off_start
@@ -83,10 +82,9 @@ def run_stage(source: Path, sink: Path, spec: Spec, emit: Emit) -> None:
                 stage.record(
                     stream,
                     record.payload,
-                    ts=ts,
                     content_type=record.content_type,
+                    role=record.role,
                     cites=(record.off_start, record.off_end),
-                    comment=record.comment,
                 )
             for region in unclaimed:
                 stage.undecoded(
@@ -142,7 +140,7 @@ def test_field_records_read_back_named_and_typed(dns_files: tuple[Path, Path]):
         for session in handle.sessions():
             for record in session.records():
                 token = (record.content_type or ":").split(":", 1)[1]
-                seen[record.comment] = zpf.decode_prim(record.payload, token)
+                seen[record.role] = zpf.decode_prim(record.payload, token)
 
     assert seen["dns.id"] == 0x1234
     assert seen["dns.qdcount"] == 1
@@ -164,7 +162,7 @@ def test_a_widened_sub_byte_field_reads_back_as_its_value(
             record
             for session in handle.sessions()
             for record in session.records()
-            if record.comment == "dns.flags.opcode"
+            if record.role == "dns.flags.opcode"
         ]
     assert len(records) == 1
     assert records[0].content_type == "prim:u8"

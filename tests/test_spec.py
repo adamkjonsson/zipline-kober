@@ -102,7 +102,7 @@ def test_terminated_rejects_empty_delimiter():
 
 def test_switch_rejects_no_cases():
     with pytest.raises(SpecError, match="at least one case"):
-        Switch(on=parse("kind"), cases={})
+        Switch(dispatch=parse("kind"), cases={})
 
 
 def test_enum_rejects_no_members():

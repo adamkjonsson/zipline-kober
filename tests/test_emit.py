@@ -131,7 +131,7 @@ units:
     data = b"\x01\x02"
     tree = Decoder(spec).decode_bytes(data)
     emissions, _ = plan(spec, tree, data, emit=Emit.FIELD)
-    assert [r.comment for r in emissions] == ["t.items[0].n", "t.items[1].n"]
+    assert [r.role for r in emissions] == ["t.items[0].n", "t.items[1].n"]
 
 
 def test_nested_repetitions_stay_indexed():
@@ -154,7 +154,7 @@ units:
     data = b"\x01\x00"
     tree = Decoder(spec).decode_bytes(data)
     emissions, _ = plan(spec, tree, data, emit=Emit.FIELD)
-    assert [r.comment for r in emissions] == [
+    assert [r.role for r in emissions] == [
         "t.groups[0].labels[0].n",
         "t.groups[0].labels[1].n",
     ]
@@ -173,9 +173,9 @@ def test_message_granularity_is_one_record():
     assert (record.off_start, record.off_end) == (0, len(DNS_QUERY))
 
 
-def test_message_granularity_carries_no_comment():
+def test_message_granularity_carries_no_role():
     emissions, _ = dns_plan(Emit.MESSAGE)
-    assert emissions[0].comment is None
+    assert emissions[0].role is None
 
 
 # --- field granularity -----------------------------------------------------
@@ -183,28 +183,28 @@ def test_message_granularity_carries_no_comment():
 
 def test_field_granularity_names_every_record():
     emissions, _ = dns_plan(Emit.FIELD)
-    assert all(record.comment for record in emissions)
+    assert all(record.role for record in emissions)
 
 
 def test_the_two_identical_flag_values_are_distinguishable():
     """The exact failure DESIGN.md §4.1 called 'correct and useless'."""
     emissions, _ = dns_plan(Emit.FIELD)
     zeros = [r for r in emissions if r.payload == b"\x00" and r.content_type == "prim:u8"]
-    comments = {r.comment for r in zeros}
-    assert "dns.flags.qr" in comments
-    assert "dns.flags.opcode" in comments
+    roles = {r.role for r in zeros}
+    assert "dns.flags.qr" in roles
+    assert "dns.flags.opcode" in roles
 
 
 def test_sub_byte_fields_overlap_the_same_byte():
     emissions, _ = dns_plan(Emit.FIELD)
-    flags = [r for r in emissions if r.comment.startswith("dns.flags.")]
+    flags = [r for r in emissions if r.role.startswith("dns.flags.")]
     assert len(flags) == 4
     assert all(r.off_start == 2 for r in flags[:3])
 
 
 def test_integers_are_normalized_and_labelled():
     emissions, _ = dns_plan(Emit.FIELD)
-    ident = next(r for r in emissions if r.comment == "dns.id")
+    ident = next(r for r in emissions if r.role == "dns.id")
     assert ident.content_type == "prim:u16"
     assert ident.payload == b"\x34\x12"
     assert (ident.off_start, ident.off_end) == (0, 2)
@@ -212,7 +212,7 @@ def test_integers_are_normalized_and_labelled():
 
 def test_bytes_fields_use_prim_bytes():
     emissions, _ = dns_plan(Emit.FIELD)
-    name = next(r for r in emissions if r.comment == "dns.qname")
+    name = next(r for r in emissions if r.role == "dns.qname")
     assert name.content_type == "prim:bytes"
     assert name.payload == b"\x07example\x03com"
 
@@ -251,7 +251,7 @@ units:
 """)
     tree = Decoder(spec).decode_bytes(b"\x01xy\x02")
     emissions, unclaimed = plan(spec, tree, b"\x01xy\x02", emit=Emit.FIELD)
-    assert [r.comment for r in emissions] == ["t.a", "t.b"]
+    assert [r.role for r in emissions] == ["t.a", "t.b"]
     assert [(u.off_start, u.off_end, u.reason) for u in unclaimed] == [(1, 3, "skipped")]
 
 
@@ -273,7 +273,7 @@ units:
     tree = Decoder(spec).decode_bytes(b"\x01\x02")
     emissions, unclaimed = plan(spec, tree, b"\x01\x02", emit=Emit.FIELD)
     # The unit says none; the field's own setting wins for y.
-    assert [r.comment for r in emissions] == ["t.h.y"]
+    assert [r.role for r in emissions] == ["t.h.y"]
     assert [(u.off_start, u.off_end) for u in unclaimed] == [(0, 1)]
 
 
@@ -295,7 +295,7 @@ units:
     data = b"\x02"
     tree = Decoder(spec).decode_bytes(data)
     emissions, _ = plan(spec, tree, data, emit=Emit.FIELD)
-    computed = next(r for r in emissions if r.comment == "t.octets")
+    computed = next(r for r in emissions if r.role == "t.octets")
     assert (computed.off_start, computed.off_end) == (0, 1)
     assert computed.payload == b"\x08"
 
@@ -324,7 +324,7 @@ units:
     tree = Decoder(spec).decode_bytes(data)
     assert tree.find("huge").value == 1 << 200
     emissions, unclaimed = plan(spec, tree, data, emit=Emit.FIELD)
-    assert [record.comment for record in emissions] == ["t.n"]
+    assert [record.role for record in emissions] == ["t.n"]
     assert unclaimed == []
 
 
@@ -363,7 +363,7 @@ units:
     tree = Decoder(spec).decode_bytes(data)
     emissions, unclaimed = plan(spec, tree, data, emit=Emit.FIELD)
     # What was decoded is claimed; the rest is beyond the tree.
-    assert [r.comment for r in emissions] == ["t.a"]
+    assert [r.role for r in emissions] == ["t.a"]
     assert unclaimed == []
     assert tree.off_end == 2
     assert tree.status.value == "truncated", "the reason the driver will use"
@@ -393,7 +393,7 @@ units:
     data = b"\x01\x02"
     tree = Decoder(spec).decode_bytes(data)
     emissions, unclaimed = plan(spec, tree, data, emit=Emit.FIELD)
-    assert [r.comment for r in emissions] == ["t.h.a", "t.h.b"]
+    assert [r.role for r in emissions] == ["t.h.a", "t.h.b"]
     assert unclaimed == []
 
 
@@ -409,7 +409,7 @@ units:
       - {name: kind, type: {int: {bits: 8}}}
       - name: body
         type:
-          switch: {on: "kind", cases: {1: {int: {bits: 8}}}}
+          switch: {dispatch: "kind", cases: {1: {int: {bits: 8}}}}
 """)
     data = b"\x09\x09"
     tree = Decoder(spec).decode_bytes(data)
@@ -526,8 +526,8 @@ def test_a_pointer_partially_overlapping_a_field_leaves_no_hole():
 def test_the_overlap_is_really_there():
     """Guards the test above: without overlap it would prove nothing."""
     _, (emissions, _) = overlap_plan()
-    (inner,) = [e for e in emissions if e.comment == "p.seen"]
-    (blob,) = [e for e in emissions if e.comment == "p.blob"]
+    (inner,) = [e for e in emissions if e.role == "p.seen"]
+    (blob,) = [e for e in emissions if e.role == "p.blob"]
     assert (inner.off_start, inner.off_end) == (1, 3)
     assert (blob.off_start, blob.off_end) == (0, 4)
     assert blob.off_start < inner.off_start and inner.off_end < blob.off_end

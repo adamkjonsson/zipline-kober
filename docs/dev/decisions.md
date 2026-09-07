@@ -82,13 +82,15 @@ rather than something to route around. Six have been filed against the format:
 | [#55](https://github.com/adamkjonsson/python-zipline/issues/55) | No `comment=` on `record()`, which blocked field granularity | Fixed in 0.2.0 |
 | [#56](https://github.com/adamkjonsson/python-zipline/issues/56) | Decoded inputs are packet-oriented and nothing said so | Fixed in 0.2.0 |
 | [#57](https://github.com/adamkjonsson/python-zipline/issues/57) | `check_coverage` leaked an `AttributeError` for a `FileReader` | Fixed in 0.2.0 |
-| [#58](https://github.com/adamkjonsson/python-zipline/issues/58) | Whether the format wants per-field records at all, and how to name them | Open — evidence supplied |
-| [#62](https://github.com/adamkjonsson/python-zipline/issues/62) | Which timestamp a message inside a multi-message run carries | Open |
-| [#63](https://github.com/adamkjonsson/python-zipline/issues/63) | `check_coverage` measures a real TCP stream as 2³²−1 bytes | Open |
+| [#58](https://github.com/adamkjonsson/python-zipline/issues/58) | Whether the format wants per-field records at all, and how to name them | Fixed in 0.3.0 — `role` |
+| [#62](https://github.com/adamkjonsson/python-zipline/issues/62) | Which timestamp a message inside a multi-message run carries | Fixed in 0.3.0 |
+| [#63](https://github.com/adamkjonsson/python-zipline/issues/63) | `check_coverage` measures a real TCP stream as 2³²−1 bytes | Fixed in 0.3.0 |
 
-#58 is the one that shapes this codebase: it may replace `comment=` with a real
-per-record label, which is why the field path is formatted in exactly one
-place.
+#58 is the one that shaped this codebase, and it landed in 0.3.0 as `role`:
+what a record **is**, beside rather than instead of the `content_type` saying
+what kind it is. Keeping the field path formatted in exactly one place is what
+made taking it a one-line change — which is the argument for that discipline,
+stated before there was any evidence it would pay.
 
 The same rule applies to the **test tooling**, which is upstream in the same
 sense: a gap in what an adversary can generate is a gap in what this project

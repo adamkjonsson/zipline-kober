@@ -1,4 +1,4 @@
-"""Build a :class:`~kober.spec.Spec` from a mapping, JSON, or YAML.
+r"""Build a :class:`~kober.spec.Spec` from a mapping, JSON, or YAML.
 
 The core parses the *model*, so :func:`from_dict` and :func:`from_json` work
 with the standard library alone and only :func:`from_file` reaches for YAML —
@@ -16,16 +16,40 @@ the coverage guarantee is meant to rule out.
 accessor names the problem and says to quote it. That is why ``version: 1.10``
 is refused rather than coerced.
 
-A type is written as a **single-key mapping** naming the kind::
+A type is written as a **single-key mapping** naming the kind, and sizes and
+repeats follow the same shape::
 
     type: {int: {bits: 16, enum: opcode}}
     type: {bytes: {size: {expr: "header.length"}}}
     type: {unit: question}
-    type: {switch: {on: "kind", cases: {1: {int: {bits: 8}}}}}
+    type: {switch: {dispatch: "kind", cases: {1: {int: {bits: 8}}}}}
 
-Sizes and repeats follow the same shape, with two shorthands that are common
-enough to earn one: a bare integer size means ``fixed``, and a bare string
-where a type expects a unit means a unit reference with no arguments.
+**Three shorthands shorten what that costs**, and they are one rule each rather
+than a list of exceptions.
+
+*A scalar where a mapping is expected fills in the one key that matters.* A
+bare size is ``fixed``; ``{bytes: 4}`` and ``{string: 4}`` are a fixed size;
+``{int: 8}`` is a width; ``{unit: question}`` is a reference with no arguments.
+Anything carrying a second key writes the long form.
+
+*The kind key may be lifted into the field*, since the field keys and the type
+keys do not overlap::
+
+    - {name: count, type: {int: {bits: 8}}}      # both mean the same thing
+    - {name: count, int: {bits: 8}}
+    - {name: count, bits: 8}
+
+*``bits`` names the integer kind*, because the word says what the number counts
+where ``int: 8`` cannot.
+
+Separately, a ``delimiter`` may be written beside ``size`` rather than under it,
+which is what makes reading to a delimiter shallow —
+``{string: {delimiter: "\r\n"}}`` rather than
+``{string: {size: {terminated: {delimiter: "\r\n"}}}}``.
+
+Every shorthand builds the **identical model**. Nothing downstream — the
+checker, the engine, the compiler — can tell which spelling was used, which is
+what makes them shorthands rather than features.
 """
 
 from __future__ import annotations
@@ -45,6 +69,7 @@ from kober.spec import (
     Endian,
     EnumDef,
     Field,
+    Fill,
     Fixed,
     FromExpr,
     InputShape,
@@ -82,11 +107,13 @@ _SPEC_KEYS = frozenset({"name", "version", "entry", "units", "enums", "input", "
 _UNIT_KEYS = frozenset({"fields", "params", "confirm", "reject", "emit", "doc"})
 _FIELD_KEYS = frozenset({"name", "type", "condition", "repeat", "emit", "doc"})
 _INT_KEYS = frozenset({"bits", "signed", "endian", "enum"})
-_BYTES_KEYS = frozenset({"size"})
-_STRING_KEYS = frozenset({"size", "encoding"})
-_SWITCH_KEYS = frozenset({"on", "cases", "default"})
-_POINTER_KEYS = frozenset({"at", "type"})
 _TERMINATED_KEYS = frozenset({"delimiter", "consume", "required", "within"})
+#: A ``bytes`` body says its extent with ``size``, or with ``delimiter`` and its
+#: companions written beside it.
+_BYTES_KEYS = frozenset({"size"}) | _TERMINATED_KEYS
+_STRING_KEYS = _BYTES_KEYS | {"encoding"}
+_SWITCH_KEYS = frozenset({"dispatch", "cases", "default"})
+_POINTER_KEYS = frozenset({"at", "type"})
 _PARAM_KEYS = frozenset({"name", "type"})
 _ENUM_KEYS = frozenset({"members", "doc"})
 
@@ -447,12 +474,17 @@ def _param(document: object, where: str) -> Param:
 
 
 def _field(document: object, where: str) -> Field:
-    """Build one field."""
+    """Build one field, from either spelling of its type.
+
+    The kind key may be **lifted into the field** — ``{name: n, int: {bits: 8}}``
+    rather than ``{name: n, type: {int: {bits: 8}}}`` — which removes one level
+    from the commonest line in a spec. It is unambiguous because the field keys
+    and the type keys do not overlap, and it costs no strictness: exactly one
+    key must name a kind, zero is an error, two is an error, and a key in
+    neither set is still an error.
+    """
     mapping = _require_mapping(document, where)
-    _reject_unknown(mapping, _FIELD_KEYS, where)
-    if "type" not in mapping:
-        msg = f"{where}: missing required key 'type'"
-        raise SpecError(msg)
+    _reject_unknown(mapping, _FIELD_KEYS | _TYPE_KEYS, where)
     if "name" not in mapping:
         msg = f"{where}: missing required key 'name'; use 'name: null' for an anonymous field"
         raise SpecError(msg)
@@ -460,7 +492,7 @@ def _field(document: object, where: str) -> Field:
     name = None if raw_name is None else _require_str(raw_name, f"{where}.name")
     return Field(
         name=name,
-        type=_field_type(mapping["type"], f"{where}.type"),
+        type=_declared_type(mapping, where),
         condition=_optional_expr(mapping, "condition", where),
         repeat=_repeat(mapping["repeat"], f"{where}.repeat") if mapping.get("repeat") else None,
         emit=_optional_emit(mapping, where),
@@ -468,36 +500,85 @@ def _field(document: object, where: str) -> Field:
     )
 
 
+def _declared_type(mapping: Mapping[str, Any], where: str) -> FieldType:
+    """Read a field's type, from ``type:`` or from a lifted kind key."""
+    lifted = sorted(set(mapping) & _TYPE_KEYS)
+    if "type" in mapping:
+        if lifted:
+            listed = ", ".join(repr(key) for key in lifted)
+            msg = (
+                f"{where}: a field states its type once; it has 'type' and also "
+                f"{listed}. Drop one."
+            )
+            raise SpecError(msg)
+        return _field_type(mapping["type"], f"{where}.type")
+    if len(lifted) > 1:
+        listed = ", ".join(repr(key) for key in lifted)
+        msg = f"{where}: a field states its type once, and this names {listed}"
+        raise SpecError(msg)
+    if not lifted:
+        known = ", ".join(sorted(_TYPE_KEYS))
+        msg = (
+            f"{where}: missing required key 'type'; a field must say what it "
+            f"decodes, either as 'type:' or as one of: {known}"
+        )
+        raise SpecError(msg)
+    tag = lifted[0]
+    return _field_type({tag: mapping[tag]}, where)
+
+
 # --- types, sizes, repeats -------------------------------------------------
 
 _TYPE_KINDS = frozenset(
     {"int", "bytes", "string", "unit", "switch", "computed", "pointer", "select"}
 )
+#: Every key that may *name* a type, whether lifted into a field or used as the
+#: tag under ``type:``. ``bits`` is an alias for the ``int`` kind rather than a
+#: kind of its own — which is why it is not in :data:`_TYPE_KINDS`, the set of
+#: things this language actually decodes.
+#:
+#: It earns the alias by saying what the number counts. ``int: 8`` is shorter
+#: and cannot: Kaitai's ``u8`` means eight *bytes*, so a reader arriving from
+#: there would read ``int: 8`` as a 64-bit field and be silently wrong. Sub-byte
+#: fields are the normal case here rather than the exotic one — a DNS flags word
+#: is eight of them — and ``bits: 1`` needs no prior knowledge of this schema to
+#: read correctly.
+_TYPE_KEYS = _TYPE_KINDS | {"bits"}
 #: Every key of a ``select``, and all four are required. There is no default
 #: for ``default``: the whole case for putting aggregation in the model is that
 #: "nothing matched" has an answer the author wrote (:class:`~kober.spec.Select`).
-_SELECT_KEYS = frozenset({"from", "where", "value", "default"})
-_SIZE_KINDS = frozenset({"fixed", "expr", "terminated", "remaining"})
+_SELECT_KEYS = frozenset({"from", "where", "value", "default", "as"})
+#: The four of them that are required. ``as`` is not: omitting it binds the
+#: element under the source's own name, which is what every spec did before
+#: the key existed.
+_SELECT_REQUIRED = frozenset({"from", "where", "value", "default"})
+#: Every key of an ``until``, whose principal key is ``expr`` — so a bare
+#: expression is the shorthand, exactly as a bare size is ``fixed``.
+_UNTIL_KEYS = frozenset({"expr", "as"})
+_SIZE_KINDS = frozenset({"fixed", "expr", "terminated", "remaining", "fill"})
 _REPEAT_KINDS = frozenset({"count", "until", "to_end"})
 
 
 def _field_type(document: object, where: str) -> FieldType:
     """Build a field type from its single-key tagged mapping."""
     mapping = _require_mapping(document, where)
-    tag, value = _tagged(mapping, where, _TYPE_KINDS)
+    tag, value = _tagged(mapping, where, _TYPE_KEYS)
     site = f"{where}.{tag}"
+    if tag == "bits":
+        # The alias, and it takes the number directly: `bits` *is* the key it
+        # would otherwise name, so a mapping under it would be `bits: {bits: 4}`.
+        return IntType(bits=_require_int(value, site))
     if tag == "int":
         return _int_type(value, site)
     if tag == "bytes":
-        body = _require_mapping(value, site)
-        _reject_unknown(body, _BYTES_KEYS, site)
-        return BytesType(size=_size(body.get("size"), f"{site}.size"))
+        return BytesType(size=_body_size(value, site, _BYTES_KEYS))
     if tag == "string":
+        if isinstance(value, (int, str)) and not isinstance(value, bool):
+            return StringType(size=_body_size(value, site, _STRING_KEYS))
         body = _require_mapping(value, site)
-        _reject_unknown(body, _STRING_KEYS, site)
         encoding = body.get("encoding")
         return StringType(
-            size=_size(body.get("size"), f"{site}.size"),
+            size=_body_size(body, site, _STRING_KEYS),
             encoding="utf-8" if encoding is None else _require_str(encoding, f"{site}.encoding"),
         )
     if tag == "unit":
@@ -511,8 +592,77 @@ def _field_type(document: object, where: str) -> FieldType:
     return Computed(expr=_expr(value, site))
 
 
+def _body_size(document: object, where: str, allowed: frozenset[str]) -> SizeSpec:
+    r"""Read how far a ``bytes`` or ``string`` value extends.
+
+    Three spellings, and the last two are the reason this is one function.
+
+    A **bare scalar** is the principal key filled in: ``{bytes: 4}`` is a fixed
+    size, the same rule that lets ``size: 4`` mean ``{fixed: 4}``.
+
+    A ``delimiter:`` **beside** ``size:`` says the value is terminated, with
+    ``consume``, ``required`` and ``within`` sitting alongside it. Reading up to
+    a delimiter is the commonest thing a text protocol does and was the deepest
+    thing to write — ``{string: {size: {terminated: {delimiter: "\\r\\n"}}}}``
+    is four levels to say *read to CRLF* — and the long form is most of that
+    depth rather than the terminator's own keys.
+
+    ``delimiter`` rather than a bare string size (``size: "\\r\\n"``) because it
+    **says what it is**: a bare string there reads like a mistake until you know
+    the rule, where this needs no rule. It is not the rejected ``until:`` either
+    — that word already means a repeat kind, and this one appears nowhere else.
+    Its companions sit beside it so the growth path is adding a key rather than
+    rewriting the shape: half of ``examples/http.yaml``'s header unit needs
+    ``within`` and ``required``, so the bounded case is not the rare one.
+
+    The long ``size: {terminated: {…}}`` form still works and is what a nested
+    or unusual size uses.
+
+    Args:
+        document: The type's body, or a bare scalar.
+        where: Dotted location, for error messages.
+        allowed: The keys this type's body accepts.
+
+    Returns:
+        The size.
+
+    Raises:
+        SpecError: If the body says its size twice, not at all, or with a
+            terminator key and no delimiter.
+
+    """
+    if isinstance(document, bool) or not isinstance(document, dict):
+        return _size(document, f"{where}.size")
+    _reject_unknown(document, allowed, where)
+    delimited = sorted(set(document) & _TERMINATED_KEYS)
+    if "size" in document:
+        if delimited:
+            listed = ", ".join(repr(key) for key in delimited)
+            msg = (
+                f"{where}: a value states its extent once; it has 'size' and also "
+                f"{listed}. Put the terminator under size: {{terminated: ...}}, "
+                "or drop size."
+            )
+            raise SpecError(msg)
+        return _size(document["size"], f"{where}.size")
+    if not delimited:
+        msg = f"{where}: missing required key 'size'"
+        raise SpecError(msg)
+    if "delimiter" not in document:
+        listed = ", ".join(repr(key) for key in delimited)
+        verb = "means" if len(delimited) == 1 else "mean"
+        msg = (
+            f"{where}: {listed} only {verb} something beside a 'delimiter', and "
+            "there is none here"
+        )
+        raise SpecError(msg)
+    return _terminated(document, where)
+
+
 def _int_type(document: object, where: str) -> IntType:
-    """Build an integer type."""
+    """Build an integer type, accepting a bare width."""
+    if isinstance(document, bool) or not isinstance(document, dict):
+        return IntType(bits=_require_int(document, f"{where}.bits"))
     mapping = _require_mapping(document, where)
     _reject_unknown(mapping, _INT_KEYS, where)
     if "bits" not in mapping:
@@ -568,7 +718,7 @@ def _select(document: object, where: str) -> Select:
     """
     mapping = _require_mapping(document, where)
     _reject_unknown(mapping, _SELECT_KEYS, where)
-    missing = sorted(_SELECT_KEYS - set(mapping))
+    missing = sorted(_SELECT_REQUIRED - set(mapping))
     if missing:
         listed = ", ".join(repr(key) for key in missing)
         msg = f"{where}: missing required key(s) {listed}"
@@ -578,6 +728,7 @@ def _select(document: object, where: str) -> Select:
         where=_expr(mapping["where"], f"{where}.where"),
         value=_expr(mapping["value"], f"{where}.value"),
         default=_expr(mapping["default"], f"{where}.default"),
+        alias=_optional_str(mapping, "as", where),
     )
 
 
@@ -612,10 +763,12 @@ def _pointer(document: object, where: str) -> Pointer:
 
 
 def _switch(document: object, where: str) -> Switch:
-    """Build a switch, working around YAML's reading of the key ``on``."""
-    mapping = _normalize_switch_keys(_require_any_mapping(document, where), where)
+    """Build a switch, naming the old dispatch key if it is still being used."""
+    raw = _require_any_mapping(document, where)
+    _reject_renamed_dispatch(raw, where)
+    mapping = _require_mapping(raw, where)
     _reject_unknown(mapping, _SWITCH_KEYS, where)
-    for required in ("on", "cases"):
+    for required in ("dispatch", "cases"):
         if required not in mapping:
             msg = f"{where}: missing required key {required!r}"
             raise SpecError(msg)
@@ -625,33 +778,33 @@ def _switch(document: object, where: str) -> Switch:
         cases[_case_key(key)] = _field_type(value, f"{where}.cases.{key}")
     default = mapping.get("default")
     return Switch(
-        on=_expr(mapping["on"], f"{where}.on"),
+        dispatch=_expr(mapping["dispatch"], f"{where}.dispatch"),
         cases=cases,
         default=None if default is None else _field_type(default, f"{where}.default"),
     )
 
 
-def _normalize_switch_keys(mapping: Mapping[Any, Any], where: str) -> Mapping[str, Any]:
-    """Restore the ``on`` key that YAML turned into ``True``.
+def _reject_renamed_dispatch(mapping: Mapping[Any, Any], where: str) -> None:
+    """Name the rename for a spec still written with the old ``on`` key.
 
-    ``on`` is a YAML 1.1 boolean, so ``on: kind`` parses as ``{True: "kind"}``
-    — and ``on`` is this schema's dispatch key, which puts the trap on the
-    second-most-common construct there is. Requiring ``"on"`` in quotes would
-    work and would be a papercut every author hits once, so the boolean is
-    read back as the key it was written as instead.
+    ``on`` was the dispatch key until 0.1.0 and is now ``dispatch``. Both
+    spellings of the old one are caught: the quoted ``"on"``, and the ``True``
+    that YAML 1.1 turns an unquoted ``on:`` into — which is why the key was
+    renamed, and why leaving the boolean to fall through to "keys must be
+    strings" would report the coercion rather than the cause.
 
-    The repair is deliberately narrow: only this mapping, only a ``True``
-    key, only when a real ``on`` is not already present. ``False`` is left
-    alone — no spelling of ``off`` was ever meant to be a key here — and JSON,
-    which has no such coercion, is unaffected.
+    This accepts nothing. It is an error message, not an alias: there is one
+    spelling of the dispatch key, and the point of the rename was to stop the
+    loader carrying a second one.
     """
-    if True not in mapping:
-        return _require_mapping(mapping, where)
-    if "on" in mapping:
-        msg = f"{where}: both 'on' and an unquoted on/yes/true key are present"
-        raise SpecError(msg)
-    repaired = {("on" if key is True else key): value for key, value in mapping.items()}
-    return _require_mapping(repaired, where)
+    for key in (True, "on"):
+        if key in mapping:
+            msg = (
+                f"{where}: the switch dispatch key is 'dispatch'; it was 'on' "
+                "until 0.1.0 and was renamed because YAML 1.1 reads an unquoted "
+                "on: as the boolean true. Write dispatch: instead."
+            )
+            raise SpecError(msg)
 
 
 def _case_key(key: object) -> int | str:
@@ -692,17 +845,29 @@ def _size(document: object, where: str) -> SizeSpec:
         return FromExpr(expr=_expr(value, site))
     if tag == "remaining":
         return Remaining()
+    if tag == "fill":
+        return Fill()
     body = _require_mapping(value, site)
     _reject_unknown(body, _TERMINATED_KEYS, site)
     if "delimiter" not in body:
         msg = f"{site}: missing required key 'delimiter'"
         raise SpecError(msg)
+    return _terminated(body, site)
+
+
+def _terminated(body: Mapping[str, Any], where: str) -> Terminated:
+    """Build a delimited size from the keys ``delimiter`` heads.
+
+    One reader for both spellings — the long ``size: {terminated: {…}}`` and the
+    ``delimiter:`` written beside ``size:`` — so a shorthand cannot come to mean
+    anything the long form does not.
+    """
     within = body.get("within")
     return Terminated(
-        delimiter=_delimiter(body["delimiter"], f"{site}.delimiter"),
-        consume=_require_bool(body.get("consume", True), f"{site}.consume"),
-        required=_require_bool(body.get("required", True), f"{site}.required"),
-        within=None if within is None else _delimiter(within, f"{site}.within"),
+        delimiter=_delimiter(body["delimiter"], f"{where}.delimiter"),
+        consume=_require_bool(body.get("consume", True), f"{where}.consume"),
+        required=_require_bool(body.get("required", True), f"{where}.required"),
+        within=None if within is None else _delimiter(within, f"{where}.within"),
     )
 
 
@@ -729,5 +894,26 @@ def _repeat(document: object, where: str) -> Repeat:
     if tag == "count":
         return Count(expr=_expr(value, site))
     if tag == "until":
-        return Until(expr=_expr(value, site))
+        return _until(value, site)
     return ToEnd()
+
+
+def _until(document: object, where: str) -> Until:
+    """Build an ``until``, accepting the bare-expression shorthand.
+
+    ``expr`` is the principal key, so ``{until: "x == 0"}`` is
+    ``{until: {expr: "x == 0"}}`` — the same rule that makes a bare size
+    ``fixed``. The long form exists to carry ``as``, which names the element
+    the condition tests rather than borrowing the repeated field's own name.
+    """
+    if not isinstance(document, dict):
+        return Until(expr=_expr(document, where))
+    mapping = _require_mapping(document, where)
+    _reject_unknown(mapping, _UNTIL_KEYS, where)
+    if "expr" not in mapping:
+        msg = f"{where}: missing required key 'expr'"
+        raise SpecError(msg)
+    return Until(
+        expr=_expr(mapping["expr"], f"{where}.expr"),
+        alias=_optional_str(mapping, "as", where),
+    )

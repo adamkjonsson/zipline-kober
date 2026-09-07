@@ -144,18 +144,21 @@ real `0`; both mean the same member.
 An enum labels a value — it does not constrain it. A field whose enum has no
 entry for the decoded value still decodes; the value simply has no name.
 
-## Two YAML traps
+## A YAML trap
 
-Both have already caught this project, and the schema guards against one of
-them.
+It has already caught this project, and a second one was designed out rather
+than guarded against.
 
-**`on` is a boolean.** YAML 1.1 reads bare `on`, `off`, `yes`, and `no` as
-booleans, and `on` is the switch dispatch key — so `on: kind` parses as
-`{True: "kind"}`. The loader reads that boolean back as the key it was written
-as, narrowly: only inside a `switch`, only for `True`, and only when a real
-`on` is not also present. Quoting it (`"on": kind`) works too.
+**The switch dispatch key was renamed because of one.** YAML 1.1 reads bare
+`on`, `off`, `yes`, and `no` as booleans, and `on` used to be the switch
+dispatch key — so `on: kind` parsed as `{True: "kind"}` and the loader carried
+a repair to read the boolean back as the word it was written as. The key is
+`dispatch` since 0.1.0, which YAML has no opinion about, and the repair is
+gone. A spec still written with `on:` is refused with a message naming the
+rename, in either spelling — the bare word and the quoted `"on"`.
 
-**A comma inside a flow mapping splits the value.** This:
+**A comma inside a flow mapping splits the value.** This one cannot be designed
+out, because it is about values rather than keys:
 
 ```yaml
 - {name: qr, type: {int: {bits: 1}}, doc: 0 query, 1 response}

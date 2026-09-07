@@ -39,7 +39,7 @@ def write_transport(path: Path, records: list[tuple[int, bytes, int]]) -> None:
         with writer.begin_session(proto="tcp", key="a <-> b") as session:
             client = session.participant("10.0.0.1:51000", isn=1000)
             for ts, payload, seq in records:
-                session.record(client, ts=ts, payload=payload, seq_start=seq)
+                session.record(client, ts=ts, payload=payload, hints=zpf.Hints(seq_start=seq))
             session.end(reason="fin")
 
 
@@ -90,8 +90,8 @@ def test_field_granularity_over_a_file(tmp_path: Path):
     write_transport(source, [(1000, MESSAGE, 1001)])
     Decoder(SPEC, emit=Emit.FIELD).run(source, sink, produced_by="t", produced_at=1)
     assert_conformant(sink, source)
-    comments = {r.comment for r in read_records(sink)}
-    assert comments == {"t.tag", "t.body"}
+    roles = {r.role for r in read_records(sink)}
+    assert roles == {"t.tag", "t.body"}
 
 
 def test_a_trailing_partial_message_is_truncated_not_an_error(tmp_path: Path):
@@ -259,20 +259,54 @@ def test_chaining_two_stages(tmp_path: Path):
     Decoder(SPEC, emit=Emit.FIELD).run(first, second, produced_by="t", produced_at=1)
     assert_conformant(first, source)
     assert_conformant(second, first)
-    assert {r.comment for r in read_records(second)} == {"t.tag", "t.body"}
+    assert {r.role for r in read_records(second)} == {"t.tag", "t.body"}
 
 
 # --- timestamps ------------------------------------------------------------
 
 
-def test_a_run_takes_its_segments_completion_time(tmp_path: Path):
-    """Q2: chunks() coalesces a run and its ts is already the last contributor's."""
+def test_a_message_straddling_two_packets_takes_the_later_time(tmp_path: Path):
+    """One message, two packets: it completes when its *last* input did."""
     source, sink = tmp_path / "in.zpf", tmp_path / "out.zpf"
     write_transport(source, [(1000, MESSAGE[:2], 1001), (2000, MESSAGE[2:], 1003)])
     Decoder(SPEC).run(source, sink, produced_by="t", produced_at=1)
     records = read_records(sink)
     assert len(records) == 1
     assert records[0].timestamp == 2000
+
+
+def test_two_messages_in_one_run_carry_their_own_times(tmp_path: Path):
+    """The timestamp is per **unit**, not per run — upstream #62.
+
+    Two messages arriving in two packets coalesce into one contiguous run, so
+    a run-wide ``ts`` gives both of them the *later* packet's time and the
+    first message claims to have arrived after it did. `zpf` derives the
+    answer from ``cites`` instead, which is the specification's rule: the
+    completion time of the last input record in this record's own span set.
+    """
+    source, sink = tmp_path / "in.zpf", tmp_path / "out.zpf"
+    write_transport(source, [(1000, MESSAGE, 1001), (2000, MESSAGE, 1005)])
+    Decoder(SPEC).run(source, sink, produced_by="t", produced_at=1)
+    assert_conformant(sink, source)
+    records = read_records(sink)
+    assert len(records) == 2
+    assert [record.timestamp for record in records] == [1000, 2000]
+
+
+def test_fields_either_side_of_a_packet_boundary_carry_their_own_times(
+    tmp_path: Path,
+):
+    """The same rule at field granularity, where the two fields differ.
+
+    ``tag`` is wholly inside the first packet and ``body`` wholly inside the
+    second, so nothing but the fields' own span sets can tell them apart.
+    """
+    source, sink = tmp_path / "in.zpf", tmp_path / "out.zpf"
+    write_transport(source, [(1000, MESSAGE[:2], 1001), (2000, MESSAGE[2:], 1003)])
+    Decoder(SPEC, emit=Emit.FIELD).run(source, sink, produced_by="t", produced_at=1)
+    assert_conformant(sink, source)
+    times = {record.role: record.timestamp for record in read_records(sink)}
+    assert times == {"t.tag": 1000, "t.body": 2000}
 
 
 # --- decode_stream(): the lower-level entry point --------------------------
@@ -348,3 +382,53 @@ units:
     assert [b for b in read_blocks(sink) if isinstance(b, zpf.Discontinuity)] == []
     reasons = {b.reason for b in read_blocks(sink) if isinstance(b, zpf.Undecoded)}
     assert reasons <= {"undecodable", "skipped"}, f"a pointer named a hole: {reasons}"
+
+
+# --- records that cite nothing ---------------------------------------------
+
+
+EMPTY_CITE_SPEC = Spec.from_yaml("""
+name: e
+version: "1.0"
+entry: message
+input: either
+units:
+  message:
+    fields:
+      - {name: name, string: {delimiter: ":", within: "\\r\\n", required: false}}
+      - {name: value, string: {delimiter: "\\r\\n"}}
+      - {name: names, bits: 8, repeat: {to_end: true}}
+      - name: seen
+        select:
+          from: names
+          as: n
+          where: "n == 255"
+          value: "n"
+          default: "-1"
+""")
+
+
+def test_a_record_citing_no_bytes_still_gets_a_timestamp(tmp_path: Path):
+    """A derived `ts` has nothing to derive from where a record cites nothing.
+
+    Two constructs really do emit one, and both are in `examples/http.yaml`: a
+    bounded optional terminator that finds nothing reads an **empty** value —
+    which is how the blank line ending a header block is recognised — and a
+    `select` whose default matched cites nothing, there being no element to
+    point at. `zpf` derives a record's time from `cites`, so for these it can
+    derive nothing and must be told; found by decoding an impaired HTTP stream,
+    which is the only place both occur at once.
+    """
+    source, sink = tmp_path / "in.zpf", tmp_path / "out.zpf"
+    write_transport(source, [(1000, b"\r\n", 1001)])
+    Decoder(EMPTY_CITE_SPEC, emit=Emit.FIELD).run(
+        source, sink, produced_by="t", produced_at=1
+    )
+    assert_conformant(sink, source)
+    records = read_records(sink)
+    empty = [r for r in records if not r.spans or r.spans[0].off_end <= r.spans[0].off_start]
+    assert empty, "the spec no longer produces a record citing nothing"
+    assert all(r.timestamp == 1000 for r in empty), (
+        "a record citing nothing takes the run's completion time, there being "
+        "nothing to derive one from"
+    )

@@ -18,6 +18,7 @@ from kober.spec import (
     Count,
     Emit,
     Endian,
+    Fill,
     Fixed,
     FromExpr,
     InputShape,
@@ -225,7 +226,7 @@ def test_switch():
             "name": "a",
             "type": {
                 "switch": {
-                    "on": "kind",
+                    "dispatch": "kind",
                     "cases": {1: {"int": {"bits": 8}}, "text": {"bytes": {"size": 2}}},
                     "default": {"bytes": {"size": 1}},
                 }
@@ -237,9 +238,37 @@ def test_switch():
     assert kind.default == BytesType(Fixed(1))
 
 
-def test_unquoted_on_survives_yamls_boolean_reading():
-    """`on` is a YAML 1.1 boolean, and it is this schema's dispatch key."""
+def test_the_dispatch_key_needs_no_quoting():
+    """The whole point of the rename: `dispatch` is not a YAML 1.1 boolean."""
     spec = from_yaml("""
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: kind, type: {int: {bits: 8}}}
+      - name: body
+        type:
+          switch:
+            dispatch: "kind"
+            cases: {1: {int: {bits: 8}}}
+            default: {bytes: {size: 1}}
+""")
+    switch = spec.unit("message").fields[1].type
+    assert isinstance(switch, Switch)
+    assert unparse(switch.dispatch) == "kind"
+
+
+def test_an_unquoted_on_names_the_rename():
+    """YAML turns it into `True`, so the error must not report the coercion.
+
+    Falling through to "keys must be strings, got True" would name the symptom
+    and leave the author to work out that a boolean key came from the word they
+    wrote. This is the one place the old key is still known about.
+    """
+    with pytest.raises(SpecError, match="dispatch key is 'dispatch'"):
+        from_yaml("""
 name: t
 version: "1.0"
 entry: message
@@ -252,64 +281,24 @@ units:
           switch:
             on: "kind"
             cases: {1: {int: {bits: 8}}}
-            default: {bytes: {size: 1}}
-""")
-    switch = spec.unit("message").fields[1].type
-    assert isinstance(switch, Switch)
-    assert unparse(switch.on) == "kind"
-
-
-def test_quoted_on_works_too():
-    spec = from_yaml("""
-name: t
-version: "1.0"
-entry: message
-units:
-  message:
-    fields:
-      - {name: kind, type: {int: {bits: 8}}}
-      - name: body
-        type:
-          switch:
-            "on": "kind"
-            cases: {1: {int: {bits: 8}}}
-            default: {bytes: {size: 1}}
-""")
-    assert isinstance(spec.unit("message").fields[1].type, Switch)
-
-
-def test_both_spellings_of_on_at_once_is_refused():
-    with pytest.raises(SpecError, match="both 'on' and an unquoted"):
-        from_yaml("""
-name: t
-version: "1.0"
-entry: message
-units:
-  message:
-    fields:
-      - name: body
-        type:
-          switch:
-            on: "a"
-            "on": "b"
-            cases: {1: {int: {bits: 8}}}
 """)
 
 
-def test_json_switch_needs_no_repair():
-    """JSON has no boolean coercion, so its `on` arrives intact."""
+def test_a_quoted_on_names_the_rename_too():
+    """JSON has no boolean coercion, so this is how the old key reaches JSON."""
     body = {
         "name": "a",
         "type": {"switch": {"on": "kind", "cases": {"1": {"int": {"bits": 8}}}}},
     }
-    assert isinstance(sole_field(body).type, Switch)
+    with pytest.raises(SpecError, match="dispatch key is 'dispatch'"):
+        sole_field(body)
 
 
 def test_json_and_yaml_switch_keys_agree():
     """JSON can only spell a key as a string; both must mean the integer."""
     body = {
         "name": "a",
-        "type": {"switch": {"on": "kind", "cases": {"1": {"int": {"bits": 8}}}}},
+        "type": {"switch": {"dispatch": "kind", "cases": {"1": {"int": {"bits": 8}}}}},
     }
     kind = sole_field(body).type
     assert isinstance(kind, Switch)
@@ -323,6 +312,12 @@ def test_size_shorthand_is_fixed():
     kind = sole_field({"name": "a", "type": {"bytes": {"size": 8}}}).type
     assert isinstance(kind, BytesType)
     assert kind.size == Fixed(8)
+
+
+def test_size_fill():
+    kind = sole_field({"name": "a", "type": {"bytes": {"size": {"fill": True}}}}).type
+    assert isinstance(kind, BytesType)
+    assert kind.size == Fill()
 
 
 def test_size_from_expression():
@@ -630,4 +625,248 @@ def test_an_empty_bound_is_refused():
                     "string": {"size": {"terminated": {"delimiter": ":", "within": ""}}}
                 },
             }
+        )
+
+
+# --- shorthands ------------------------------------------------------------
+#
+# One rule each, and the test that matters for all of them is the same: both
+# spellings must build the *identical* Spec. That equality is what makes these
+# shorthands rather than features — nothing downstream can tell which was used.
+
+
+LONG_FORM = """
+name: t
+version: "1.0"
+entry: m
+units:
+  m:
+    fields:
+      - {name: count, type: {int: {bits: 8}}}
+      - {name: qr, type: {int: {bits: 1}}}
+      - {name: opcode, type: {int: {bits: 4, enum: kind}}}
+      - {name: blob, type: {bytes: {size: {fixed: 4}}}}
+      - {name: text, type: {string: {size: {fixed: 2}}}}
+      - {name: line, type: {string: {size: {terminated: {delimiter: "\\r\\n"}}}}}
+      - name: hname
+        type:
+          string:
+            size: {terminated: {delimiter: ":", within: "\\r\\n", required: false}}
+      - {name: sub, type: {unit: other}}
+  other:
+    fields:
+      - {name: x, type: {int: {bits: 8}}}
+enums:
+  kind: {0: query}
+"""
+
+SHORT_FORM = """
+name: t
+version: "1.0"
+entry: m
+units:
+  m:
+    fields:
+      - {name: count, bits: 8}
+      - {name: qr, bits: 1}
+      - {name: opcode, int: {bits: 4, enum: kind}}
+      - {name: blob, bytes: 4}
+      - {name: text, string: 2}
+      - {name: line, string: {delimiter: "\\r\\n"}}
+      - {name: hname, string: {delimiter: ":", within: "\\r\\n", required: false}}
+      - {name: sub, unit: other}
+  other:
+    fields:
+      - {name: x, int: 8}
+enums:
+  kind: {0: query}
+"""
+
+
+def test_the_short_and_long_forms_build_the_same_spec():
+    """The cheapest test there is, and the one that says a shorthand is one."""
+    assert from_yaml(SHORT_FORM) == from_yaml(LONG_FORM)
+
+
+def test_a_lifted_kind_key_needs_no_type_key():
+    kind = sole_field({"name": "a", "int": {"bits": 8}}).type
+    assert kind == IntType(bits=8)
+
+
+def test_bits_is_the_integer_shorthand():
+    kind = sole_field({"name": "a", "bits": 4}).type
+    assert kind == IntType(bits=4)
+
+
+def test_bits_works_under_type_too():
+    """A shorthand that only worked in one position would be a second grammar."""
+    assert sole_field({"name": "a", "type": {"bits": 4}}).type == IntType(bits=4)
+
+
+def test_a_bare_int_is_a_width():
+    assert sole_field({"name": "a", "int": 8}).type == IntType(bits=8)
+
+
+def test_a_bare_bytes_size_is_fixed():
+    assert sole_field({"name": "a", "bytes": 4}).type == BytesType(size=Fixed(4))
+
+
+def test_a_bare_string_size_is_fixed():
+    assert sole_field({"name": "a", "string": 4}).type == StringType(size=Fixed(4))
+
+
+def test_a_field_with_two_kind_keys_is_refused():
+    with pytest.raises(SpecError, match="states its type once"):
+        sole_field({"name": "a", "bits": 8, "bytes": 2})
+
+
+def test_a_field_with_no_kind_key_is_refused():
+    with pytest.raises(SpecError, match="missing required key 'type'"):
+        sole_field({"name": "a", "doc": "nothing here"})
+
+
+def test_a_field_with_both_type_and_a_lifted_kind_is_refused():
+    with pytest.raises(SpecError, match="states its type once"):
+        sole_field({"name": "a", "type": {"int": {"bits": 8}}, "bits": 8})
+
+
+def test_an_int_option_beside_a_lifted_kind_is_refused():
+    """The failure mode is loud, which is the bar for a convenience being safe.
+
+    ``{name: opcode, bits: 4, enum: kind}`` is the natural next thing to try
+    once a field needs an enum, and it must not quietly dissolve the type into
+    the field mapping — ``size`` and ``encoding`` would have to follow, and
+    ``{name: data, size: 4}`` cannot say whether it is bytes or a string.
+    """
+    with pytest.raises(SpecError, match="unknown key"):
+        sole_field({"name": "a", "bits": 4, "enum": "kind"})
+
+
+# --- a delimiter written beside the size ------------------------------------
+
+
+def test_a_delimiter_beside_the_size_is_terminated():
+    kind = sole_field({"name": "a", "string": {"delimiter": "\r\n"}}).type
+    assert kind == StringType(size=Terminated(delimiter=b"\r\n"))
+
+
+def test_the_terminator_companions_sit_beside_it():
+    kind = sole_field(
+        {
+            "name": "a",
+            "string": {"delimiter": ":", "within": "\r\n", "required": False},
+        }
+    ).type
+    assert isinstance(kind, StringType)
+    assert kind.size == Terminated(
+        delimiter=b":", consume=True, required=False, within=b"\r\n"
+    )
+
+
+def test_bytes_may_be_delimited_too():
+    kind = sole_field({"name": "a", "bytes": {"delimiter": [0]}}).type
+    assert kind == BytesType(size=Terminated(delimiter=b"\x00"))
+
+
+def test_a_delimiter_beside_an_encoding():
+    kind = sole_field(
+        {"name": "a", "string": {"delimiter": "\n", "encoding": "ascii"}}
+    ).type
+    assert kind == StringType(size=Terminated(delimiter=b"\n"), encoding="ascii")
+
+
+def test_both_size_and_delimiter_is_refused():
+    with pytest.raises(SpecError, match="states its extent once"):
+        sole_field({"name": "a", "string": {"size": 4, "delimiter": ":"}})
+
+
+def test_a_terminator_companion_without_a_delimiter_is_refused():
+    with pytest.raises(SpecError, match="beside a 'delimiter'"):
+        sole_field({"name": "a", "string": {"within": ":"}})
+
+
+def test_the_long_terminated_form_still_works():
+    """The shorthand may not become the only way to say a delimited size."""
+    kind = sole_field(
+        {"name": "a", "string": {"size": {"terminated": {"delimiter": ":"}}}}
+    ).type
+    assert kind == StringType(size=Terminated(delimiter=b":"))
+
+
+# --- naming the element a construct binds ----------------------------------
+
+
+def test_a_select_may_name_its_element():
+    kind = sole_field(
+        {
+            "name": "a",
+            "select": {
+                "from": "items",
+                "as": "item",
+                "where": "item.x == 1",
+                "value": "item.x",
+                "default": "0",
+            },
+        }
+    ).type
+    assert isinstance(kind, Select)
+    assert kind.source == "items"
+    assert kind.alias == "item"
+
+
+def test_a_select_without_as_binds_the_source_name():
+    kind = sole_field(
+        {
+            "name": "a",
+            "select": {
+                "from": "items",
+                "where": "items.x == 1",
+                "value": "items.x",
+                "default": "0",
+            },
+        }
+    ).type
+    assert isinstance(kind, Select)
+    assert kind.alias is None
+
+
+def test_as_is_not_among_a_selects_required_keys():
+    """Every spec written before the key existed must still load."""
+    with pytest.raises(SpecError, match="missing required key"):
+        sole_field({"name": "a", "select": {"from": "items", "as": "item"}})
+
+
+def test_until_takes_a_bare_expression():
+    """The shorthand, and what every spec wrote before `as:` existed."""
+    field = sole_field({"name": "a", "bits": 8, "repeat": {"until": "a == 0"}})
+    assert isinstance(field.repeat, Until)
+    assert field.repeat.alias is None
+
+
+def test_until_may_name_its_element():
+    field = sole_field(
+        {"name": "a", "bits": 8, "repeat": {"until": {"expr": "e == 0", "as": "e"}}}
+    )
+    assert isinstance(field.repeat, Until)
+    assert unparse(field.repeat.expr) == "e == 0"
+    assert field.repeat.alias == "e"
+
+
+def test_the_two_until_spellings_agree():
+    plain = sole_field({"name": "a", "bits": 8, "repeat": {"until": "a == 0"}})
+    spelled = sole_field(
+        {"name": "a", "bits": 8, "repeat": {"until": {"expr": "a == 0"}}}
+    )
+    assert plain == spelled
+
+
+def test_an_until_mapping_needs_its_expression():
+    with pytest.raises(SpecError, match="missing required key 'expr'"):
+        sole_field({"name": "a", "bits": 8, "repeat": {"until": {"as": "e"}}})
+
+
+def test_an_unknown_key_in_an_until_is_refused():
+    with pytest.raises(SpecError, match="unknown key"):
+        sole_field(
+            {"name": "a", "bits": 8, "repeat": {"until": {"expr": "a == 0", "az": "e"}}}
         )

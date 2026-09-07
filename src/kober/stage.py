@@ -152,13 +152,36 @@ class _Writer:
     Adjacent regions sharing a reason are coalesced, which
     :func:`kober.emit.plan` also does within one message; doing it here as well
     joins the tail of one message to the head of the next when they agree.
+
+    **A timestamp is passed only where none can be derived.** Omitting ``ts``
+    lets `zpf` take it from ``cites``, which is the specification's rule: a
+    decoded record carries the completion time of the last input record **in its
+    own span set**. This used to write the run's ``ts`` on every record, on the
+    grounds that a decode stage had no per-field time to offer — which was
+    upstream `#62 <https://github.com/adamkjonsson/python-zipline/issues/62>`_,
+    and was wrong wherever a message straddled two packets: three messages
+    arriving in three packets carry three times even though reassembly offers
+    them as one run. Deriving it is also the only way to get the lossy case
+    right, since contributors are recorded *after* overlap trimming, so a
+    retransmit that contributed no accepted byte does not move the answer.
+
+    The exception is a record citing an **empty** range, which this project
+    really does emit and which nothing can be derived for. Two constructs make
+    one: a ``select`` whose default matched cites nothing, because nothing
+    matched and there is no element to point at; and a bounded optional
+    terminator that found nothing reads an empty value, which is how the blank
+    line ending an HTTP header block is recognised. Both are real values worth
+    writing, and `zpf` documents passing ``ts`` explicitly for exactly this
+    case. The run's completion time is the only honest answer available — the
+    value was computed from a message that completed then — and it is used
+    *only* here, never in place of a derivable one.
     """
 
     def __init__(self, stage: zpf.DecodeStage, stream: object) -> None:
         self.stage = stage
         self.stream = stream
-        #: The timestamp records are written with. The run's, since a decode
-        #: stage has no per-field time to offer — see ``DESIGN.md`` §5.
+        #: Completion time of the run being decoded, for the empty-range case
+        #: above. Never passed for a record that cites bytes.
         self.ts = 0
         self._pending: tuple[int, int, str] | None = None
         self._seam: zpf.Seam | None = None
@@ -169,17 +192,17 @@ class _Writer:
         content_type: str,
         off_start: int,
         off_end: int,
-        comment: str | None,
+        role: str | None,
     ) -> None:
         """Write one record citing ``[off_start, off_end)``."""
         self.flush()
         self.stage.record(
             self.stream,
             payload,
-            ts=self.ts,
+            ts=self.ts if off_end <= off_start else None,
             content_type=content_type,
+            role=role,
             cites=(off_start, off_end),
-            comment=comment,
             seam=self._seam,
         )
         self._seam = None
@@ -223,7 +246,7 @@ def _interpreted(decoder: Decoder) -> _Step:
                 record.content_type,
                 record.off_start,
                 record.off_end,
-                record.comment,
+                record.role,
             )
         for region in unclaimed:
             sink.undecoded(region.off_start, region.off_end, region.reason)
@@ -343,7 +366,7 @@ def run(
     with zpf.decode_stage(
         source,
         sink,
-        decoder=(decoder.spec.name, decoder.spec.version),
+        decoder=decoder.spec.as_decoder(),
         produced_by=produced_by,
         produced_at=produced_at,
         comment=comment,

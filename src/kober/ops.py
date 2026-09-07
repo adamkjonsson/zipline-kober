@@ -34,7 +34,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from kober.check import require_valid, scope_at
+from kober.check import require_valid, scope_at, trailing_width
 from kober.errors import CompileError, SpecError
 from kober.expr import SCOPE_WORDS, ExprType, IntLiteral, Ref, infer_type, references, unparse
 from kober.spec import (
@@ -42,6 +42,7 @@ from kober.spec import (
     Computed,
     Count,
     Emit,
+    Fill,
     Fixed,
     FromExpr,
     IntType,
@@ -107,6 +108,10 @@ class ValueType:
         unit: Name of the unit an ``OBJECT`` is an instance of, as the spec
             spells it.
         size: How far a ``TEXT`` or ``BYTES`` value extends.
+        trailing: What a ``fill`` size resolves to — the bytes the fields after
+            this one claim. Resolved here rather than by each backend, so the
+            boundary a fill lands on is decided once
+            (:func:`kober.check.trailing_width`). ``None`` for every other size.
         args: Arguments bound to an ``OBJECT``'s parameters, positionally.
         expr: The expression a computed value comes from, or a select's
             projection. It reads nothing, so these are the kinds whose value is
@@ -119,6 +124,10 @@ class ValueType:
         source: Name of the repeated field a select asks about, as the spec
             spells it. It is what tells a select from a computed: both carry an
             ``expr``, and only a select has a repetition behind it.
+        bound: The name one element of that repetition answers to inside
+            ``where`` and ``expr`` — a select's ``as:``, or ``source`` where
+            there is none. Carried separately because a backend renders the
+            *walk* from ``source`` and the *expressions* against this.
         where: A select's predicate over one element. The **first** element it
             holds for is the one ``expr`` projects.
         default: A select's value when no element matched. Never ``None``
@@ -138,10 +147,12 @@ class ValueType:
     encoding: str | None = None
     unit: str | None = None
     size: SizeSpec | None = None
+    trailing: int | None = None
     args: tuple[Expr, ...] = ()
     expr: Expr | None = None
     at: Expr | None = None
     source: str | None = None
+    bound: str | None = None
     where: Expr | None = None
     default: Expr | None = None
     consumes: bool = False
@@ -625,7 +636,7 @@ def _unit_exprs(spec: Spec, unit: Unit) -> Iterator[Expr]:
         for kind in _types(item.type):
             yield from _kind_exprs(kind)
         if isinstance(item.type, Switch):
-            yield item.type.on
+            yield item.type.dispatch
 
 
 def _kind_exprs(kind: FieldType) -> Iterator[Expr]:
@@ -721,7 +732,7 @@ def _field(spec: Spec, unit: str, index: int, item: Field) -> FieldPlan:
     return FieldPlan(
         name=item.name,
         types=types,
-        selector=switch.on if switch is not None else None,
+        selector=switch.dispatch if switch is not None else None,
         branches=branches,
         repeat=item.repeat,
         condition=item.condition,
@@ -764,6 +775,9 @@ def _value(spec: Spec, unit: str, index: int, kind: FieldType) -> ValueType:
             kind=Kind.TEXT if isinstance(kind, StringType) else Kind.BYTES,
             encoding=kind.encoding if isinstance(kind, StringType) else None,
             size=kind.size,
+            trailing=(
+                trailing_width(spec, unit, index) if isinstance(kind.size, Fill) else None
+            ),
             consumes=_size_consumes(kind.size),
         )
     if isinstance(kind, UnitRef):
@@ -847,11 +861,12 @@ def _select(spec: Spec, unit: str, index: int, kind: Select) -> ValueType:
         The value type, with ``source``, ``where``, ``expr`` and ``default``.
 
     """
-    scope = scope_at(spec, unit, index, element_of=kind.source)
+    scope = scope_at(spec, unit, index, element_of=kind.source, element_as=kind.alias)
     inferred = infer_type(kind.value, scope, unparse(kind.value))
     return ValueType(
         kind=KINDS[inferred],
         source=kind.source,
+        bound=kind.alias or kind.source,
         where=kind.where,
         expr=kind.value,
         default=kind.default,

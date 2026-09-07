@@ -286,7 +286,7 @@ def test_switch_selects_a_case():
       - name: body
         type:
           switch:
-            on: "kind"
+            dispatch: "kind"
             cases:
               1: {int: {bits: 8}}
               2: {bytes: {size: 2}}
@@ -303,7 +303,7 @@ def test_switch_without_a_match_is_undecodable():
       - {name: kind, type: {int: {bits: 8}}}
       - name: body
         type:
-          switch: {on: "kind", cases: {1: {int: {bits: 8}}}}
+          switch: {dispatch: "kind", cases: {1: {int: {bits: 8}}}}
 """
     tree = decode(fields, b"\x09\x09")
     assert tree.status is NodeStatus.UNDECODABLE

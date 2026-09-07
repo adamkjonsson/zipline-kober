@@ -8,6 +8,7 @@ up fails the suite rather than the reader.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -260,3 +261,103 @@ def test_the_checklist_names_the_module_that_was_missed_twice():
     text = CONTRIBUTING.read_text()
     assert "cli.py" in text
     assert "missed twice" in text
+
+
+# --- the package surface ----------------------------------------------------
+
+#: Modules whose public names ``kober`` re-exports wholesale. Not every module:
+#: ``kober.cursor``, ``kober.decoder``, ``kober.check`` and the rest publish a
+#: few names each and ``__init__`` picks them, but these five *are* the public
+#: surface and an omission from them is an omission from the package.
+RE_EXPORTING = ["kober.spec", "kober.stage", "kober.ops", "kober.pygen", "kober.runtime"]
+
+
+def defined_in(module: str) -> set[str]:
+    """Return the public classes and functions ``module`` itself defines.
+
+    Read from the source rather than from :func:`dir`, which cannot tell a name
+    a module *defined* from one it merely imported — every module here imports
+    several of the others' classes, and those are somebody else's to export.
+
+    Module-level constants are deliberately out of scope. Whether
+    ``pygen.ELEMENT_LOCAL`` is package API is a judgement per constant, and
+    answering it wrong in either direction is noise; a construct or an entry
+    point is never a judgement call.
+    """
+    import importlib
+
+    target = importlib.import_module(module)
+    tree = ast.parse(Path(target.__file__).read_text())
+    return {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef))
+        and not node.name.startswith("_")
+    }
+
+
+@pytest.mark.parametrize("module", RE_EXPORTING)
+def test_every_public_name_is_re_exported_from_the_package(module: str):
+    """A construct added in one phase must reach ``kober`` in the same one.
+
+    ``Pointer`` and ``Select`` were added in two separate phases and neither
+    reached ``__init__.py``, so ``kober.FieldType`` was a published union naming
+    two classes that could not be imported from the same place;
+    ``run_compiled`` was the compiler's half of an exported pair. Nothing
+    guarded ``__all__``, which is why three omissions survived three phases.
+    """
+    import kober
+
+    missing = sorted(name for name in defined_in(module) if name not in kober.__all__)
+    assert not missing, f"{module}: not re-exported from kober: {missing}"
+
+
+def design_section_six() -> ast.Module:
+    """Return the Python in ``DESIGN.md`` §6, parsed. Nothing executes it.
+
+    ``...`` stands for "and the rest of the keywords" in a call, which reads
+    correctly and does not parse, so it is dropped before parsing. That is the
+    only liberty taken: every name in the blocks survives to be checked.
+    """
+    design = DOCS.parent / "DESIGN.md"
+    section = re.search(r"^## 6\..*?(?=^## 7\.)", design.read_text(), re.S | re.M)
+    assert section is not None, "DESIGN.md has no §6"
+    blocks = re.findall(r"```python\n(.*?)```", section.group(0), re.S)
+    assert blocks, "§6 carries no Python"
+    source = re.sub(r",\s*\.\.\.(?=\s*\))", "", "\n".join(blocks))
+    return ast.parse(source)
+
+
+def test_the_api_design_names_only_things_that_exist():
+    """§6 is a contract nothing runs, so its names are checked instead.
+
+    ``Spec.as_decoder()`` was written down here and never built, so following
+    §6 verbatim raised ``AttributeError`` — and the escape hatch §11.5 leans on
+    was the thing that did not work as documented. Resolving the names catches
+    that the day it is written, without running a block that wants real files.
+    """
+    import kober
+
+    tree = design_section_six()
+    imported = {
+        name.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("kober")
+        for name in node.names
+    }
+    assert imported, "§6 imports nothing from kober"
+    unexported = sorted(name for name in imported if name not in kober.__all__)
+    assert not unexported, f"DESIGN.md §6 imports names kober does not export: {unexported}"
+
+    # Attribute calls on the two objects §6 builds, against the real classes.
+    owners = {"spec": kober.Spec, "decoder": kober.Decoder}
+    missing = sorted(
+        f"{node.func.value.id}.{node.func.attr}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in owners
+        and not hasattr(owners[node.func.value.id], node.func.attr)
+    )
+    assert not missing, f"DESIGN.md §6 calls methods that do not exist: {missing}"

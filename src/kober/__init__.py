@@ -12,8 +12,10 @@ compiler turns one into a Python module with a typed API: a
 implementation the generated code is checked against, so neither replaces the
 other.
 
-The ``kober compile`` CLI verb and the runtime generated decoders import are
-still being built; see ``plans/COMPILER-PHASE-PLAN.md``.
+Both are complete as of 0.1.0: ``kober compile`` writes a decoder as Python,
+:func:`kober.stage.run_compiled` drives one over a file, and generated modules
+import :mod:`kober.runtime` and nothing else from here — so a decoder built
+from a spec ships without the machinery that built it.
 
 Example:
     >>> spec = Spec.from_file("dns.yaml")
@@ -92,13 +94,16 @@ from kober.spec import (
     EnumDef,
     Field,
     FieldType,
+    Fill,
     Fixed,
     FromExpr,
     InputShape,
     IntType,
     Param,
+    Pointer,
     Remaining,
     Repeat,
+    Select,
     SizeSpec,
     Spec,
     StringType,
@@ -109,7 +114,13 @@ from kober.spec import (
     UnitRef,
     Until,
 )
-from kober.stage import content_registry, decode_stream, run
+from kober.stage import (
+    content_registry,
+    decode_stream,
+    decode_stream_compiled,
+    run,
+    run_compiled,
+)
 
 __all__ = [
     "MAX_INT_BITS",
@@ -132,6 +143,7 @@ __all__ = [
     "Field",
     "FieldPlan",
     "FieldType",
+    "Fill",
     "Finding",
     "Fixed",
     "FromExpr",
@@ -146,8 +158,10 @@ __all__ = [
     "Param",
     "ParamPlan",
     "Plan",
+    "Pointer",
     "Remaining",
     "Repeat",
+    "Select",
     "Severity",
     "Sink",
     "SizeSpec",
@@ -172,6 +186,7 @@ __all__ = [
     "content_registry",
     "content_type_of",
     "decode_stream",
+    "decode_stream_compiled",
     "field_path",
     "from_dict",
     "from_file",
@@ -194,6 +209,7 @@ __all__ = [
     "render_spec",
     "require_valid",
     "run",
+    "run_compiled",
     "scope_at",
     "shift_left",
     "shift_right",

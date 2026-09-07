@@ -20,16 +20,151 @@ in `0.x`, where every minor is a break with no upgrade path promised, this
 project pins a single `zpf` minor at a time; moving to a new one is always a
 minor bump here too.
 
-## [Unreleased] — 0.1.0, in development
+## [Unreleased]
 
-Nothing is released yet: `pyproject.toml` declares `0.1.0.dev0` and no version
-has been tagged. The section becomes `## [0.1.0] - <date>` when it ships.
+## [0.1.0] - 2026-09-07
 
-Depends on `zpf` `0.2.x`, which implements Zipline Payload Format **v0.16**.
-`zpf` `0.2.0` is released and tagged; until it reaches PyPI it has to be
+The first release.
+
+Depends on `zpf` `0.3.x`, which implements Zipline Payload Format **v0.19**.
+`zpf` `0.3.0` is released and tagged; until it reaches PyPI it has to be
 installed from a checkout (see the README).
 
 ### Added
+
+- **`role=` carries a record's field path**, replacing the `comment=` stopgap
+  ([python-zipline#58](https://github.com/adamkjonsson/python-zipline/issues/58)).
+  At field granularity every record says what it **is** — `dns.flags.qr` — in a
+  vocabulary this decoder documents, independent of the `content_type` that
+  says what kind it is. The forced choice is gone: a record carries `prim:u32`
+  *and* its name at once, where before it had to keep the normative typing and
+  lose the name, or name it with `dec:` and lose the typing.
+
+  `comment` was free text the format says nothing parses, so a consumer reading
+  a field path out of it depended on something guaranteed to mean nothing.
+  `role` is opaque to the format too, but its scope is *declared*, which is the
+  difference between a name and a note. `kober.emit.Emission.comment` is now
+  `Emission.role` and `kober.runtime.Sink.record`'s last parameter is `role`;
+  keeping the path formatting to one site (`kober.emit.field_path`) is what made
+  this the one-line change it was kept that way to be.
+
+- **`fill`, a fifth size: everything left, less what the fields after it
+  claim.** The ordinary shape of a body between a header and a fixed footer,
+  which nothing else could say — `remaining` is the closest and takes the
+  trailer's bytes too, leaving the trailing field to fail on an empty cursor.
+
+  ```yaml
+  fields:
+    - {name: count,     bits: 8}
+    - {name: data,      bytes: {size: {fill: true}}}
+    - {name: data_type, bits: 32}
+  ```
+
+  **The trailing width must be computable from the spec alone**, or the spec is
+  rejected: `kober.check.trailing_width` is total by refusal rather than by
+  approximation, because a guessed boundary is exactly what §2 exists to
+  prevent. An integer contributes its `bits`, a `fixed`-sized `bytes` or
+  `string` its length, a nested unit the sum of its fields, and a `switch` only
+  where every case and a present `default` agree. A `computed`, `select` or
+  `pointer` reads nothing where it stands and claims none of the trailer.
+  Refused, each naming the field responsible: a trailing `condition`, a repeat
+  whose count the spec does not fix, a trailing size that is itself dynamic, a
+  second `fill` in a unit, a `fill` that repeats, and a trailer that is not a
+  whole number of bytes.
+
+  A `fill` under `input: stream` warns rather than errors — a run holds as many
+  messages as fit, so it would swallow the ones after this and name their bytes
+  as one field. `kober.spec.Fill` and `kober.check.fill_widths` are exported;
+  both backends read the width from the one resolver rather than each deciding.
+
+- **Three shorthands, which build the identical spec.** The single-key tagged
+  mapping is the schema's one convention and its depth is the cost of applying
+  it uniformly — an integer field was four levels deep to say *count is eight
+  bits*. Nothing downstream can tell which spelling was used.
+
+  ```yaml
+  - {name: count, type: {int: {bits: 8}}}   # all four mean the same thing
+  - {name: count, int: {bits: 8}}
+  - {name: count, int: 8}
+  - {name: count, bits: 8}
+  ```
+
+  *A scalar where a mapping is expected fills in the one key that matters* —
+  now stated as a rule rather than as the two exceptions it already had.
+  `{bytes: 4}` and `{string: 4}` are a fixed size, `{int: 8}` a width,
+  `{until: "n == 0"}` an expression, alongside the bare size and bare unit name
+  that already worked.
+
+  *The kind key may be lifted into the field*, which is unambiguous because the
+  field keys and the type keys do not overlap. Strictness is untouched: exactly
+  one key must name a kind, zero is an error, two is an error, `type:` beside a
+  lifted kind is an error, and a key in neither set is still an error.
+
+  *`bits` names the integer kind*, because the word says what the number
+  counts. `int: 8` is shorter and cannot: Kaitai's `u8` means eight *bytes*, so
+  a reader arriving from there would be silently wrong, and sub-byte fields are
+  the ordinary case here. A field needing `enum`, `signed` or `endian` writes
+  `int: {bits: …, …}`; one of those beside `bits:` is an unknown-key error.
+
+  Both shipped examples are converted, since an example that does not use the
+  short form is an argument that the short form is not wanted.
+
+- **A `delimiter` may be written beside `size` rather than under it.** Reading
+  up to a delimiter is the commonest thing a text protocol does and was the
+  deepest to write — four levels and 57 characters to say *read to CRLF*.
+  `consume`, `required` and `within` sit alongside it with the same defaults.
+
+  ```yaml
+  type: {string: {size: {terminated: {delimiter: "\r\n"}}}}   # long
+  type: {string: {delimiter: "\r\n"}}                         # the same thing
+  type: {string: {delimiter: ":", within: "\r\n", required: false}}
+  ```
+
+  `delimiter` rather than a bare string size (`size: "\r\n"`) because it says
+  what it is: a bare string there reads like a mistake until you know the rule,
+  where this needs no rule. Its companions sit beside it so that needing a bound
+  is adding a key rather than rewriting the shape — half of
+  `examples/http.yaml`'s header unit needs `within` and `required`, so the
+  bounded case is not the rare one. A body states its extent once: `size` and
+  `delimiter` together is an error, as is a companion with no `delimiter`.
+
+- **`as:` names the element a `select` or an `until` binds.** Optional on both.
+
+  ```yaml
+  select:
+    from: headers
+    as: header
+    where: "lower(header.name) == 'content-length'"
+    value: "to_int(header.value)"
+    default: "-1"
+
+  repeat: {until: {expr: "label.length == 0", as: label}}
+  ```
+
+  Without it the source's name means the repetition on one line and one element
+  on the next, with nothing marking the change — the one rule in the format
+  reference that could only be explained rather than made obvious. Writing `as:`
+  makes the repeated field's own name a **list again**, refused like any other,
+  so it is not a second spelling at author's discretion: under an alias exactly
+  one name means an element and it is the one the author chose. Both constructs
+  take it, so the two do not diverge. `kober.check.scope_at` gains `element_as`.
+
+- `kober.spec.Spec.as_decoder()`, returning the `(name, version)` pair `zpf`
+  identifies a decoder by. `DESIGN.md` §6 has presented it since the design was
+  written and nothing implemented it, so following §6 verbatim raised
+  `AttributeError` — and the escape hatch §11.5 leans on was the one thing that
+  did not work as documented. `kober.stage.run` calls it in place of an inline
+  tuple.
+
+- **`Pointer`, `Select`, `run_compiled` and `decode_stream_compiled` are
+  exported from `kober`.** Each was added in a phase that did not go back to
+  `__init__.py`, so `kober.FieldType` was a published union naming two classes
+  that could not be imported from the same place, and the compiler's half of an
+  exported pair was missing. `Fill` joins them. `tests/test_docs.py` now asserts
+  that every public class and function of `kober.spec`, `kober.stage`,
+  `kober.ops`, `kober.pygen` and `kober.runtime` is re-exported, and that every
+  name `DESIGN.md` §6 imports or calls actually resolves — the two guards that
+  would have caught all four the day each was written.
 
 - `kober.spec.Select` and the `select:` spec key — ask a question about a
   **repeated** field, and get one scalar back. Four required keys: `from`
@@ -671,6 +806,58 @@ installed from a checkout (see the README).
 
 ### Changed
 
+- **Breaking: the `switch` dispatch key is `dispatch`, not `on`.** YAML 1.1
+  reads bare `on` as a boolean, so `on: kind` parsed as `{True: "kind"}` before
+  the loader ever saw it, and the loader carried a repair to read the boolean
+  back as the word it was written as. The repair was narrow, tested and
+  documented; needing one was the smell. The schema had chosen, as the dispatch
+  key of its second-most-common construct, a word its own authoring format
+  mangles.
+
+  Callers must write `dispatch:`. A spec still using `on:` is refused with a
+  message naming the rename, in both spellings — the bare word and the quoted
+  `"on"` that reaches JSON. That refusal is an error message, not an alias:
+  there is one spelling of the key, which was the point. `kober.spec.Switch.on`
+  is `Switch.dispatch` so the document and the model agree.
+
+  Taken now because nothing is released and no spec outside this project exists,
+  which is the cheapest this rename will ever be. It deletes fifteen lines of
+  loader and a documented trap.
+
+- **Breaking: this depends on `zpf` `0.3.x`, up from `0.2.x`**, which implements
+  Zipline Payload Format **v0.19**, up from v0.16. Files either side of that
+  boundary do not read across it, so a re-run rather than a migration. Every
+  `zpf` minor is a break with no upgrade path promised, which is why the pin
+  covers one at a time.
+
+- **Breaking: a record's timestamp is derived from what it cites**, rather than
+  written as the run's
+  ([python-zipline#62](https://github.com/adamkjonsson/python-zipline/issues/62)).
+  `kober.stage` passes no `ts` at all, so `zpf` applies the specification's
+  rule: a decoded record carries the completion time of the last input record
+  **in its own span set**.
+
+  The old behaviour was defended in `DESIGN.md` §5 on the grounds that a decode
+  stage has no per-field time to offer. That was wrong wherever a message
+  straddles two packets, and wrong for every message but the last in a run:
+  three messages arriving in three packets carry three times, even though
+  reassembly offers them as one contiguous run. Deriving it is also the only way
+  to be right on a lossy capture — contributors are recorded *after* overlap
+  trimming, so a retransmit that contributed no accepted byte does not move the
+  answer, which a table built from record timestamps outside the library cannot
+  know.
+
+  **One record cannot derive a time and is told one instead**: a record citing
+  an *empty* range. Two constructs make one — a `select` whose default matched
+  cites nothing, there being no element to point at, and a bounded optional
+  terminator that finds nothing reads an empty value, which is how the blank
+  line ending an HTTP header block is recognised. `zpf` documents passing `ts`
+  explicitly for exactly this case, and the run's completion time is the only
+  honest answer: the value was computed from a message that completed then. It
+  is used *only* there, never in place of a derivable one. Found by decoding an
+  impaired chunked HTTP stream, which is the only place both constructs occur
+  at once.
+
 - **A compiled `select` is a module-level function rather than a nested one**,
   and walks its repetition by index rather than by `zip`. Together those make a
   compiled HTTP decode about **15% faster** — 6.6 µs a message to 5.8 µs over
@@ -1289,4 +1476,5 @@ installed from a checkout (see the README).
   parses `comment` back. Whether to follow `zpf` 0.3 (#58, #59) is recorded as
   an open question rather than settled.
 
-[Unreleased]: https://github.com/adamkjonsson/zipline-kober/commits/main/
+[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/adamkjonsson/zipline-kober/releases/tag/v0.1.0

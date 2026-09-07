@@ -47,6 +47,7 @@ from kober.spec import (
     Computed,
     Count,
     Emit,
+    Fill,
     Fixed,
     FromExpr,
     IntType,
@@ -436,14 +437,17 @@ def _render_type(kind: FieldType) -> str:
     if isinstance(kind, Pointer):
         return f"pointer at {unparse(kind.at)}: {_render_type(kind.type)}"
     if isinstance(kind, Select):
+        # The binding is shown where the spec wrote one, because the whole
+        # point of `as:` is that a reader can see which name means an element.
+        bound = f" as {kind.alias}" if kind.alias is not None else ""
         return (
-            f"select from {kind.source} where {unparse(kind.where)}"
+            f"select from {kind.source}{bound} where {unparse(kind.where)}"
             f" → {unparse(kind.value)} else {unparse(kind.default)}"
         )
     if isinstance(kind, Switch):
         cases = ", ".join(f"{key!r}" for key in kind.cases)
         tail = "" if kind.default is not None else ", no default"
-        return f"switch on {unparse(kind.on)} [{cases}{tail}]"
+        return f"switch on {unparse(kind.dispatch)} [{cases}{tail}]"
     # Named rather than reached by falling off the end of the chain, which is
     # how a `pointer` went unrenderable from the phase that added it until a
     # `select` crashed on the same line. `show` prints what a spec describes,
@@ -459,6 +463,8 @@ def _render_size(size: SizeSpec) -> str:
         return unparse(size.expr)
     if isinstance(size, Remaining):
         return "remaining"
+    if isinstance(size, Fill):
+        return "fill"
     if isinstance(size, Terminated):
         flags = "" if size.required else ", optional"
         bound = f" within {size.within!r}" if size.within is not None else ""
@@ -471,7 +477,8 @@ def _render_repeat(repeat: Repeat) -> str:
     if isinstance(repeat, Count):
         return f"×{unparse(repeat.expr)}"
     if isinstance(repeat, Until):
-        return f"×until {unparse(repeat.expr)}"
+        bound = f" as {repeat.alias}" if repeat.alias is not None else ""
+        return f"×until{bound} {unparse(repeat.expr)}"
     if isinstance(repeat, ToEnd):
         return "×to end"
     return "×?"

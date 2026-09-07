@@ -13,17 +13,24 @@ Q1   Can a decode stage read a *decoded* file as input?          yes
 Q2   Are overlapping spans accepted (bitfields sharing bytes)?   yes
 Q3   May a created payload differ from its cited bytes?          yes
 Q4   Does a message spanning segments get the last segment's ts? yes
-Q5   Can a per-field record say which field it is?               yes*
+Q5   Can a per-field record say which field it is?               yes
 ===  ==========================================================  ======
 
 Q5 was the finding that blocked field granularity: the records below carried
-correct values and correct spans with no way to tell one from another. It is
-answered by ``comment=`` on :meth:`zpf.DecodeStage.record`, added upstream in
-`#55 <https://github.com/adamkjonsson/python-zipline/issues/55>`_ — hence the
-asterisk, because ``comment`` is **free text** that no consumer may depend on.
-A checkable name is argued upstream in `#58
-<https://github.com/adamkjonsson/python-zipline/issues/58>`_, on ``zpf`` 0.3.
-See ``DESIGN.md`` §4.1.
+correct values and correct spans with no way to tell one from another. It was
+answered first by ``comment=`` on :meth:`zpf.DecodeStage.record` and now by
+``role=``, the per-record label ``zpf`` 0.3.0 added for `#58
+<https://github.com/adamkjonsson/python-zipline/issues/58>`_ — which is why the
+asterisk is gone. ``comment`` is free text no consumer may depend on; ``role``
+is opaque to the format but *declared* to the decoder's vocabulary, and it sits
+beside ``content_type`` rather than instead of it, so a record carries
+``prim:u16`` **and** ``dns.flags.qr``. See ``DESIGN.md`` §4.1.
+
+Q4 is also answered differently than it was. A record's ``ts`` is derived from
+its ``cites`` when omitted, per `#62
+<https://github.com/adamkjonsson/python-zipline/issues/62>`_, so a message
+spanning two segments takes the completion time of the last one that
+contributed to *it* rather than the run's.
 """
 
 from __future__ import annotations
@@ -73,8 +80,8 @@ def build_transport(path: Path) -> None:
             client = session.participant("10.0.0.1:51000", isn=1000)
             # Split mid-message, so the decoder must coalesce -- and so Q4 has
             # two candidate timestamps to choose between.
-            session.record(client, ts=1000, payload=DNS[:12], seq_start=1001)
-            session.record(client, ts=2000, payload=DNS[12:], seq_start=1013)
+            session.record(client, ts=1000, payload=DNS[:12], hints=zpf.Hints(seq_start=1001))
+            session.record(client, ts=2000, payload=DNS[12:], hints=zpf.Hints(seq_start=1013))
             session.end(reason="fin")
 
 
@@ -102,7 +109,6 @@ def stage_messages(source: Path, sink: Path) -> None:
                 stage.record(
                     stream,
                     seg.data,
-                    ts=seg.ts,
                     content_type="dec:dns-message",
                     cites=(seg.off_start, seg.off_end),
                 )
@@ -146,10 +152,9 @@ def stage_fields(source: Path, sink: Path) -> None:
     ) as stage:
         for stream in stage.streams():
             data = stream.reassembled()
-            ts = max(seg.ts for seg in stream.segments())
             flags = struct.unpack_from(">H", data, 2)[0]
-            # (name, offset, width, value). Q5: the name rides in comment=,
-            # which is where a field path can go until zpf grows a checkable one.
+            # (name, offset, width, value). Q5: the name rides in role=, the
+            # per-record label the format grew for exactly this.
             fields: list[tuple[str, int, int, int]] = [
                 ("dns.id", 0, 2, struct.unpack_from(">H", data, 0)[0]),
                 ("dns.flags", 2, 2, flags),
@@ -166,10 +171,9 @@ def stage_fields(source: Path, sink: Path) -> None:
                 stage.record(
                     stream,
                     value.to_bytes(width, "little"),
-                    ts=ts,
                     content_type=f"prim:u{width * 8}",
                     cites=(off, off + width),
-                    comment=name,
+                    role=name,
                 )
             # Claim the rest honestly rather than letting auto-fill call it
             # "skipped" on our behalf.
@@ -182,13 +186,13 @@ def read_back(path: Path) -> list[str | None]:
     with zpf.open(path) as handle:
         for session in handle.sessions():
             for record in session.records():
-                names.append(record.comment)
+                names.append(record.role)
                 token = (record.content_type or ":").split(":", 1)[1]
                 value = zpf.decode_prim(record.payload, token)
                 spans = [(sp.off_start, sp.off_end) for sp in record.spans]
                 print(
                     f"  ct={record.content_type:10} value={value!r:8} "
-                    f"cites={spans} comment={record.comment!r}"
+                    f"cites={spans} role={record.role!r}"
                 )
     return names
 

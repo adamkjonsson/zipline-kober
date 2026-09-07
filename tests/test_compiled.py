@@ -155,19 +155,18 @@ class RecordingSink:
         content_type: str,
         off_start: int,
         off_end: int,
-        comment: str | None,
+        role: str | None,
     ) -> None:
         """Keep one record, and write it if there is a stage to write to."""
         self._flush()
-        self.records.append(Emission(payload, content_type, off_start, off_end, comment))
+        self.records.append(Emission(payload, content_type, off_start, off_end, role))
         if self._stage is not None:
             self._stage.record(
                 self._stream,
                 payload,
-                ts=self.ts,
                 content_type=content_type,
+                role=role,
                 cites=(off_start, off_end),
-                comment=comment,
                 seam=self._seam,
             )
             self._seam = None
@@ -365,7 +364,7 @@ def test_a_switch_dispatches_the_same_way():
               - name: body
                 type:
                   switch:
-                    on: kind
+                    dispatch: kind
                     cases:
                       1: {int: {bits: 16}}
                       2: {bytes: {size: {fixed: 3}}}
@@ -387,7 +386,7 @@ def test_a_switch_with_no_case_is_undecodable_in_both():
               - name: body
                 type:
                   switch:
-                    on: kind
+                    dispatch: kind
                     cases:
                       1: {int: {bits: 16}}
     """)
@@ -708,7 +707,7 @@ def test_the_answer_section_is_decoded_rather_than_skipped():
     """
     records, regions = emitted(example("dns"), DNS_RESPONSE, Emit.FIELD)
     assert regions == []
-    paths = [record.comment for record in records]
+    paths = [record.role for record in records]
     assert "dns.answers[0].rdata" in paths
     assert any("answers[0].name.labels[0].rest.target" in path for path in paths)
     writes(example("dns"), DNS_RESPONSE, Emit.FIELD)
@@ -716,7 +715,7 @@ def test_the_answer_section_is_decoded_rather_than_skipped():
 
 def test_a_truncated_message_keeps_what_it_read_before_the_trouble():
     records, regions = emitted(example("dns"), QUERY[:5], Emit.FIELD)
-    assert [record.comment for record in records[:2]] == ["dns.id", "dns.flags.qr"]
+    assert [record.role for record in records[:2]] == ["dns.id", "dns.flags.qr"]
     assert regions == [Unclaimed(4, 5, "truncated")]
 
 
@@ -737,7 +736,7 @@ def test_a_repeated_leaf_names_each_element():
               - {name: items, type: {int: {bits: 8}}, repeat: {to_end: true}}
     """)
     records, _ = emitted(spec, b"abc", Emit.FIELD)
-    assert [record.comment for record in records] == ["t.items[0]", "t.items[1]", "t.items[2]"]
+    assert [record.role for record in records] == ["t.items[0]", "t.items[1]", "t.items[2]"]
     writes(spec, b"abc", Emit.FIELD)
 
 
@@ -753,7 +752,7 @@ def test_a_switch_labels_the_record_by_what_it_decoded():
               - name: body
                 type:
                   switch:
-                    on: kind
+                    dispatch: kind
                     cases:
                       1: {int: {bits: 16}}
                       2: {bytes: {size: {fixed: 2}}}
@@ -779,7 +778,7 @@ def test_a_computed_field_cites_the_fields_it_read():
     """)
     records, _ = emitted(spec, b"\x02\x00", Emit.FIELD)
     computed = records[-1]
-    assert computed.comment == "t.octets"
+    assert computed.role == "t.octets"
     assert (computed.off_start, computed.off_end) == (0, 1)
     writes(spec, b"\x02\x00", Emit.FIELD)
 
@@ -857,7 +856,7 @@ def blocks(path: Path) -> list[tuple[object, ...]]:
         for block in handle.blocks():
             if isinstance(block, Record):
                 spans = tuple((s.off_start, s.off_end) for s in block.spans)
-                out.append(("record", block.content_type, block.comment, block.payload, spans))
+                out.append(("record", block.content_type, block.role, block.payload, spans))
             elif isinstance(block, Undecoded):
                 out.append(("undecoded", block.reason, block.off_start, block.off_end))
     return out
@@ -904,7 +903,7 @@ def test_the_written_records_read_back_named_and_typed(tmp_path: Path):
             for record in session.records():
                 if record.content_type.startswith("prim:"):
                     token = record.content_type.split(":", 1)[1]
-                    seen[record.comment] = zpf.decode_prim(record.payload, token)
+                    seen[record.role] = zpf.decode_prim(record.payload, token)
 
     assert seen["dns.id"] == 0x1234
     assert seen["dns.flags.rd"] == 1
@@ -1046,7 +1045,7 @@ AWKWARD: dict[str, str] = {
               - name: body
                 type:
                   switch:
-                    on: kind
+                    dispatch: kind
                     cases:
                       1: {int: {bits: 8}}
                       2: {int: {bits: 32}}
@@ -1089,6 +1088,57 @@ AWKWARD: dict[str, str] = {
                   string:
                     size: {terminated: {delimiter: "\\n", required: false, consume: false}}
               - {name: rest, type: {bytes: {size: {remaining: true}}}}
+    """,
+    # `as:` moves which name means an element, and the two implementations
+    # resolve names by entirely different machinery — a scope walk in the
+    # checker, a local in generated Python. A spec that aliases *both*
+    # constructs, and whose predicate would not resolve under the old rule, is
+    # what says the two agree about the binding rather than about the shape.
+    "aliased bindings": """
+        name: bound
+        version: "1"
+        entry: m
+        input: datagram
+        units:
+          m:
+            fields:
+              - name: items
+                unit: item
+                repeat: {until: {expr: "e.key == 0", as: e}}
+              - name: found
+                select:
+                  from: items
+                  as: pick
+                  where: "pick.key == 2"
+                  value: "pick.value"
+                  default: "-1"
+              - {name: rest, bytes: {size: {remaining: true}}}
+          item:
+            fields:
+              - {name: key, bits: 8}
+              - {name: value, bits: 8}
+    """,
+    # A `fill` is sized by the fields *after* it, so the two implementations
+    # reach the same boundary by different routes: the interpreter subtracts at
+    # decode time from a width resolved when it was built, the compiler bakes
+    # the subtraction into the source. A trailer of three fields, one of them a
+    # nested unit, is where a wrong sum would still look plausible.
+    "fill": """
+        name: filled
+        version: "1"
+        entry: m
+        input: datagram
+        units:
+          m:
+            fields:
+              - {name: n, type: {int: {bits: 8}}}
+              - {name: body, type: {bytes: {size: {fill: true}}}}
+              - {name: footer, type: {unit: footer}}
+              - {name: checksum, type: {int: {bits: 16}}}
+          footer:
+            fields:
+              - {name: kind, type: {int: {bits: 8}}}
+              - {name: length, type: {int: {bits: 32}}}
     """,
     "computed and conditional": """
         name: derived
@@ -1149,6 +1199,8 @@ AWKWARD_SEEDS: dict[str, bytes] = {
     "repeats": bytes([3, 0, 1, 0, 2, 0, 3, 7, 7, 7, 7]),
     "sizes": b"\x03abcdefline\r\nloose\nrest",
     "computed and conditional": bytes([2, *range(20)]),
+    "aliased bindings": bytes([1, 9, 2, 7, 0, 0]) + b"tail",
+    "fill": bytes([3]) + b"HELLO WORLD" + bytes([9]) + b"\x00\x00\x00\x0b\xab\xcd",
     # `pos` is 1, so both pointers land inside `blob` — the partial overlap a
     # real owner name makes when it points into an earlier record's rdata.
     "back-reference": bytes([0xAA, 0xBB, 0xCC, 0xDD, 1, 9, 9, 9]),
@@ -1303,7 +1355,7 @@ def write_stream(path: Path, records: list[tuple[int, bytes, int]]) -> None:
         with writer.begin_session(proto="tcp", key="10.0.0.1:51000 <-> 10.0.0.2:53") as session:
             client = session.participant("10.0.0.1:51000", isn=1000)
             for ts, payload, seq in records:
-                session.record(client, ts=ts, payload=payload, seq_start=seq)
+                session.record(client, ts=ts, payload=payload, hints=zpf.Hints(seq_start=seq))
             session.end(reason="fin")
 
 
@@ -1382,7 +1434,7 @@ def test_a_field_path_carries_the_specs_own_name_not_the_backends():
               - {name: class, type: {int: {bits: 8}}}
     """)
     records, _ = emitted(spec, b"\x01", Emit.FIELD)
-    assert [record.comment for record in records] == ["k.class"]
+    assert [record.role for record in records] == ["k.class"]
     writes(spec, b"\x01", Emit.FIELD)
 
 
@@ -1403,7 +1455,7 @@ def test_a_field_path_carries_the_specs_own_name_not_the_backends():
                     type:
                       pointer:
                         at: "p"
-                        type: {switch: {on: "p", cases: {0: {int: {bits: 8}}}}}
+                        type: {switch: {dispatch: "p", cases: {0: {int: {bits: 8}}}}}
             """,
         ),
         (
@@ -1419,7 +1471,7 @@ def test_a_field_path_carries_the_specs_own_name_not_the_backends():
                   - name: t
                     type:
                       switch:
-                        on: "p"
+                        dispatch: "p"
                         cases:
                           0: {int: {bits: 8}}
                           1: {pointer: {at: "0", type: {int: {bits: 8}}}}
@@ -1518,8 +1570,8 @@ def test_a_select_over_an_empty_repetition_agrees():
 def test_a_select_cites_the_element_it_chose_in_both():
     """Stated as a value, not only as an agreement, so a shared bug is visible."""
     records, _ = emitted(select_spec(), SELECT_MESSAGE, Emit.FIELD)
-    size = next(record for record in records if record.comment.endswith(".size"))
-    items = [record for record in records if ".items[1]" in record.comment]
+    size = next(record for record in records if record.role.endswith(".size"))
+    items = [record for record in records if ".items[1]" in record.role]
     assert (size.off_start, size.off_end) == (
         min(record.off_start for record in items),
         max(record.off_end for record in items),
@@ -1546,7 +1598,7 @@ units:
       - name: mixed
         type:
           switch:
-            on: "n"
+            dispatch: "n"
             cases:
               1: {select: {from: items, where: "items.tag == 1", value: "items.tag", default: "0"}}
               2: {int: {bits: 8}}

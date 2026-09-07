@@ -24,61 +24,45 @@ units:
   message:
     doc: One DNS message.
     fields:
-      - name: id
-        type: {int: {bits: 16}}
-        doc: Copied into the reply; matches responses to requests.
-      - name: flags
-        type: {unit: flags}
-      - name: qdcount
-        type: {int: {bits: 16}}
-        doc: Number of entries in the question section.
-      - name: ancount
-        type: {int: {bits: 16}}
-      - name: nscount
-        type: {int: {bits: 16}}
-      - name: arcount
-        type: {int: {bits: 16}}
-      - name: questions
-        type: {unit: question}
-        repeat: {count: "qdcount"}
-      - name: answers
-        type: {unit: rr}
-        repeat: {count: "ancount"}
-      - name: authority
-        type: {unit: rr}
-        repeat: {count: "nscount"}
-      - name: additional
-        type: {unit: rr}
-        repeat: {count: "arcount"}
+      - {name: id, bits: 16, doc: Copied into the reply; matches responses to requests.}
+      - {name: flags, unit: flags}
+      - {name: qdcount, bits: 16, doc: Number of entries in the question section.}
+      - {name: ancount, bits: 16}
+      - {name: nscount, bits: 16}
+      - {name: arcount, bits: 16}
+      - {name: questions, unit: question, repeat: {count: "qdcount"}}
+      - {name: answers, unit: rr, repeat: {count: "ancount"}}
+      - {name: authority, unit: rr, repeat: {count: "nscount"}}
+      - {name: additional, unit: rr, repeat: {count: "arcount"}}
 
   flags:
     doc: The 16-bit flags word, MSB first.
     fields:
-      - {name: qr, type: {int: {bits: 1}}, doc: "0 query, 1 response."}
-      - {name: opcode, type: {int: {bits: 4, enum: opcode}}}
-      - {name: aa, type: {int: {bits: 1}}, doc: "Authoritative answer."}
-      - {name: tc, type: {int: {bits: 1}}, doc: "Truncated."}
-      - {name: rd, type: {int: {bits: 1}}, doc: "Recursion desired."}
-      - {name: ra, type: {int: {bits: 1}}, doc: "Recursion available."}
-      - {name: null, type: {int: {bits: 3}}, doc: "Reserved, must be zero."}
-      - {name: rcode, type: {int: {bits: 4, enum: rcode}}}
+      - {name: qr, bits: 1, doc: "0 query, 1 response."}
+      - {name: opcode, int: {bits: 4, enum: opcode}}
+      - {name: aa, bits: 1, doc: "Authoritative answer."}
+      - {name: tc, bits: 1, doc: "Truncated."}
+      - {name: rd, bits: 1, doc: "Recursion desired."}
+      - {name: ra, bits: 1, doc: "Recursion available."}
+      - {name: null, bits: 3, doc: "Reserved, must be zero."}
+      - {name: rcode, int: {bits: 4, enum: rcode}}
 
   question:
     fields:
-      - {name: qname, type: {unit: name}}
-      - {name: qtype, type: {int: {bits: 16, enum: rrtype}}}
-      - {name: qclass, type: {int: {bits: 16, enum: rrclass}}}
+      - {name: qname, unit: name}
+      - {name: qtype, int: {bits: 16, enum: rrtype}}
+      - {name: qclass, int: {bits: 16, enum: rrclass}}
 
   rr:
     doc: One resource record, in the answer, authority, or additional section.
     fields:
-      - {name: name, type: {unit: name}, doc: "The owner name, often a pointer."}
-      - {name: type, type: {int: {bits: 16, enum: rrtype}}}
-      - {name: class, type: {int: {bits: 16, enum: rrclass}}}
-      - {name: ttl, type: {int: {bits: 32}}}
-      - {name: rdlength, type: {int: {bits: 16}}}
+      - {name: name, unit: name, doc: "The owner name, often a pointer."}
+      - {name: type, int: {bits: 16, enum: rrtype}}
+      - {name: class, int: {bits: 16, enum: rrclass}}
+      - {name: ttl, bits: 32}
+      - {name: rdlength, bits: 16}
       - name: rdata
-        type: {bytes: {size: {expr: "rdlength"}}}
+        bytes: {size: {expr: "rdlength"}}
         doc: Opaque here; what is inside depends on the record type.
 
   name:
@@ -87,7 +71,7 @@ units:
       compression pointer, which is always the last thing in a name.
     fields:
       - name: labels
-        type: {unit: label}
+        unit: label
         repeat: {until: "labels.length == 0 or labels.length >= 192"}
 
   label:
@@ -98,14 +82,13 @@ units:
       and there is no default, so a message using one is undecodable rather
       than guessed at.
     fields:
-      - {name: length, type: {int: {bits: 8}}}
+      - {name: length, bits: 8}
       - name: rest
-        type:
-          switch:
-            on: "length >> 6"
-            cases:
-              0: {string: {size: {expr: "length"}}}
-              3: {unit: {name: compressed, args: ["length"]}}
+        switch:
+          dispatch: "length >> 6"
+          cases:
+            0: {string: {size: {expr: "length"}}}
+            3: {unit: {name: compressed, args: ["length"]}}
 
   compressed:
     doc: >
@@ -113,7 +96,7 @@ units:
       of the two bytes, counted from the start of the message.
     params: [{name: high, type: int}]
     fields:
-      - {name: low, type: {int: {bits: 8}}}
+      - {name: low, bits: 8}
       - name: target
-        type: {pointer: {at: "((high & 63) << 8) | low", type: {unit: name}}}
+        pointer: {at: "((high & 63) << 8) | low", type: {unit: name}}
         doc: The name already at that offset, read there and returned from.

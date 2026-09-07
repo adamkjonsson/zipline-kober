@@ -242,6 +242,58 @@ def select_cases(seed: int) -> list[bytes]:
     return variants(SELECT_MESSAGE, seed)
 
 
+#: A spec whose body is sized by ``fill``, and its seed input.
+#:
+#: No shipped example uses one — DNS and HTTP both frame their bodies another
+#: way — and the construct's whole promise is about a *boundary*, which is the
+#: kind of claim only adversarial input settles. Two properties matter and
+#: neither is visible in a well-formed decode: the fill must never read into
+#: the trailer, and the trailer must always be cited.
+#:
+#: The trailer is deliberately more than one field and includes a nested unit,
+#: because summing widths across a unit reference is where a wrong answer would
+#: be off by exactly the nested unit's size and still look plausible.
+FILL_SPEC = """
+name: fill_probe
+version: "1.0"
+entry: message
+input: datagram
+units:
+  message:
+    fields:
+      - {name: count, type: {int: {bits: 8}}}
+      - {name: data, type: {bytes: {size: {fill: true}}}}
+      - {name: footer, type: {unit: footer}}
+      - {name: checksum, type: {int: {bits: 16}}}
+  footer:
+    fields:
+      - {name: kind, type: {int: {bits: 8}}}
+      - {name: length, type: {int: {bits: 32}}}
+"""
+
+#: One well-formed message for :data:`FILL_SPEC`: a byte, a body, and the
+#: seven-byte trailer the fill has to leave alone.
+FILL_MESSAGE = bytes([3]) + b"HELLO WORLD" + bytes([9]) + b"\x00\x00\x00\x0b" + b"\xab\xcd"
+
+#: What the trailing fields of :data:`FILL_SPEC` claim, as the spec fixes it:
+#: one byte, four bytes, and two. Written out so a test can state the boundary
+#: rather than recompute it with the code under test.
+FILL_TRAILING = 7
+
+
+def fill_cases(seed: int) -> list[bytes]:
+    """Build one batch of variants of the fill-framed message.
+
+    Args:
+        seed: Which batch.
+
+    Returns:
+        The batch.
+
+    """
+    return variants(FILL_MESSAGE, seed)
+
+
 def framing_cases(seed: int) -> list[bytes]:
     """Build one batch of variants across every HTTP framing arm.
 
