@@ -5,13 +5,19 @@ Split in two on purpose. :func:`plan` is pure — a tree in, a list of
 to write is testable without opening a file. The stage driver does the writing.
 
 **The field path is formatted in exactly one place** (:func:`field_path`), which
-is ``DESIGN.md`` §4.1's requirement rather than a tidiness preference: the path
-currently rides in ``comment=``, which `zpf` documents as free text no consumer
-may depend on, and upstream
-`#58 <https://github.com/adamkjonsson/python-zipline/issues/58>`_ is expected to
-replace it with a real per-record label. Keeping the formatting to one function
-is what makes that a one-line change. For the same reason **nothing here reads
-a comment back** — the read side is the tree, not the file.
+is ``DESIGN.md`` §4.1's requirement rather than a tidiness preference. It rides
+in ``role=``, the per-record label `zpf` added in ``0.3.0`` for upstream
+`#58 <https://github.com/adamkjonsson/python-zipline/issues/58>`_: what a record
+**is**, in a vocabulary its decoder documents, independent of the
+``content_type`` that says what kind it is. Keeping the formatting to one
+function is what made that a one-line change when it landed.
+
+Until then the path rode in ``comment=``, which the format documents as free
+text no consumer may depend on — so a reader parsing it depended on something
+the format says means nothing. ``role`` is opaque to the format too, but its
+scope is *declared*, which is the difference between a name and a note. For the
+same reason as before, **nothing here reads a role back** — the read side is the
+tree, not the file.
 
 The ``prim:`` vocabulary is closed (``u8``…``u64``, ``i8``…``i64``, ``bytes``),
 so a field whose width is not 8, 16, 32, or 64 bits has no token of its own. See
@@ -46,8 +52,8 @@ class Emission:
         content_type: The label.
         off_start: First input byte this is evidence about.
         off_end: One past the last.
-        comment: The field path, for field granularity. Free text — see the
-            module docstring.
+        role: The field path, for field granularity — what this record *is*,
+            in this decoder's vocabulary. See the module docstring.
 
     """
 
@@ -55,7 +61,7 @@ class Emission:
     content_type: str
     off_start: int
     off_end: int
-    comment: str | None = None
+    role: str | None = None
 
 
 @dataclass(frozen=True)

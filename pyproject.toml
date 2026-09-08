@@ -5,9 +5,8 @@ build-backend = "hatchling.build"
 [project]
 name = "kober"
 # The single source of truth for the version; `kober.__version__`
-# reads it back out of the installed metadata. Pre-release: nothing is
-# implemented yet, and `0.1.0` has not been tagged.
-version = "0.1.0.dev0"
+# reads it back out of the installed metadata.
+version = "0.1.0"
 description = "Decode network protocols from a declarative specification into Zipline decode stages"
 readme = "README.md"
 license = "MIT"
@@ -15,9 +14,9 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [{ name = "Adam Jonsson", email = "akj426@gmail.com" }]
 classifiers = [
-    # Nothing here is implemented yet, and the format underneath is 0.x and
-    # explicitly not production-ready. Do not promise more than DESIGN.md does.
-    "Development Status :: 2 - Pre-Alpha",
+    # The design is built, but the format underneath is 0.x and explicitly not
+    # production-ready. Do not promise more than DESIGN.md does.
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -31,13 +30,13 @@ classifiers = [
 # minor is a break with no upgrade path promised, so a range spanning two of
 # them would be a promise neither project can keep.
 #
-# The floor is the released 0.2.0, not a `.dev0` prerelease. It was `.dev0`
-# only so an unreleased local checkout could satisfy it (PEP 440 orders
-# 0.2.0.dev0 below 0.2.0), and 0.2.0 is now tagged. Tightening it is also a
-# correctness fix: `comment=` on both `record()` methods landed *in* 0.2.0, so
-# a dev build predating that change satisfied the old floor while lacking the
-# API this project is built on.
-dependencies = ["zpf>=0.2.0,<0.3"]
+# The floor is 0.3.0, which implements Zipline Payload Format v0.19. Two things
+# this project is built on landed *in* it: `role=` on `DecodeStage.record()`,
+# which is where a field path belongs now that the format has somewhere to put
+# one, and a `ts` derived from `cites`, which is the specification's own
+# timestamp rule rather than the run-wide approximation that preceded it. A
+# build predating either satisfies no useful floor.
+dependencies = ["zpf>=0.3.0,<0.4"]
 
 [project.optional-dependencies]
 # YAML is the authoring format for specs, and comments are the reason: a
@@ -51,7 +50,7 @@ yaml = ["PyYAML>=6.0"]
 kober = "kober.cli:main"
 
 [project.urls]
-Specification = "https://github.com/adamkjonsson/zipline/blob/v0.16/docs/zipline-payload-format.md"
+Specification = "https://github.com/adamkjonsson/zipline/blob/v0.19/docs/zipline-payload-format.md"
 Changelog = "https://github.com/adamkjonsson/zipline-kober/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]

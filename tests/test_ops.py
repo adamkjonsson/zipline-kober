@@ -135,7 +135,7 @@ units:
       - name: body
         type:
           switch:
-            on: kind
+            dispatch: kind
             cases:
               1: {int: {bits: 16}}
               2: {bytes: {size: {fixed: 4}}}
@@ -180,7 +180,7 @@ def test_a_switch_with_no_default_is_not_exhaustive():
               - name: body
                 type:
                   switch:
-                    on: kind
+                    dispatch: kind
                     cases:
                       1: {int: {bits: 16}}
     """)
@@ -350,7 +350,7 @@ units:
             at: "lo"
             type:
               switch:
-                on: "lo"
+                dispatch: "lo"
                 cases:
                   0: {int: {bits: 8}}
 """)
@@ -517,7 +517,7 @@ def test_an_element_that_reads_nothing_never_provably_advances(condition: str | 
 def test_a_switch_with_no_default_is_not_provably_advancing():
     """Its element may be undecodable rather than read, so the guard stays."""
     item = items_of(
-        repeat_plan(element='{switch: {on: "flag", cases: {1: {int: {bits: 8}}}}}')
+        repeat_plan(element='{switch: {dispatch: "flag", cases: {1: {int: {bits: 8}}}}}')
     )
     assert item.element_consumes is False
 

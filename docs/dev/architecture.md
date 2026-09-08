@@ -181,12 +181,16 @@ Two consequences that are easy to get wrong, and both have been:
 
 ### The field path is formatted in exactly one place
 
-{func}`kober.emit.field_path`. The path currently rides in `comment=`, which
-`zpf` documents as free text no consumer may depend on, and upstream
-[#58](https://github.com/adamkjonsson/python-zipline/issues/58) may replace it
-with a real per-record label. One function is what makes that a one-line
-change. For the same reason nothing reads a `comment` back: the read side is
-the tree, not the file.
+{func}`kober.emit.field_path`. The path rides in `role=`, the per-record label
+`zpf` 0.3.0 added for upstream
+[#58](https://github.com/adamkjonsson/python-zipline/issues/58): what a record
+**is**, in a vocabulary this decoder documents, independent of the
+`content_type` that says what kind it is.
+
+It rode in `comment=` before that, which the format documents as free text no
+consumer may depend on — so one function was what made the switch a one-line
+change when the label landed. For the same reason nothing reads a `role` back:
+the read side is the tree, not the file.
 
 ### Shape comes from the stream, never the spec
 

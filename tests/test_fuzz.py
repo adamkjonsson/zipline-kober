@@ -20,9 +20,12 @@ from typing import Any
 
 import pytest
 from fuzzing import (
+    FILL_SPEC,
+    FILL_TRAILING,
     SEEDS,
     SELECT_SPEC,
     cases,
+    fill_cases,
     framing_cases,
     pointer_cases,
     select_cases,
@@ -413,6 +416,95 @@ def test_a_select_uses_the_documented_vocabulary(seed: int):
         _, unclaimed = plan(spec, tree, data, emit=Emit.FIELD)
         for region in unclaimed:
             assert region.reason in allowed, f"{region.reason!r} on {data!r}"
+
+
+# --- fill --------------------------------------------------------------------
+#
+# A `fill` is the one size whose extent is decided by fields it has not read —
+# the ones *after* it — so the promise it could break is a boundary, and a
+# boundary is exactly what a well-formed decode cannot demonstrate. Two things
+# have to hold over adversarial input: the fill must never read into the
+# trailer, and the trailer must always be cited.
+
+
+def fill_spec() -> Spec:
+    return Spec.from_yaml(FILL_SPEC)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_filling_never_raises(seed: int):
+    """Including inputs shorter than the trailer, which must be a status."""
+    decoder = Decoder(fill_spec())
+    for data in fill_cases(seed):
+        try:
+            tree = decoder.decode_bytes(data)
+        except Exception as exc:
+            exc.add_note(f"escaped a decode: fill seed={seed} on {data!r}")
+            raise
+        check_tree(tree, data)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_fill_never_reads_into_the_trailer(seed: int):
+    """The construct's whole claim, stated as the arithmetic it rests on.
+
+    A fill that took one byte too many would still leave coverage whole — the
+    byte would simply be cited by the fill instead of by the trailer — so no
+    coverage-shaped invariant can see this. It is asserted against the extent
+    directly: whatever the input, the fill ends at least ``FILL_TRAILING``
+    bytes before the end of what the message decoded.
+    """
+    spec = fill_spec()
+    decoder = Decoder(spec)
+    for data in fill_cases(seed):
+        tree = decoder.decode_bytes(data)
+        for node in tree.walk():
+            if node.name != "data" or not node.width:
+                continue
+            assert node.off_end <= len(data) - FILL_TRAILING, (
+                f"a fill ending at {node.off_end} left less than {FILL_TRAILING} "
+                f"byte(s) for the trailer of {len(data)} on {data!r}"
+            )
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_fill_never_makes_a_byte_both_cited_and_undecoded(seed: int):
+    """The general invariant, over the one size that computes its own end."""
+    spec = fill_spec()
+    decoder = Decoder(spec)
+    for data in fill_cases(seed):
+        tree = decoder.decode_bytes(data)
+        emissions, unclaimed = plan(spec, tree, data, emit=Emit.FIELD)
+        cited: set[int] = set()
+        for record in emissions:
+            cited.update(range(record.off_start, record.off_end))
+        named: set[int] = set()
+        for region in unclaimed:
+            named.update(range(region.off_start, region.off_end))
+        overlap = cited & named
+        assert not overlap, (
+            f"fill: {len(overlap)} byte(s) both cited and undecoded on {data!r}"
+        )
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_whole_fill_decode_cites_the_trailer(seed: int):
+    """Where the message decoded, the fields after the fill must have read.
+
+    The failure this rules out is the quiet one: a fill that swallowed the
+    trailer would leave the trailing fields with nothing, and a decode that
+    still reported ``ok`` would have named the trailer's bytes as body.
+    """
+    decoder = Decoder(fill_spec())
+    whole = 0
+    for data in fill_cases(seed):
+        tree = decoder.decode_bytes(data)
+        if tree.status is not NodeStatus.OK:
+            continue
+        whole += 1
+        names = {node.name for node in tree.walk() if node.width}
+        assert {"footer", "checksum"} <= names, f"trailer not read on {data!r}"
+    assert whole, "no variant decoded whole, so the assertion never ran"
 
 
 # --- http's framing arms ---------------------------------------------------

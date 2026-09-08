@@ -56,7 +56,7 @@ from kober.expr import (
 )
 from kober.ops import Kind, Plan, nonnegative, walk_path
 from kober.runtime import TEXT_CONTENT_TYPE, prim_token
-from kober.spec import Count, Emit, Fixed, FromExpr, Remaining, Terminated, ToEnd, Until
+from kober.spec import Count, Emit, Fill, Fixed, FromExpr, Remaining, Terminated, ToEnd, Until
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -171,10 +171,11 @@ def _free_values(value: ValueType) -> tuple[tuple[str, ...], ...]:
     parent's ``header``, and the rest is reached from it — the same rule
     :func:`kober.ops._outer` applies one layer up.
 
-    The element is excluded, being what the loop binds. Nothing repeated can
-    appear among the rest: the checker refuses every reference to a repeated
-    field except the source's own, so a free value is always a scalar or a
-    decoded object.
+    The element is excluded, being what the loop binds — under the select's
+    ``as:`` name where it has one, and under the source's own where it does
+    not. Nothing repeated can appear among the rest: the checker refuses every
+    reference to a repeated field except the one the construct binds, so a free
+    value is always a scalar or a decoded object.
 
     Order is the order first named, so a regenerated module does not churn.
     """
@@ -190,7 +191,7 @@ def _free_values(value: ValueType) -> tuple[tuple[str, ...], ...]:
                 base = (word, ref.path[1])
             else:
                 base = (ref.path[1] if word else ref.path[0],)
-            if base[-1] == value.source or base in found:
+            if base[-1] in (value.source, value.bound) or base in found:
                 continue
             found.append(base)
     return tuple(found)
@@ -612,7 +613,12 @@ class Binding:
         parent: The unit that referenced it, when ``parent`` may appear. Left
             ``None`` where nothing does, so a stray ``parent`` is refused
             rather than rendered against a guess.
-        element_of: Name of the field an enclosing ``until`` repeats, if any.
+        element_of: Name of the field an enclosing ``until`` or ``select``
+            repeats, if any.
+        element_as: The name that element answers to — a construct's ``as:``.
+            ``None`` means it answers to ``element_of``, which is the
+            shorthand. The path is walked under ``element_of`` either way,
+            since that is the field a plan knows about.
         element: The local holding that element.
         index: Position of the field the expression belongs to, when the caller
             knows it. What lets a ``root`` reference into the entry unit be
@@ -628,6 +634,7 @@ class Binding:
     unit: str
     parent: str | None = None
     element_of: str | None = None
+    element_as: str | None = None
     element: str = ELEMENT_LOCAL
     index: int | None = None
 
@@ -648,6 +655,17 @@ class Binding:
         parts = tuple(path)
         word = parts[0] if parts and parts[0] in SCOPE_WORDS else None
         rest = parts[1:] if word else parts
+        bound = (
+            word in (None, "this")
+            and self.element_of is not None
+            and bool(rest)
+            and rest[0] == (self.element_as or self.element_of)
+        )
+        if bound and self.element_as is not None:
+            # An alias is not a field, so a plan has nothing to walk it under.
+            # The repeated field is what it stands for, and that is what the
+            # path is resolved against; only the local it lands in differs.
+            rest = (self.element_of, *rest[1:])
         start, prefix = self._start(word, parts)
         try:
             steps = walk_path(self.plan, start, rest)
@@ -659,10 +677,7 @@ class Binding:
             local = self.names.param_of(head.unit, head.name)
         else:
             local = self.names.attribute_of(head.unit, head.name)
-        if word in (None, "this") and head.name == self.element_of:
-            local = self.element
-        else:
-            local = prefix + local
+        local = self.element if bound else prefix + local
         return local + "".join(
             f".{self.names.attribute_of(step.unit, step.name)}" for step in tail
         )
@@ -1275,6 +1290,7 @@ class _Function:
         indent: int,
         element_of: str | None = None,
         element: str = ELEMENT_LOCAL,
+        element_as: str | None = None,
     ) -> str:
         """Render an expression, catching the two ways one can fail for this input.
 
@@ -1287,7 +1303,10 @@ class _Function:
         """
         pad = " " * indent
         rendered = render_expr(
-            expr, self.binding(self.index_of, element_of=element_of, element=element)
+            expr,
+            self.binding(
+                self.index_of, element_of=element_of, element=element, element_as=element_as
+            ),
         )
         if not _fallible(rendered):
             return rendered
@@ -1365,6 +1384,7 @@ class _Function:
         index: int,
         element_of: str | None = None,
         element: str = ELEMENT_LOCAL,
+        element_as: str | None = None,
     ) -> Binding:
         """Return the binding for an expression at one field's position."""
         return Binding(
@@ -1373,6 +1393,7 @@ class _Function:
             self.obj.unit,
             parent=self.obj.parents[0] if self.obj.parents else None,
             element_of=element_of,
+            element_as=element_as,
             element=element,
             index=index,
         )
@@ -1436,7 +1457,7 @@ class _Function:
         index: int,
         item: FieldPlan,
         target: str,
-        comment: str,
+        role: str,
         start: str,
         end: str,
         indent: int,
@@ -1451,7 +1472,7 @@ class _Function:
             return
         if item.selector is None:
             self.emit(f"{pad}if _sink is not None:")
-            self.record(index, item.types[0], target, comment, start, end, indent + 4)
+            self.record(index, item.types[0], target, role, start, end, indent + 4)
             return
         # A switch decides which type the payload is, so the record does too. The
         # selector is still in hand, which is cheaper than asking the value.
@@ -1462,7 +1483,7 @@ class _Function:
         if len(writing) == 1 and writing[0].case is not None:
             test = f"_selector == {_literal(writing[0].case)}"
             self.emit(f"{pad}if _sink is not None and {test}:")
-            self.record(index, writing[0].type, target, comment, start, end, indent + 4)
+            self.record(index, writing[0].type, target, role, start, end, indent + 4)
             return
         self.emit(f"{pad}if _sink is not None:")
         keyword = "if"
@@ -1471,7 +1492,7 @@ class _Function:
                 "else" if branch.case is None else f"{keyword} _selector == {_literal(branch.case)}"
             )
             self.emit(f"{pad}    {test}:")
-            self.record(index, branch.type, target, comment, start, end, indent + 8)
+            self.record(index, branch.type, target, role, start, end, indent + 8)
             keyword = "elif"
 
     def record(
@@ -1479,7 +1500,7 @@ class _Function:
         index: int,
         value: ValueType,
         local: str,
-        comment: str,
+        role: str,
         start: str,
         end: str,
         indent: int,
@@ -1498,12 +1519,12 @@ class _Function:
             self.emit(f"{pad}_labelled = prim_int({local})")
             self.emit(f"{pad}if _labelled is not None:")
             self.lines.extend(
-                _call("_sink.record", ["*_labelled", start, end, comment], indent + 4)
+                _call("_sink.record", ["*_labelled", start, end, role], indent + 4)
             )
             return
         payload = payload_of(value, local)
         content = _literal(content_type_of(self.plan, value))
-        arguments = [payload, content, start, end, comment]
+        arguments = [payload, content, start, end, role]
         self.lines.extend(_call("_sink.record", arguments, indent))
 
     def cites(
@@ -1789,7 +1810,13 @@ class _Function:
             )
         if isinstance(item.repeat, Until):
             self.index_of = index
-            self.emit(f"{inner}if {self.evaluate(item.repeat.expr, indent + 4, item.name)}:")
+            condition = self.evaluate(
+                item.repeat.expr,
+                indent + 4,
+                item.name,
+                element_as=item.repeat.alias,
+            )
+            self.emit(f"{inner}if {condition}:")
             self.emit(f"{inner}    break")
         if indexed and not counted:
             self.emit(f"{inner}_index += 1")
@@ -1826,11 +1853,11 @@ class _Function:
         item: FieldPlan,
         target: str | None,
         indent: int,
-        comment: str | None = None,
+        role: str | None = None,
     ) -> None:
         """Emit one value's read, dispatching a ``switch`` if there is one."""
         pad = " " * indent
-        path = comment if comment is not None else self.segment(item, index)
+        path = role if role is not None else self.segment(item, index)
         if item.selector is None:
             self.read(index, item.types[0], target, indent, path)
             return
@@ -1861,7 +1888,7 @@ class _Function:
         self.delta = 0
 
     def read(
-        self, index: int, value: ValueType, target: str | None, indent: int, comment: str
+        self, index: int, value: ValueType, target: str | None, indent: int, role: str
     ) -> None:
         """Emit the statements that read one value into ``target``."""
         pad = " " * indent
@@ -1875,7 +1902,7 @@ class _Function:
                 self.emit(f"{pad}{target} = {self.evaluate(value.expr, indent)}")
             return
         if value.kind is Kind.OBJECT:
-            call = self.call(index, value, comment)
+            call = self.call(index, value, role)
             self.statement(call, f"{target or '_ignored'}, {ANCHOR}", indent)
             self.rebase(ANCHOR, indent)
             return
@@ -1969,11 +1996,13 @@ class _Function:
         self.lines, self.delta = [], 0
         try:
             matched = self.evaluate(
-                value.where, 8, element_of=source, element=SELECT_LOCAL
+                value.where, 8, element_of=source, element=SELECT_LOCAL,
+                element_as=value.bound if value.bound != source else None,
             )
             self.emit(f"        if {matched}:")
             projected = self.evaluate(
-                value.expr, 12, element_of=source, element=SELECT_LOCAL
+                value.expr, 12, element_of=source, element=SELECT_LOCAL,
+                element_as=value.bound if value.bound != source else None,
             )
             self.emit(f"            return {projected}, _spans[_i]")
             body = self.lines
@@ -2104,8 +2133,36 @@ class _Function:
             self.rebase("_size", indent)
         elif isinstance(size, FromExpr):
             self.counted(index, size, prefix, indent)
+        elif isinstance(size, Fill):
+            self.fill(value.trailing or 0, prefix, indent)
         elif isinstance(size, Terminated):
             self.terminated(size, prefix, indent)
+
+    def fill(self, trailing: int, prefix: str, indent: int) -> None:
+        """Emit a read of everything left except a trailer of known width.
+
+        The width is a **compile-time constant** — it was resolved from the
+        spec by :func:`kober.check.trailing_width` — so this is the same code
+        ``remaining`` emits with a subtraction in it, and no arithmetic the
+        generated module has to do at import time.
+
+        A run too short to hold the trailer is a truncation, which is what
+        :meth:`counted` already does for a short count: the message was cut
+        off, and saying so is what keeps the region honest.
+        """
+        pad = " " * indent
+        start = self.byte()
+        if not trailing:
+            # No trailer to leave room for, so it *is* `remaining`, and
+            # emitting the comparison would be a branch that cannot be taken.
+            self.emit(f"{pad}{prefix}_data[{start}:]")
+            self.rebase("_size", indent)
+            return
+        room = f"_size - {start}" if start == ANCHOR else f"_size - ({start})"
+        self.emit(f"{pad}if {room} < {trailing}:")
+        self.emit(f'{pad}    raise TruncatedRead("truncated", {self.stopped()})')
+        self.emit(f"{pad}{prefix}_data[{start}:_size - {trailing}]")
+        self.rebase(f"_size - {trailing}", indent)
 
     def counted(self, index: int, size: FromExpr, prefix: str, indent: int) -> None:
         """Emit a read of as many bytes as an earlier field says."""
@@ -2178,7 +2235,7 @@ class _Function:
         self.emit(f"{pad}    _stop = _found + {past}" if past else f"{pad}    _stop = _found")
         self.rebase("_stop", indent)
 
-    def call(self, index: int, value: ValueType, comment: str) -> str:
+    def call(self, index: int, value: ValueType, role: str) -> str:
         """Return the call that decodes a nested unit."""
         unit = value.unit or ""
         target = self.plan.object(unit)
@@ -2186,7 +2243,7 @@ class _Function:
         self.aligned(f"the call to unit {unit!r}")
         arguments = ["_data", "_size", self.byte(), "_base"]
         if self.threads:
-            arguments.extend(["_sink", comment])
+            arguments.extend(["_sink", role])
         arguments.extend(render_expr(argument, binding) for argument in value.args)
         arguments.extend(self.outer(index, target))
         if self.plan.recursive:

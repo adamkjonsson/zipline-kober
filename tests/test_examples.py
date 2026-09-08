@@ -86,7 +86,7 @@ def test_dns_field_paths_are_readable():
     spec = load("dns.yaml")
     tree = Decoder(spec).decode_bytes(DNS_QUERY)
     emissions, _ = plan(spec, tree, DNS_QUERY, emit=Emit.FIELD)
-    paths = [record.comment for record in emissions]
+    paths = [record.role for record in emissions]
     assert "dns.flags.qr" in paths
     assert "dns.questions[0].qname.labels[0].rest" in paths
     assert not any("questions.questions" in path for path in paths)

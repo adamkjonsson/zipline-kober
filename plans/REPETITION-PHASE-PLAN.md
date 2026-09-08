@@ -233,6 +233,48 @@ has no list type". That is right — a default is what there is to say when
 *nothing* matched, so there is no element for it to mean. Verified in both
 directions.
 
+**Reopened and re-settled in 0.1.0: a third candidate, which this question
+never considered.** It weighed exactly two — `this`, and the field's own name —
+and chose between them. The option it did not weigh is an **explicit binding**:
+
+```yaml
+select:
+  from: headers
+  as: header                                  # optional
+  where: "lower(header.name) == 'content-length'"
+```
+
+The argument for reopening was not that the settlement was wrong. It is that
+the settled rule is the one thing on the concepts page that could only be
+*explained*, never made obvious: `from: headers` means the repetition on one
+line and `headers.name` means one header on the next, and nothing marks the
+change — to a reader who has just learned that a repeated field cannot be
+referenced at all.
+
+**Settled: `as:` is accepted, on `select` and on `until` alike, and stays
+optional.** Three things decided it.
+
+- *The cost is a name, not a mechanism.* `element_of` already takes a name;
+  it takes the chosen one instead. `Binding.element_of` and `Binding.element`
+  were already separate fields and the generated loop variable was already
+  `_pick`. No new expression form, no list type, nothing new about what a
+  select yields.
+- *Both constructs get it, so the divergence this question would otherwise
+  create does not happen.* Adding it to `select` alone would have left `until`
+  with one spelling and `select` with two, which is a worse outcome than either
+  uniform answer. `until` gains it through the ordinary shorthand rule — its
+  principal key is `expr`, so `{until: "…"}` is `{until: {expr: "…"}}` and the
+  long form carries `as`.
+- *It removes an ambiguity rather than adding a synonym.* Writing `as:` makes
+  the repeated field's own name a **list again**, refused like any other. So it
+  is not two ways to say one thing at author's discretion — under an alias
+  there is exactly one name for the element, and it is the one the author
+  chose. That is the answer to this question's own objection, and it is why the
+  objection does not apply.
+
+Omitted, everything behaves exactly as settled above, and every spec written
+before the key existed is unchanged.
+
 ### Q3 — How does a header's value get separated from its line? — **settled: a bounded terminator**
 
 Two genuinely different answers, and this is the one where the obvious choice

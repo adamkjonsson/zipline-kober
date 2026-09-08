@@ -153,19 +153,18 @@ A unit's fields sometimes cannot be read without something the *caller* knows.
 
 ```yaml
       - name: rest
-        type:
-          switch:
-            on: "length >> 6"
-            cases:
-              0: {string: {size: {expr: "length"}}}
-              3: {unit: {name: compressed, args: ["length"]}}
+        switch:
+          dispatch: "length >> 6"
+          cases:
+            0: {string: {size: {expr: "length"}}}
+            3: {unit: {name: compressed, args: ["length"]}}
 
   compressed:
     params: [{name: high, type: int}]
     fields:
-      - {name: low, type: {int: {bits: 8}}}
+      - {name: low, bits: 8}
       - name: target
-        type: {pointer: {at: "((high & 63) << 8) | low", type: {unit: name}}}
+        pointer: {at: "((high & 63) << 8) | low", type: {unit: name}}
 ```
 
 That is real DNS, from `examples/dns.yaml`. A compression pointer is two bytes

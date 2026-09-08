@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from kober.check import Severity, check
+from kober.check import Severity, check, trailing_width
 from kober.expr import ExprType, parse
 from kober.spec import (
     BytesType,
@@ -13,8 +13,10 @@ from kober.spec import (
     EnumDef,
     Field,
     FieldType,
+    Fill,
     Fixed,
     FromExpr,
+    InputShape,
     IntType,
     Param,
     Pointer,
@@ -252,7 +254,9 @@ def test_switch_field_cannot_be_referenced_directly():
                     Field(name="kind", type=IntType(bits=8)),
                     Field(
                         name="payload",
-                        type=Switch(on=parse("kind"), cases={1: IntType(bits=8)}, default=None),
+                        type=Switch(
+                            dispatch=parse("kind"), cases={1: IntType(bits=8)}, default=None
+                        ),
                     ),
                     Field(name="body", type=BytesType(size=FromExpr(parse("payload")))),
                 ],
@@ -520,7 +524,7 @@ def test_switch_case_keys_must_match_the_dispatch_type():
             Field(
                 name="payload",
                 type=Switch(
-                    on=parse("kind"),
+                    dispatch=parse("kind"),
                     cases={"text": IntType(bits=8)},
                     default=IntType(bits=8),
                 ),
@@ -537,7 +541,7 @@ def test_switch_without_a_default_warns():
             Field(name="kind", type=IntType(bits=8)),
             Field(
                 name="payload",
-                type=Switch(on=parse("kind"), cases={1: IntType(bits=8)}, default=None),
+                type=Switch(dispatch=parse("kind"), cases={1: IntType(bits=8)}, default=None),
             ),
         ],
     )
@@ -551,7 +555,9 @@ def test_switch_dispatching_on_bytes_is_refused():
             Field(name="raw", type=BytesType(size=Fixed(2))),
             Field(
                 name="payload",
-                type=Switch(on=parse("raw"), cases={1: IntType(bits=8)}, default=IntType(bits=8)),
+                type=Switch(
+                    dispatch=parse("raw"), cases={1: IntType(bits=8)}, default=IntType(bits=8)
+                ),
             ),
         ],
     )
@@ -566,7 +572,7 @@ def test_types_nested_in_switch_cases_are_checked():
             Field(
                 name="payload",
                 type=Switch(
-                    on=parse("kind"),
+                    dispatch=parse("kind"),
                     cases={1: UnitRef(unit="nope")},
                     default=IntType(bits=8),
                 ),
@@ -1051,3 +1057,352 @@ def test_a_bounded_optional_terminator_does_not_warn():
         ]
     )
     assert warnings(spec) == []
+
+
+# --- fill: the size decided by the fields after it -------------------------
+#
+# Every rule here refuses rather than approximates. A fill whose trailer cannot
+# be measured is a boundary the decoder would have to guess at, and §2 exists
+# to stop exactly that — so the checker's job is to say which trailing field
+# made the sum unknowable, by name.
+
+
+def filled(*trailing: Field, **kwargs: object) -> Spec:
+    """Build a unit with a fill in the middle and ``trailing`` after it."""
+    return build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="count", type=IntType(bits=8)),
+                    Field(name="data", type=BytesType(size=Fill())),
+                    *trailing,
+                ],
+            )
+        ],
+        **kwargs,
+    )
+
+
+def test_a_fill_with_a_measurable_trailer_is_valid():
+    spec = filled(Field(name="kind", type=IntType(bits=32)))
+    assert check(spec) == ()
+    assert trailing_width(spec, "message", 1) == 4
+
+
+def test_a_fill_with_nothing_after_it_is_valid():
+    """It is `remaining` written the long way, and refusing it would be noise."""
+    spec = filled()
+    assert check(spec) == ()
+    assert trailing_width(spec, "message", 1) == 0
+
+
+def test_a_trailer_summed_across_a_nested_unit():
+    """The case a wrong sum would get plausibly wrong rather than obviously."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="data", type=BytesType(size=Fill())),
+                    Field(name="foot", type=UnitRef(unit="foot")),
+                    Field(name="crc", type=IntType(bits=16)),
+                ],
+            ),
+            Unit(
+                name="foot",
+                fields=[
+                    Field(name="kind", type=IntType(bits=8)),
+                    Field(name="length", type=IntType(bits=32)),
+                ],
+            ),
+        ]
+    )
+    assert check(spec) == ()
+    assert trailing_width(spec, "message", 0) == 7
+
+
+def test_a_computed_after_a_fill_claims_nothing():
+    """It reads no input where it stands, so it is not part of the trailer."""
+    spec = filled(
+        Field(name="doubled", type=Computed(expr=parse("count * 2"))),
+        Field(name="kind", type=IntType(bits=32)),
+    )
+    assert check(spec) == ()
+    assert trailing_width(spec, "message", 1) == 4
+
+
+def test_a_conditional_field_after_a_fill_is_refused():
+    spec = filled(
+        Field(name="kind", type=IntType(bits=32), condition=parse("count > 0"))
+    )
+    assert "conditional" in only_error(spec)
+
+
+def test_a_dynamically_sized_field_after_a_fill_is_refused():
+    spec = filled(Field(name="tail", type=BytesType(size=FromExpr(parse("count")))))
+    assert "size is not fixed" in only_error(spec)
+
+
+def test_a_remaining_field_after_a_fill_is_refused():
+    spec = filled(Field(name="tail", type=BytesType(size=Remaining())))
+    assert "size is not fixed" in only_error(spec)
+
+
+def test_a_data_dependent_repeat_after_a_fill_is_refused():
+    spec = filled(
+        Field(name="tail", type=IntType(bits=8), repeat=Count(expr=parse("count")))
+    )
+    assert "does not fix" in only_error(spec)
+
+
+def test_a_literal_repeat_after_a_fill_is_counted():
+    """The spec fixes the number, so the trailer has a width after all."""
+    spec = filled(
+        Field(name="tail", type=IntType(bits=8), repeat=Count(expr=parse("3")))
+    )
+    assert check(spec) == ()
+    assert trailing_width(spec, "message", 1) == 3
+
+
+def test_a_trailer_that_is_not_a_whole_number_of_bytes_is_refused():
+    spec = filled(Field(name="nibble", type=IntType(bits=4)))
+    assert "not a whole number of bytes" in only_error(spec)
+
+
+def test_a_switch_after_a_fill_needs_agreeing_widths():
+    spec = filled(
+        Field(
+            name="tail",
+            type=Switch(
+                dispatch=parse("count"),
+                cases={1: IntType(bits=8), 2: IntType(bits=32)},
+                default=IntType(bits=8),
+            ),
+        )
+    )
+    assert "differing widths" in only_error(spec)
+
+
+def test_a_switch_after_a_fill_with_one_width_is_counted():
+    spec = filled(
+        Field(
+            name="tail",
+            type=Switch(
+                dispatch=parse("count"),
+                cases={1: IntType(bits=16), 2: BytesType(size=Fixed(2))},
+                default=IntType(bits=16),
+            ),
+        )
+    )
+    assert errors(spec) == []
+    assert trailing_width(spec, "message", 1) == 2
+
+
+def test_a_switch_after_a_fill_without_a_default_is_refused():
+    spec = filled(
+        Field(
+            name="tail",
+            type=Switch(dispatch=parse("count"), cases={1: IntType(bits=16)}),
+        )
+    )
+    assert any("no default" in message for message in errors(spec))
+
+
+def test_a_recursive_unit_after_a_fill_is_refused():
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="data", type=BytesType(size=Fill())),
+                    Field(name="tail", type=UnitRef(unit="chain")),
+                ],
+            ),
+            Unit(
+                name="chain",
+                fields=[
+                    Field(name="n", type=IntType(bits=8)),
+                    Field(name="next", type=UnitRef(unit="chain")),
+                ],
+            ),
+        ]
+    )
+    assert any("recursive" in message for message in errors(spec))
+
+
+def test_two_fills_in_one_unit_are_refused():
+    """Each would be sized against the other's unknown extent."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="a", type=BytesType(size=Fill())),
+                    Field(name="b", type=BytesType(size=Fill())),
+                ],
+            )
+        ]
+    )
+    assert "more than one fill" in only_error(spec)
+
+
+def test_a_repeated_fill_is_refused():
+    """The first element would take everything, leaving the rest nothing."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(
+                        name="a",
+                        type=BytesType(size=Fill()),
+                        repeat=Count(expr=parse("2")),
+                    )
+                ],
+            )
+        ]
+    )
+    assert "cannot repeat" in only_error(spec)
+
+
+def test_a_fill_under_input_stream_warns():
+    """A run holds many messages, so a fill there swallows the ones after it."""
+    spec = filled(
+        Field(name="kind", type=IntType(bits=32)), input=InputShape.STREAM
+    )
+    assert any("rest of the run" in message for message in warnings(spec))
+
+
+def test_a_fill_under_input_datagram_does_not_warn():
+    """One datagram is one message, so a run and a message coincide."""
+    spec = filled(
+        Field(name="kind", type=IntType(bits=32)), input=InputShape.DATAGRAM
+    )
+    assert warnings(spec) == []
+
+
+# --- naming the element a construct binds ----------------------------------
+#
+# The rule the binding exists to make obvious: exactly one name means one
+# element. Without an alias it is the repeated field's own name, which is the
+# shorthand; with one it is the alias, and the repeated field goes back to
+# being a list nothing may hold.
+
+
+def bound_spec(select_as: str | None, until_as: str | None, predicate: str) -> Spec:
+    """Build a repetition and a select over it, each optionally aliased."""
+    return build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(
+                        name="items",
+                        type=UnitRef(unit="item"),
+                        repeat=Until(expr=parse("items.x == 0"), alias=until_as),
+                    ),
+                    Field(
+                        name="found",
+                        type=Select(
+                            source="items",
+                            where=parse(predicate),
+                            value=parse(f"{predicate.split('.')[0]}.x"),
+                            default=parse("0"),
+                            alias=select_as,
+                        ),
+                    ),
+                ],
+            ),
+            Unit(name="item", fields=[Field(name="x", type=IntType(bits=8))]),
+        ]
+    )
+
+
+def test_a_select_alias_resolves_to_the_element():
+    assert check(bound_spec("pick", None, "pick.x == 1")) == ()
+
+
+def test_the_source_name_still_binds_without_an_alias():
+    """Every spec written before `as:` existed must go on checking clean."""
+    assert check(bound_spec(None, None, "items.x == 1")) == ()
+
+
+def test_an_aliased_select_refuses_the_source_name():
+    """The whole value of writing `as:`: one name means an element, not two."""
+    spec = bound_spec("pick", None, "items.x == 1")
+    assert any("is repeated" in message for message in errors(spec))
+
+
+def test_an_unknown_alias_is_not_silently_in_scope():
+    """An alias binds one name, not any name — a typo must still be a typo."""
+    spec = bound_spec("pick", None, "picked.x == 1")
+    assert any("unknown name" in message for message in errors(spec))
+
+
+def test_an_until_alias_resolves_to_the_element():
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(
+                        name="items",
+                        type=UnitRef(unit="item"),
+                        repeat=Until(expr=parse("e.x == 0"), alias="e"),
+                    )
+                ],
+            ),
+            Unit(name="item", fields=[Field(name="x", type=IntType(bits=8))]),
+        ]
+    )
+    assert check(spec) == ()
+
+
+def test_an_aliased_until_refuses_the_field_name():
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(
+                        name="items",
+                        type=UnitRef(unit="item"),
+                        repeat=Until(expr=parse("items.x == 0"), alias="e"),
+                    )
+                ],
+            ),
+            Unit(name="item", fields=[Field(name="x", type=IntType(bits=8))]),
+        ]
+    )
+    assert any("is repeated" in message for message in errors(spec))
+
+
+def test_a_selects_default_sees_no_element_under_either_name():
+    """Nothing matched, so there is no element for the fallback to mean."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(
+                        name="items",
+                        type=UnitRef(unit="item"),
+                        repeat=Until(expr=parse("items.x == 0")),
+                    ),
+                    Field(
+                        name="found",
+                        type=Select(
+                            source="items",
+                            where=parse("pick.x == 1"),
+                            value=parse("pick.x"),
+                            default=parse("pick.x"),
+                            alias="pick",
+                        ),
+                    ),
+                ],
+            ),
+            Unit(name="item", fields=[Field(name="x", type=IntType(bits=8))]),
+        ]
+    )
+    assert any("unknown name" in message for message in errors(spec))

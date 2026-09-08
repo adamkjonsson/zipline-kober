@@ -24,11 +24,11 @@ units:
       reads no body at all.
     fields:
       - name: start_line
-        type: {string: {size: {terminated: {delimiter: "\r\n"}}}}
+        string: {delimiter: "\r\n"}
         doc: Request line or status line, whichever direction this is.
 
       - name: headers
-        type: {unit: header}
+        unit: header
         repeat: {until: "headers.name == '' and headers.value == ''"}
         doc: >
           Header lines up to and including the blank line that ends them. The
@@ -40,12 +40,11 @@ units:
           name alone would not tell them apart.
 
       - name: content_length
-        type:
-          select:
-            from: headers
-            where: "lower(headers.name) == 'content-length'"
-            value: "to_int(headers.value)"
-            default: "-1"
+        select:
+          from: headers
+          where: "lower(headers.name) == 'content-length'"
+          value: "to_int(headers.value)"
+          default: "-1"
         doc: >
           The declared body length, or -1 when no header declared one.
 
@@ -61,12 +60,11 @@ units:
           surrounding whitespace an HTTP field value is permitted.
 
       - name: chunked
-        type:
-          select:
-            from: headers
-            where: "lower(headers.name) == 'transfer-encoding'"
-            value: "trim(lower(headers.value)) == 'chunked'"
-            default: "false"
+        select:
+          from: headers
+          where: "lower(headers.name) == 'transfer-encoding'"
+          value: "trim(lower(headers.value)) == 'chunked'"
+          default: "false"
         doc: >
           Whether the body is chunk-framed.
 
@@ -89,7 +87,7 @@ units:
           unframed rather than as mis-framed, which is the safe direction.
 
       - name: chunks
-        type: {unit: chunk}
+        unit: chunk
         condition: "chunked"
         repeat: {until: "chunks.length == 0"}
         doc: >
@@ -102,7 +100,7 @@ units:
           Reading the length instead would be the request-smuggling reading.
 
       - name: trailers
-        type: {unit: trailer_section}
+        unit: trailer_section
         condition: "chunked"
         doc: >
           The trailer section that closes a chunked body, and the CRLF that
@@ -122,7 +120,7 @@ units:
           warns about, found by the traffic `packeteer` 0.9.0 can now generate.
 
       - name: body
-        type: {bytes: {size: {expr: "content_length"}}}
+        bytes: {size: {expr: "content_length"}}
         condition: "not chunked and content_length > 0"
         doc: >
           A length-framed body, exactly as long as the header said.
@@ -147,15 +145,13 @@ units:
       nothing, takes nothing, and both halves come back empty.
     fields:
       - name: name
-        type:
-          string:
-            size: {terminated: {delimiter: ":", within: "\r\n", required: false}}
+        string: {delimiter: ":", within: "\r\n", required: false}
         doc: >
           Up to the colon, but never past the end of the line. Without the
           bound this would run into the *next* header, or past the end of the
           headers entirely, on any line that has no colon in it.
       - name: value
-        type: {string: {size: {terminated: {delimiter: "\r\n"}}}}
+        string: {delimiter: "\r\n"}
         doc: >
           The rest of the line, **leading whitespace included** — RFC 7230
           §3.2.3 permits it and this is where it survives. `to_int` strips it
@@ -174,7 +170,7 @@ units:
       be inventing a difference the grammar does not have.
     fields:
       - name: fields
-        type: {unit: header}
+        unit: header
         repeat: {until: "fields.name == '' and fields.value == ''"}
         doc: >
           Up to and including the blank line, exactly as the header block
@@ -188,16 +184,16 @@ units:
       them. The last chunk of a body has size zero and no data.
     fields:
       - name: size
-        type: {string: {size: {terminated: {delimiter: "\r\n"}}}}
+        string: {delimiter: "\r\n"}
         doc: The size in hexadecimal, as text — this is what `to_int` is for.
       - name: length
-        type: {computed: "to_int(size, 16)"}
+        computed: "to_int(size, 16)"
         doc: The same number, converted once and named.
       - name: data
-        type: {bytes: {size: {expr: "length"}}}
+        bytes: {size: {expr: "length"}}
         doc: Opaque, for the reason the length-framed body gives.
       - name: null
-        type: {bytes: {size: 2}}
+        bytes: 2
         condition: "length > 0"
         doc: >
           The CRLF after the data — and only after data.

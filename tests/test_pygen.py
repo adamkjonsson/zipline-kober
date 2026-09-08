@@ -392,7 +392,7 @@ def test_a_switch_becomes_a_union():
                   - name: body
                     type:
                       switch:
-                        on: kind
+                        dispatch: kind
                         cases:
                           1: {int: {bits: 16}}
                           2: {bytes: {size: {fixed: 4}}}

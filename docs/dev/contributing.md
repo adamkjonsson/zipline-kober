@@ -12,10 +12,11 @@ python3 -m venv .venv
 .venv/bin/pip install -e . -r requirements.txt
 ```
 
-**Why `zpf` comes from a checkout.** This project requires `zpf>=0.2.0,<0.3` —
-it is built on `zpf.decode_stage` and on `comment=`, both `0.2.0` work — and at
-the time of writing PyPI publishes only `0.1.0`. Once `0.2.0` reaches PyPI the
-checkout becomes a convenience rather than a requirement.
+**Why `zpf` comes from a checkout.** This project requires `zpf>=0.3.0,<0.4` —
+it is built on `zpf.decode_stage`, on the per-record `role=` label, and on a
+record timestamp derived from `cites`, all `0.3.0` work — and at the time of
+writing PyPI does not publish it. Once it lands there the checkout becomes a
+convenience rather than a requirement.
 
 The pin covers a single `zpf` minor deliberately: that library is in `0.x`,
 where every minor is a break with no upgrade path promised, so a range spanning
@@ -71,13 +72,13 @@ is what the two misses had in common.
 | Module | What has to learn about it |
 | --- | --- |
 | `spec.py` | The frozen dataclass, and **the `FieldType` union** — easy to add the first and forget the second. |
-| `loader.py` | `_TYPE_KINDS`, a builder, and the branch in `_field_type` that dispatches to it. |
+| `loader.py` | `_TYPE_KINDS` (and `_TYPE_KEYS`, which is what a field's *lifted* kind key is checked against), a builder, and the branch in `_field_type` that dispatches to it. A size kind wants `_SIZE_KINDS` and a branch in `_size`; a repeat kind wants `_REPEAT_KINDS` and one in `_repeat`. |
 | `check.py` | A branch in `_Checker._check_type` to validate it, and one in `_Scope._type_of` so a *later field can reference it*. The second is the one that gets missed: without it the construct works and nothing may name its value. |
 | `decoder.py` | A branch in `Decoder._value`. The chain ends by naming what it does not implement, so a missing branch is an `undecodable` region rather than a traceback — do not restore a silent fall-through. |
 | `emit.py` | Only if the value is **not read from the bytes it cites**: what it cites (`_leaf`) and, for an integer with no declared width, `UNDECLARED_WIDTH`. |
 | `ops.py` | A branch in `_value`, and then **four walks**, each of which has bitten someone: `_kind_exprs` (its expressions — miss it and `parent`/`root` threading silently breaks), `_referenced` (units it can reach), `_kind_consumes` (whether it advances the position), `_types` (flattening a switch). |
 | `pygen.py` | Rendering in `_Function.read`, citation in `_Function.record`, and the annotation helpers. Or an explicit refusal — a `CompileError` naming the shape is a fine answer and better than generating something subtly different. |
-| `cli.py` | A branch in `_render_type`. **This is the one that has been missed twice.** |
+| `cli.py` | A branch in `_render_type` — or `_render_size` / `_render_repeat` for those. **This is the one that has been missed twice.** |
 
 And outside the source:
 
@@ -90,6 +91,10 @@ And outside the source:
 - **`tests/fuzzing.py`** if no shipped example exercises it. A seed that never
   enters the new branch proves nothing, and
   [Testing](testing.md) has the two rules that cost this project a bug each.
+- **`AWKWARD` in `tests/test_compiled.py`**, which is the cheapest way in: one
+  entry there puts the construct through the whole differential battery — the
+  two implementations agreeing, a generated decode never raising, and every
+  byte accounted for exactly once — for the price of a spec and a seed.
 
 ### How you find out you missed one
 

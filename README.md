@@ -46,7 +46,7 @@ decoder ends up guessing.
 | | |
 | --- | --- |
 | `int` | Any width from 1 to 64 bits, signed or not, either endianness, optionally labelled by an enum. Sub-byte fields cite the bytes containing them, so a flags word and the bits inside it are both expressible. |
-| `bytes`, `string` | Sized by a constant, an expression, a delimiter, or the rest of the run. |
+| `bytes`, `string` | Sized by a constant, an expression, a delimiter, the rest of the run, or the rest **less what the fields after it claim**. |
 | `unit` | An instance of another unit, optionally with arguments. |
 | `switch` | Choose a type from an earlier value. No default means the region is marked `undecodable` rather than guessed at. |
 | `computed` | A value derived from earlier fields. Reads nothing; cites the fields its expression read. |
@@ -200,11 +200,12 @@ python3 -m venv .venv
 ```
 
 **Why `zpf` is installed from a checkout.** This project depends on
-`zpf>=0.2.0,<0.3` — it is built on `zpf.decode_stage`, and on `comment=`,
-which are `0.2.0` work. `zpf` `0.2.0` is released and tagged, but at the time
-of writing PyPI still publishes only `0.1.0`, so the dependency has to come
-from a local (or git) install. Once `0.2.0` reaches PyPI the checkout becomes a
-convenience rather than a requirement, and the first line below can be dropped.
+`zpf>=0.3.0,<0.4` — it is built on `zpf.decode_stage`, on the per-record
+`role=` label, and on a record timestamp derived from `cites`, which are
+`0.3.0` work. `zpf` `0.3.0` is released and tagged, but at the time of writing
+PyPI does not yet publish it, so the dependency has to come from a local (or
+git) install. Once it reaches PyPI the checkout becomes a convenience rather
+than a requirement, and the first line above can be dropped.
 
 The pin covers a single `zpf` minor deliberately: that library is in `0.x`,
 where every minor is a break with no upgrade path promised.

@@ -238,7 +238,7 @@ class Sink(Protocol):
         content_type: str,
         off_start: int,
         off_end: int,
-        comment: str | None,
+        role: str | None,
     ) -> None:
         """Write one record citing ``[off_start, off_end)``.
 
@@ -247,7 +247,8 @@ class Sink(Protocol):
             content_type: The label.
             off_start: First input byte this is evidence about.
             off_end: One past the last.
-            comment: The field path, or ``None``.
+            role: The field path, or ``None`` — what this record *is*, where
+                ``content_type`` says what kind it is.
 
         """
 

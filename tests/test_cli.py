@@ -221,7 +221,7 @@ def transport(tmp_path: Path, payload: bytes) -> str:
         writer.add_source("capture", uri="x.pcap")
         with writer.begin_session(proto="tcp", key="a <-> b") as session:
             client = session.participant("10.0.0.1:51000", isn=1000)
-            session.record(client, ts=1000, payload=payload, seq_start=1001)
+            session.record(client, ts=1000, payload=payload, hints=zpf.Hints(seq_start=1001))
             session.end(reason="fin")
     return str(path)
 
@@ -502,7 +502,7 @@ def test_show_renders_every_field_type_a_shipped_example_uses(
         ),
         ('{computed: "a"}', "computed a"),
         ('{pointer: {at: "a", type: {int: {bits: 8}}}}', "pointer at a: u8"),
-        ('{switch: {on: "a", cases: {1: {int: {bits: 8}}}}}', "switch on a"),
+        ('{switch: {dispatch: "a", cases: {1: {int: {bits: 8}}}}}', "switch on a"),
     ],
 )
 def test_show_renders_each_field_type(

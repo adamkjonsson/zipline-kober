@@ -169,7 +169,34 @@ class Remaining:
     """Everything left in the enclosing unit or segment."""
 
 
-SizeSpec = Fixed | FromExpr | Terminated | Remaining
+@dataclass(frozen=True)
+class Fill:
+    """Everything left, **less what the fields after it still claim**.
+
+    The ordinary shape of a body between a header and a fixed footer, which
+    nothing else in ``SizeSpec`` can say. :class:`Remaining` is the closest
+    and is wrong: it takes the trailer's bytes too, leaving the trailing field
+    to fail on an empty cursor.
+
+    ``fill`` rather than ``dynamic``, because ``expr`` and ``terminated`` are
+    dynamic as well; this field *fills* the space the trailing fields do not
+    claim.
+
+    **The trailing width must be computable from the spec alone**, or the spec
+    is rejected at check time by :func:`kober.check.trailing_width`. Anything
+    else would be the decoder guessing at a boundary, which is what §2 exists
+    to prevent — so a trailing ``condition``, a data-dependent repeat, or a
+    trailing size that is itself dynamic all refuse rather than approximate.
+
+    **A run is not a packet**, and this is the one hazard the construct
+    inherits. In ``DATAGRAM`` shape the two coincide and a fill is exact; in
+    ``STREAM`` shape a run holds as many messages as fit, so a fill would
+    swallow every following message in the segment and name it one field. The
+    checker warns about that pairing, as it does for a non-required terminator.
+    """
+
+
+SizeSpec = Fixed | FromExpr | Terminated | Remaining | Fill
 
 
 @dataclass(frozen=True)
@@ -191,10 +218,20 @@ class Until:
     Attributes:
         expr: A boolean expression. ``this`` refers to the element just
             decoded.
+        alias: The name the element binds under, spelled ``as:`` in a
+            document. ``None`` binds it under the repeated field's own name,
+            which is the shorthand and reads fine where the name is plural
+            enough to survive it.
 
     """
 
     expr: Expr
+    alias: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.alias is not None and not self.alias.strip():
+            msg = "repeat 'as' must name the element; omit it to use the field's name"
+            raise SpecError(msg)
 
 
 @dataclass(frozen=True)
@@ -289,15 +326,22 @@ class UnitRef:
 class Switch:
     """Choose a type from an earlier value.
 
+    Spelled ``dispatch:`` in a document, and named that here so the two agree.
+    It was ``on:`` until 0.1.0, which YAML 1.1 reads as the boolean ``True`` —
+    so this schema's second-most-common construct had a key its own authoring
+    format mangled, and the loader carried a repair for it. The repair worked;
+    needing one was the smell, and renaming before the first release cost
+    nothing that a rename afterwards would have.
+
     Attributes:
-        on: The expression dispatched on.
+        dispatch: The expression dispatched on.
         cases: Value to type. Keys are integers or strings.
         default: Type used when no case matches. ``None`` means the region is
             marked ``undecodable`` rather than guessed at, per §2.
 
     """
 
-    on: Expr
+    dispatch: Expr
     cases: Mapping[int | str, FieldType]
     default: FieldType | None = None
 
@@ -393,14 +437,28 @@ class Select:
     it runs — so it stays on the unconstrained side of §2.1's table, exactly as
     :class:`Computed` does.
 
+    **The element may be named.** Without :attr:`alias` the source's own name
+    binds it, so ``from: headers`` means *the repetition* on one line and
+    ``headers.name`` means *one header* on the next, with nothing marking the
+    change. That was deliberate — ``until`` already binds an element under the
+    repeated field's name, and two spellings for one idea is how a small
+    language stops being small — but it is a rule that can only be explained,
+    never made obvious. An explicit ``as: header`` removes the ambiguity
+    instead of explaining it, and :class:`Until` takes the same key for the same
+    reason, so the two constructs do not diverge.
+
     Attributes:
         source: Name of the repeated field to ask about, spelled ``from:`` in a
             document. It must be declared earlier in the same unit and must be
             repeated.
+        alias: The name one element binds under inside :attr:`where` and
+            :attr:`value`, spelled ``as:`` in a document. ``None`` binds it
+            under :attr:`source`.
         where: A boolean predicate over one element. The **first** element it
             holds for is the one selected.
         value: The projection of that element, and the field's value.
-        default: The value when no element matched. Required.
+        default: The value when no element matched. Required. It sees no
+            element under either name — nothing matched, so there is none.
 
     """
 
@@ -408,10 +466,14 @@ class Select:
     where: Expr
     value: Expr
     default: Expr
+    alias: str | None = None
 
     def __post_init__(self) -> None:
         if not self.source.strip():
             msg = "select 'from' must name a repeated field"
+            raise SpecError(msg)
+        if self.alias is not None and not self.alias.strip():
+            msg = "select 'as' must name the element; omit it to use the source's name"
             raise SpecError(msg)
 
 
@@ -669,6 +731,27 @@ class Spec:
         from kober.loader import from_file
 
         return from_file(path)
+
+    def as_decoder(self) -> tuple[str, str]:
+        """Return what identifies this spec's decoder to `zpf`.
+
+        The pair every `zpf` writing call wants: ``decoder=spec.as_decoder()``
+        on :func:`zpf.decode_stage`, and the same pair behind a ``dec:`` content
+        type and a ``role``. ``DESIGN.md`` §6 presents it as the seam for mixing
+        spec-driven decoding with hand-written logic in one stage — a caller
+        opening its own stage needs this and should not have to know that a
+        decoder is named by two of a spec's attributes rather than by some
+        third thing.
+
+        Returns:
+            The decoder's name and version.
+
+        Example:
+            >>> spec.as_decoder()
+            ('dns', '1.0')
+
+        """
+        return self.name, self.version
 
     def unit(self, name: str) -> Unit:
         """Return a unit by name.

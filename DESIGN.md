@@ -423,7 +423,7 @@ class UnitRef:
 
 @dataclass(frozen=True)
 class Switch:
-    on: Expr
+    dispatch: Expr
     cases: Mapping[int | str, FieldType]
     default: FieldType | None = None    # None = undecodable, per §2
 
@@ -919,8 +919,15 @@ mechanism at arm's length so that #58 stays a one-site change.
 Worth noting for our own planning: #58 and
 [#59](https://github.com/adamkjonsson/python-zipline/issues/59) (restructuring
 the `record()` signatures rather than suppressing `PLR0913`) are both `zpf` 0.3
-work, and every `zpf` minor is a break. Our pin is `zpf>=0.2.0,<0.3`, so
-that break is ours to take deliberately, as a minor bump here.
+work, and every `zpf` minor is a break.
+
+**Both landed, and the break was taken before 0.1.0 rather than after it.** #58
+became `role` (`0x0092`), a per-record label read in the namespace of the
+decoder that wrote it — independent of `content_type`, so a field record carries
+`prim:u32` *and* `dns.header.id` at once rather than choosing. #59 reshaped
+`SessionWriter.record()`, which this project does not call. The pin is
+`zpf>=0.3.0,<0.4`, and §4.1's single emit site made the switch the one-line
+change it was kept that way to be.
 
 ### 9.2 Smaller findings
 
@@ -969,12 +976,15 @@ Q5 a per-field record can carry its name — via `comment=`, with §4.1's caveat
    leaking into every expression that needs bytes.
 3. **`.ksy` importer** — deferred, cheap to add later given the layering, but
    its parsers throw where ours must degrade, so semantics won't map cleanly.
-4. **When do we take the `zpf` 0.3 break?** #58 would replace `comment=` with a
-   real per-record name and #59 reshapes `record()`, both on 0.3, and every
-   `zpf` minor is a break with no upgrade path. Following early means churn on
-   an API we have barely built; following late means shipping files whose field
-   names no consumer may rely on. My inclination is to ship 0.1 on `comment=`,
-   keep §4.1's single emit site, and treat 0.3 as the trigger for our own 0.2.
+4. ~~**When do we take the `zpf` 0.3 break?**~~ **Answered: before 0.1.0, not
+   after.** The inclination recorded here was to ship 0.1 on `comment=` and
+   treat 0.3 as the trigger for our own 0.2. That was wrong in one respect and
+   the reasoning shows why: shipping on `comment=` means shipping files whose
+   field names no consumer may rely on, and a *first* release is the cheapest
+   possible moment to avoid that — there are no files in the world to migrate.
+   0.1.0 ships on `zpf` 0.3.0, with the path in `role=`. #62 came with it, so
+   a record's timestamp is now derived from its own `cites` rather than written
+   as the run's; see §5.
 5. **How far does the spec go before it becomes a program?** §2.1 says value
    computation cannot break coverage, which removes the *safety* argument for
    keeping expressions minimal but settles nothing about taste. Three distinct
@@ -1236,9 +1246,12 @@ a scale no fixture reached. **[verified]**
 
 - **[#62](https://github.com/adamkjonsson/python-zipline/issues/62)** — which
   timestamp a message inside a multi-message run should carry. `zpf`'s own
-  documentation states the rule two ways ("the last input record *its payload*
+  documentation stated the rule two ways ("the last input record *its payload*
   came from" and "the run's `Segment.ts`") and they diverge exactly when a run
-  holds more than one message, which is kober's normal case.
+  holds more than one message, which is kober's normal case. **Fixed in `zpf`
+  0.3.0**, and the fix is an API rather than a note: `DecodeStage.record()`
+  derives `ts` from `cites` when it is omitted, which is the normative answer
+  and now the default one. `kober.stage` passes no `ts` at all.
 - **[#63](https://github.com/adamkjonsson/python-zipline/issues/63)** —
   `check_coverage` measures a real TCP stream as 2³²−1 bytes. A zero-length SYN
   record sits one below the `isn + 1` origin, so its offset underflows, and

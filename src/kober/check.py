@@ -53,13 +53,16 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from kober.errors import ExprError, SpecError
-from kober.expr import ExprType, infer_type, unparse
+from kober.expr import ExprType, IntLiteral, infer_type, unparse
 from kober.spec import (
     BytesType,
     Computed,
     Count,
     Field,
+    Fill,
+    Fixed,
     FromExpr,
+    InputShape,
     IntType,
     Pointer,
     Select,
@@ -75,7 +78,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from kober.expr import Expr, Scope
-    from kober.spec import FieldType, SizeSpec, Spec
+    from kober.spec import FieldType, Repeat, SizeSpec, Spec
 
 
 class Severity(Enum):
@@ -149,7 +152,14 @@ def require_valid(spec: Spec) -> None:
         raise SpecError(msg)
 
 
-def scope_at(spec: Spec, unit: str, index: int, *, element_of: str | None = None) -> Scope:
+def scope_at(
+    spec: Spec,
+    unit: str,
+    index: int,
+    *,
+    element_of: str | None = None,
+    element_as: str | None = None,
+) -> Scope:
     """Return the scope an expression at one field's position resolves against.
 
     The compiler needs exactly what the checker computes — which names are
@@ -163,10 +173,15 @@ def scope_at(spec: Spec, unit: str, index: int, *, element_of: str | None = None
         index: Position of the field the expression belongs to. A field sees
             its unit's parameters and every *named* field declared before it,
             so ``index`` is what makes the answer precise.
-        element_of: Name of the field an enclosing ``until`` repeats. That
-            field alone resolves to its element type rather than being refused
-            as a list, because ``until`` runs once per element with that
-            element in hand.
+        element_of: Name of the field an enclosing ``until`` or ``select``
+            repeats. One element of it is in scope rather than the list,
+            because both constructs run once per element with that element in
+            hand.
+        element_as: The name that element is in scope *under* — a construct's
+            ``as:``. ``None`` binds it under ``element_of``, which is the
+            shorthand. When it is given, the repeated field's own name goes
+            back to being refused as a list, so exactly one name means one
+            element and it is the one the author chose.
 
     Returns:
         A :class:`kober.expr.Scope` to hand to :func:`kober.expr.infer_type`.
@@ -181,7 +196,185 @@ def scope_at(spec: Spec, unit: str, index: int, *, element_of: str | None = None
 
     """
     target = spec.unit(unit)
-    return _Scope(_Checker(spec), target, _visible_names(target, index), element_of)
+    return _Scope(
+        _Checker(spec), target, _visible_names(target, index), element_of, element_as
+    )
+
+
+def trailing_width(spec: Spec, unit: str, index: int) -> int:
+    """Return how many bytes the fields after ``index`` in ``unit`` still claim.
+
+    What a ``fill`` size resolves to: at decode time the field reads
+    ``remaining - trailing``, so this number has to be knowable from the spec
+    alone. **One implementation**, for the same reason :func:`scope_at` is one:
+    the checker, the interpreter and the compiler must agree about a boundary,
+    and a second answer would be a second place for a spec to mean two things.
+
+    Total by refusal rather than by approximation. A field whose width cannot
+    be measured raises instead of contributing a guess, because a guessed
+    boundary is exactly what §2 exists to prevent — the decoder would read the
+    wrong bytes confidently and mark nothing.
+
+    What has a width: an integer is its ``bits``; a ``bytes`` or ``string``
+    sized ``fixed`` is known; a nested unit is the sum of its own fields; a
+    ``switch`` counts only when every case *and* a present default agree. A
+    ``computed``, ``select`` or ``pointer`` reads nothing where it stands and so
+    claims none of the trailer.
+
+    Args:
+        spec: The spec the unit belongs to.
+        unit: Name of the unit the ``fill`` is in.
+        index: Position of the ``fill`` field itself; the fields measured are
+            the ones after it.
+
+    Returns:
+        The trailing width in bytes.
+
+    Raises:
+        SpecError: If any trailing field's width is not statically known,
+            naming the field and why.
+
+    Example:
+        >>> trailing_width(spec, "message", 1)
+        4
+
+    """
+    bits = _trailing_bits(spec, spec.unit(unit), index, ())
+    if bits % 8:
+        msg = (
+            f"unit {unit!r}: the fields after a fill total {bits} bits, which is "
+            "not a whole number of bytes, so where the fill ends is undefined"
+        )
+        raise SpecError(msg)
+    return bits // 8
+
+
+def fill_widths(spec: Spec) -> dict[tuple[str, int], int | None]:
+    """Resolve every ``fill`` in a spec, by ``(unit name, field index)``.
+
+    What both backends need and neither should work out for itself. The
+    interpreter precomputes this when a :class:`~kober.decoder.Decoder` is
+    built and the compiler bakes it into the generated source, so the boundary
+    a fill lands on is decided once, here.
+
+    Args:
+        spec: The spec to resolve.
+
+    Returns:
+        The trailing width in bytes for each field carrying a ``fill``, and
+        ``None`` for one whose width the spec does not fix. A ``None`` is
+        reported as an error by :func:`check`, so it reaches a backend only
+        when the check was skipped.
+
+    Example:
+        >>> fill_widths(spec)
+        {('message', 1): 4}
+
+    """
+    widths: dict[tuple[str, int], int | None] = {}
+    for unit in spec.units.values():
+        for index, item in enumerate(unit.fields):
+            if not any(isinstance(_size_of(kind), Fill) for kind in _walk_types(item.type)):
+                continue
+            try:
+                widths[unit.name, index] = trailing_width(spec, unit.name, index)
+            except SpecError:
+                widths[unit.name, index] = None
+    return widths
+
+
+def _trailing_bits(spec: Spec, unit: Unit, index: int, seen: tuple[str, ...]) -> int:
+    """Sum the widths of ``unit``'s fields after ``index``, in bits."""
+    total = 0
+    for position, item in enumerate(unit.fields):
+        if position <= index:
+            continue
+        total += _field_bits(spec, unit, item, seen)
+    return total
+
+
+def _field_bits(spec: Spec, unit: Unit, item: Field, seen: tuple[str, ...]) -> int:
+    """Return one trailing field's width in bits, or refuse to guess."""
+    where = f"unit {unit.name!r}, field {item.name or '<anonymous>'!r}"
+    if item.condition is not None:
+        msg = (
+            f"{where}: it follows a fill and is conditional, so whether it is "
+            "there at all depends on the data; a fill cannot be sized against it"
+        )
+        raise SpecError(msg)
+    times = 1
+    if item.repeat is not None:
+        count = _literal_count(item.repeat)
+        if count is None:
+            msg = (
+                f"{where}: it follows a fill and repeats a number of times the "
+                "spec does not fix; a fill cannot be sized against it"
+            )
+            raise SpecError(msg)
+        times = count
+    return times * _type_bits(spec, unit, item, item.type, seen)
+
+
+def _literal_count(repeat: Repeat) -> int | None:
+    """Return a repeat's element count when the spec states it outright."""
+    if isinstance(repeat, Count) and isinstance(repeat.expr, IntLiteral):
+        return repeat.expr.value
+    return None
+
+
+def _type_bits(  # noqa: PLR0911
+    spec: Spec, unit: Unit, item: Field, kind: FieldType, seen: tuple[str, ...]
+) -> int:
+    """Return a field type's width in bits, or refuse to guess."""
+    where = f"unit {unit.name!r}, field {item.name or '<anonymous>'!r}"
+    if isinstance(kind, IntType):
+        return kind.bits
+    if isinstance(kind, (Computed, Select, Pointer)):
+        # None of the three reads anything where it stands — a pointer's bytes
+        # are read by the ordinary fields whose citations already cover them —
+        # so none of them claims any of the trailer.
+        return 0
+    if isinstance(kind, (BytesType, StringType)):
+        if isinstance(kind.size, Fixed):
+            return kind.size.count * 8
+        msg = (
+            f"{where}: it follows a fill and its size is not fixed, so how much "
+            "of the input it claims is not knowable before decoding it"
+        )
+        raise SpecError(msg)
+    if isinstance(kind, UnitRef):
+        if kind.unit in seen:
+            msg = (
+                f"{where}: it follows a fill and unit {kind.unit!r} is recursive, "
+                "so it has no width the spec fixes"
+            )
+            raise SpecError(msg)
+        target = spec.units.get(kind.unit)
+        if target is None:
+            msg = f"{where}: it follows a fill and names unknown unit {kind.unit!r}"
+            raise SpecError(msg)
+        return _trailing_bits(spec, target, -1, (*seen, kind.unit))
+    if isinstance(kind, Switch):
+        widths = {
+            _type_bits(spec, unit, item, case, seen) for case in kind.cases.values()
+        }
+        if kind.default is None:
+            msg = (
+                f"{where}: it follows a fill and is a switch with no default, so "
+                "an unmatched value has no width"
+            )
+            raise SpecError(msg)
+        widths.add(_type_bits(spec, unit, item, kind.default, seen))
+        if len(widths) != 1:
+            listed = ", ".join(str(width) for width in sorted(widths))
+            msg = (
+                f"{where}: it follows a fill and its switch cases have differing "
+                f"widths ({listed} bits), so the trailer has no single size"
+            )
+            raise SpecError(msg)
+        return widths.pop()
+    msg = f"{where}: it follows a fill and has no width the spec fixes"
+    raise SpecError(msg)
 
 
 def _walk_types(kind: FieldType) -> Iterator[FieldType]:
@@ -386,6 +579,51 @@ class _Checker:
 
         for index, item in enumerate(unit.fields):
             self._check_field(unit, index, item)
+        self._check_fills(unit)
+
+    def _check_fills(self, unit: Unit) -> None:
+        """Resolve every ``fill`` in this unit, or say why it cannot be.
+
+        Its own pass because it is the one rule that needs a field's *index*:
+        every other check asks about a field, and this one asks about the
+        fields after it. At most one fill may be in a unit — two would each be
+        sized against the other's unknown extent.
+        """
+        where = f"{self.spec.name}.{unit.name}"
+        filled = [
+            (index, item)
+            for index, item in enumerate(unit.fields)
+            if any(isinstance(_size_of(kind), Fill) for kind in _walk_types(item.type))
+        ]
+        if len(filled) > 1:
+            listed = ", ".join(repr(item.name or "<anonymous>") for _, item in filled)
+            self.error(
+                where,
+                f"unit declares more than one fill ({listed}); each would be sized "
+                "against the other's unknown extent",
+            )
+            return
+        for index, item in filled:
+            label = item.name or f"<anonymous {index}>"
+            if item.repeat is not None:
+                self.error(
+                    f"{where}.{label}",
+                    "a fill cannot repeat: the first element would take everything "
+                    "the trailing fields do not claim, leaving the rest nothing",
+                )
+                continue
+            try:
+                trailing_width(self.spec, unit.name, index)
+            except SpecError as exc:
+                self.error(f"{where}.{label}", str(exc))
+                continue
+            if self.spec.input is InputShape.STREAM:
+                self.warn(
+                    f"{where}.{label}",
+                    "a fill under 'input: stream' takes the rest of the run, not the "
+                    "rest of the message; every message after this one in the same "
+                    "segment would be swallowed by this field",
+                )
 
     def _check_field(self, unit: Unit, index: int, item: Field) -> None:
         """Check one field's type, guards, size, and repetition."""
@@ -423,6 +661,7 @@ class _Checker:
                 where,
                 "repeat until",
                 element_of=item.name,
+                element_as=repeat.alias,
             )
 
     def _check_type(self, unit: Unit, kind: FieldType, visible: set[str], where: str) -> None:
@@ -503,10 +742,11 @@ class _Checker:
         # there is no element for it to mean.
         self._expect(
             kind.where, ExprType.BOOL, unit, visible, where, "select where",
-            element_of=kind.source,
+            element_of=kind.source, element_as=kind.alias,
         )
         projected = self._infer(
-            kind.value, unit, visible, where, "select value", element_of=kind.source
+            kind.value, unit, visible, where, "select value",
+            element_of=kind.source, element_as=kind.alias,
         )
         fallback = self._infer(kind.default, unit, visible, where, "select default")
         if projected is not None and fallback is not None and projected is not fallback:
@@ -536,7 +776,7 @@ class _Checker:
 
     def _check_switch(self, unit: Unit, kind: Switch, visible: set[str], where: str) -> None:
         """Check that switch keys agree with the type dispatched on."""
-        on_type = self._infer(kind.on, unit, visible, where, "switch on")
+        on_type = self._infer(kind.dispatch, unit, visible, where, "switch dispatch")
         if on_type is None:
             return
         if on_type not in (ExprType.INT, ExprType.STR):
@@ -568,9 +808,10 @@ class _Checker:
         where: str,
         label: str,
         element_of: str | None = None,
+        element_as: str | None = None,
     ) -> None:
         """Infer an expression's type and report if it is not ``wanted``."""
-        actual = self._infer(expr, unit, visible, where, label, element_of)
+        actual = self._infer(expr, unit, visible, where, label, element_of, element_as)
         if actual is not None and actual is not wanted:
             self.error(
                 where,
@@ -585,9 +826,10 @@ class _Checker:
         where: str,
         label: str,
         element_of: str | None = None,
+        element_as: str | None = None,
     ) -> ExprType | None:
         """Infer an expression's type, turning any failure into a finding."""
-        scope = _Scope(self, unit, visible, element_of)
+        scope = _Scope(self, unit, visible, element_of, element_as)
         try:
             return infer_type(expr, scope, unparse(expr), where)
         except ExprError as exc:
@@ -598,9 +840,16 @@ class _Checker:
 class _Scope:
     """Resolves a reference path to a type, for one field's position.
 
-    ``element_of`` names the field an enclosing ``until`` repeats. That field
-    alone resolves to its element type rather than being refused as a list,
-    because ``until`` is evaluated once per element with that element in hand.
+    ``element_of`` names the field an enclosing ``until`` or ``select``
+    repeats. One element of it resolves to the element type rather than being
+    refused as a list, because both constructs are evaluated once per element
+    with that element in hand.
+
+    ``element_as`` is the name that element answers to. Without one it is the
+    repeated field's own name, which is the shorthand; with one, the repeated
+    field's name is a list again and only the alias means an element. Exactly
+    one name means an element either way, which is what keeps a list from ever
+    being held: the language has no type for one.
     """
 
     def __init__(
@@ -609,11 +858,18 @@ class _Scope:
         unit: Unit,
         visible: set[str],
         element_of: str | None = None,
+        element_as: str | None = None,
     ) -> None:
         self.checker = checker
         self.unit = unit
         self.visible = visible
         self.element_of = element_of
+        self.element_as = element_as
+
+    @property
+    def element_name(self) -> str | None:
+        """The name one element of the repetition is in scope under, if any."""
+        return self.element_as or self.element_of
 
     def resolve(self, path: tuple[str, ...]) -> ExprType:
         """Return the type named by ``path``, or raise :class:`ExprError`."""
@@ -665,6 +921,24 @@ class _Scope:
         if not parts:
             raise self._fail(path, "a reference must name a field")
         head, *rest = parts
+        if (
+            self.element_as is not None
+            and head == self.element_as
+            and unit is self.unit
+        ):
+            # The alias is not a field of the unit, so it never appears in
+            # `visible` and the ordinary lookup below cannot find it. It stands
+            # for one element of `element_of`, whose own ordering was checked
+            # where the construct was written.
+            item = unit.field(self.element_of or "")
+            if item is None:
+                known = ", ".join(sorted(visible or ())) or "none"
+                message = (
+                    f"unknown name {self.element_of!r} in unit {unit.name!r}; "
+                    f"in scope: {known}"
+                )
+                raise self._fail(path, message)
+            return self._type_of(item, unit, tuple(rest), path, as_element=True)
         if visible is not None and head not in visible:
             declared = unit.field(head) is not None
             if declared:
@@ -691,10 +965,18 @@ class _Scope:
         return self._type_of(item, unit, tuple(rest), path)
 
     def _type_of(
-        self, item: Field, unit: Unit, rest: tuple[str, ...], path: tuple[str, ...]
+        self,
+        item: Field,
+        unit: Unit,
+        rest: tuple[str, ...],
+        path: tuple[str, ...],
+        *,
+        as_element: bool = False,
     ) -> ExprType:
         """Type one field, descending into it when the path continues."""
-        if item.repeat is not None and item.name != self.element_of:
+        if item.repeat is not None and not (
+            as_element or (self.element_as is None and item.name == self.element_of)
+        ):
             raise self._fail(
                 path,
                 f"{item.name!r} is repeated; the expression language has no list type",
@@ -730,7 +1012,7 @@ class _Scope:
             # aggregation went into the model: no new `ExprType` member, and a
             # scalar any later field can reference. `value` is evaluated with
             # the element bound, so typing it needs that binding too.
-            scope = _Scope(self.checker, unit, None, kind.source)
+            scope = _Scope(self.checker, unit, None, kind.source, kind.alias)
             return infer_type(kind.value, scope, unparse(kind.value))
         raise self._fail(
             path,
