@@ -28,6 +28,7 @@ The live records stay in the project root:
 | --- | --- |
 | [`CODEGEN-ANALYSIS.md`](CODEGEN-ANALYSIS.md) | Measured comparison of interpreting a spec against compiling it, and a sizing of the work. The evidence behind the compiler phase. |
 | [`SIMPLIFICATION-IMPACT.md`](SIMPLIFICATION-IMPACT.md) | What the spec repository's `0.18` simplification analysis would do to this project, proposal by proposal, and which `zpf` port to take next. |
+| [`FORMAT-ERGONOMICS.md`](FORMAT-ERGONOMICS.md) | Why writing a spec still costs too much typing after `0.1.0`'s shorthands: the dialect the docs teach, the four constructs that carry the remaining verbosity, and what each is worth. |
 
 ## Phases
 
