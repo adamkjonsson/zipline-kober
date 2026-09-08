@@ -25,6 +25,12 @@ What is left divides cleanly:
 The first costs nothing to fix and is the larger of the two. The second is
 worth about a quarter of the structural text, measured in §4.
 
+**Neither is caused by YAML**, which §7 tests directly rather than assumes:
+every one of the four writing items is a decision about the schema that a
+different surface syntax would still have to make. YAML does cost this project
+three real things, and the sharpest of them is the reason §6 rejects
+name-keyed fields.
+
 ---
 
 ## 2. The documentation teaches the wrong dialect
@@ -229,7 +235,108 @@ language change and a much larger one than anything else here.
 
 ---
 
-## 7. One thing that is tooling, not format
+## 7. Is YAML the culprit?
+
+The natural next question, and it deserves a measurement rather than a taste.
+The suspicion is reasonable: a decoder spec is a *grammar*, and YAML is a
+language for trees of named values, so there ought to be an impedance
+mismatch.
+
+**There is one, but it is not the verbosity.**
+
+### 7.1 The four items are schema decisions, not encoding decisions
+
+None of §3 would have been fixed by a different surface syntax. A concrete
+syntax would still have to decide that byte order inherits, that a size may be
+written as a bare expression, which constructs lift into a field, and how a
+parameter is spelled. Each is a decision about what the schema *says*, not
+about how it is spelled.
+
+This is the strongest evidence against the suspicion, and it cuts the other
+way too: **a syntax designed today would encode today's four gaps**, and they
+would then be baked into two languages instead of one.
+
+### 7.2 Structure is the minority of what an author types
+
+| File | Prose | Structural characters |
+| --- | --- | --- |
+| [`dns.yaml`](../examples/dns.yaml) | 38% | 2475 |
+| [`http.yaml`](../examples/http.yaml) | 84% | 1548 |
+
+[`http.yaml`](../examples/http.yaml) is documentation with a decoder embedded
+in it. A syntax that halved its structural text would save under a tenth of the
+file. Prose is also the stated reason YAML was chosen over JSON in
+[`document.md`](../docs/format/document.md), and that reason gets *stronger* as
+specs get more serious — the RFC citation beside a field is the thing that
+makes a spec reviewable. Any replacement must carry prose at least as well,
+which rules out most of the terse candidates before they are considered.
+
+### 7.3 What YAML does cost
+
+Three things, and they are real.
+
+**Implicit typing.** The switch dispatch key had to be renamed because YAML 1.1
+reads bare `on` as a boolean, and [`loader.py`](../src/kober/loader.py) carries
+scalar accessors whose only job is to name that class of failure. The cost is
+paid in code and in one breaking change, and it is recorded in
+[`document.md`](../docs/format/document.md) as a trap.
+
+**Style bifurcation**, which is the most underrated cost here. YAML offers flow
+and block style, and the choice is not the author's:
+
+| File | Flow-style fields | Block-style fields |
+| --- | --- | --- |
+| `dns.yaml` | 28 | 4 |
+| `http.yaml` | 0 | 14 |
+
+The two shipped examples are written in different styles because one documents
+its fields and the other mostly does not. A field is written inline until it
+gains a `doc:`, at which point it must be reformatted into block style.
+**Documenting a field forces rewriting it**, which is a friction pushing
+exactly the wrong way given §7.2.
+
+**Ordering, which is the sharp one.** Field order is load-bearing: fields
+decode in order, and an expression may only name fields declared before it.
+YAML does not guarantee mapping order, so fields must be a *list*, so every
+field repeats the `name` key.
+
+That is precisely the wart §6 costed and rejected, and the rejection is not a
+judgement about taste — it is unfixable while the encoding is a data language.
+In a syntax made of statements, order is free and the name is simply the first
+token. **This is where the suspicion is exactly right.**
+
+### 7.4 What a replacement would cost
+
+The model is currently plain data. `from_dict` and `from_json` work with the
+standard library alone, YAML is an optional extra, and a spec is therefore
+something another tool can *generate* and inspect. That is an asset, not an
+implementation detail.
+
+A concrete syntax would also be the first hand-written parser in a project that
+deliberately reused Python's own for expressions, and it brings a tail with it:
+source positions in errors, a formatter, editor support, and a reference
+written twice.
+
+On comparables: **Kaitai Struct is the closest thing in this niche and it is
+YAML**, which is evidence the encoding is workable rather than merely endured.
+The C-like binary template languages read markedly better for straight-line
+structures, but none of them carries a coverage and citation model — they are
+terser in part because they promise less.
+
+### 7.5 Position
+
+**The encoding question is downstream of the schema question, not an
+alternative to it.** Settle §3 first; §7.1 is the reason.
+
+If the answer is still yes afterwards, the shape to want is a **front end, not
+a replacement**: a concrete syntax that parses to the same model, leaving
+`from_dict` and JSON as the interchange form. That keeps generated specs, keeps
+the optional-dependency story, and makes the syntax something an author may
+use rather than something every consumer must implement.
+
+---
+
+## 8. One thing that is tooling, not format
 
 There is no scaffold verb. The CLI has `check`, `show`, `run`, `compile`, and
 `try` ([`cli.py`](../src/kober/cli.py)) — everything for a spec that exists,
