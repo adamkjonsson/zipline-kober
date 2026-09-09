@@ -42,3 +42,4 @@ The live records stay in the project root:
 | [`COMPILER-PHASE-PLAN.md`](COMPILER-PHASE-PLAN.md) | A compiler alongside the interpreter: a spec becomes a Python module with a typed API. | **Done** — landed on `compiler_phase`. |
 | [`POINTER-PHASE-PLAN.md`](POINTER-PHASE-PLAN.md) | The two things real captures asked for and the language could not say: the `Pointer` construct, and the expression language's first functions. | **Done** — landed on `pointer_phase`. |
 | [`REPETITION-PHASE-PLAN.md`](REPETITION-PHASE-PLAN.md) | A way for a spec to ask a question about a repeated field, so HTTP can choose its own body framing instead of assuming one. | **Done** — landed on `repetition_language_phase`. |
+| [`DIALECT-PHASE-PLAN.md`](DIALECT-PHASE-PLAN.md) | The `0.2.0` milestone: the remaining shorthands, source locations on faults, and the packeteer keys kober should recognise rather than refuse. | **In progress** — on `implement_v0.2.0`. |
