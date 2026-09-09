@@ -12,6 +12,7 @@ ordered rather than alphabetically — see [Architecture](../dev/architecture.md
 
 spec
 expr
+source
 loader
 check
 node

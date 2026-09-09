@@ -22,6 +22,55 @@ minor bump here too.
 
 ## [Unreleased]
 
+### Added
+
+- **A spec fault says which file and line it is on**
+  ([#25](https://github.com/adamkjonsson/zipline-kober/issues/25)). A spec is
+  written by hand in YAML, and until now a fault named the construct and never
+  the place: `spec.units.message.fields[0]` means counting field entries by
+  hand, over the *loaded* document, so a commented-out field shifts the count
+  away from anything visible. It now reads
+
+  ```console
+  $ kober check bad.yaml
+  error: bad.yaml:7: dns.message.body: size: 'later' is declared later in unit 'message'; a field may only reference fields decoded before it
+  ```
+
+  It matters most in `check`, which deliberately reports every fault rather
+  than stopping at the first — a dozen faults with no line numbers is a dozen
+  things to go hunting for.
+
+  New `kober.source` module: `Location` (path, line, source) is what a fault
+  carries, and `SourceMap` is what a returned finding looks one up in.
+  `Spec.sources` holds the map, and is **not compared** — it says where a spec
+  was read from, not what it is.
+
+- **`from_dict`, `from_json`, `from_yaml` take `source=`**, naming the file a
+  document came from so a message can lead with it. `from_file` passes the
+  path it was given. The same keyword is on the `Spec` classmethods.
+
+### Changed
+
+- **Breaking: `check.Finding.where` is a `Location`, not a `str`.** The dotted
+  path is still there, as `finding.where.path`; `str(finding)` renders
+  `file:line: path: message` when it has a file and a line, and exactly what it
+  printed before when it does not. Callers comparing `finding.where` to a
+  string must compare `finding.where.path` instead.
+- **Breaking: `ExprError.where` is gone**; the location is `ExprError.loc`,
+  inherited from `SpecError`, and it is a `Location`. One name for one thing:
+  an expression fault is in a place, and the parent class already had the
+  attribute for it. The constructor argument is still spelled `where`.
+  `SpecError` gains `.message` and `.loc`.
+- `ExprError`'s rendered message leads with the location like every other
+  fault — `dns.yaml:41: dns.message.size: cannot parse (…): 'a +'` — rather
+  than putting it between the message and the quoted source.
+
+### Documentation
+
+- The `check` transcript in the README, the error examples in
+  `docs/format/index.md` and `docs/format/expressions.md`, and `DESIGN.md` §6
+  all show the line, and say that JSON and `from_dict` carry the path alone.
+
 ## [0.1.0] - 2026-09-07
 
 The first release.

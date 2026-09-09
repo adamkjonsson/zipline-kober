@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from kober.expr import Expr, Scope
+    from kober.source import Location
     from kober.spec import FieldType, Repeat, SizeSpec, Spec
 
 
@@ -96,15 +97,22 @@ class Severity(Enum):
 class Finding:
     """One problem found in a spec.
 
+    ``where`` is a :class:`~kober.source.Location` rather than the dotted
+    string it was before ``0.2.0``. :func:`check` reports every fault it can
+    see rather than stopping at the first, and a list of a dozen faults with no
+    line numbers is a list of a dozen things to go hunting for. The path is
+    still on it, as :attr:`~kober.source.Location.path`.
+
     Attributes:
         severity: Whether this stops the spec from running.
-        where: Dotted location, e.g. ``"dns.message.qdcount"``.
+        where: Where the problem is: the path always, and the file and line
+            when the spec was read from a source that reports them.
         message: What is wrong, in the author's vocabulary.
 
     """
 
     severity: Severity
-    where: str
+    where: Location
     message: str
 
     def __str__(self) -> str:
@@ -438,8 +446,13 @@ class _Checker:
         self._index_parents()
 
     def report(self, severity: Severity, where: str, message: str) -> None:
-        """Record one finding."""
-        self.findings.append(Finding(severity, where, message))
+        """Record one finding, looking up where in the document it is.
+
+        Every check builds its path from model names, which is the vocabulary
+        the loader recorded lines under — so this is the one place a path
+        becomes a location, and the checks themselves need not carry one.
+        """
+        self.findings.append(Finding(severity, self.spec.sources.locate(where), message))
 
     def error(self, where: str, message: str) -> None:
         """Record an error."""

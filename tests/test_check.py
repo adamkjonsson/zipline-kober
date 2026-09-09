@@ -6,6 +6,7 @@ import pytest
 
 from kober.check import Severity, check, trailing_width
 from kober.expr import ExprType, parse
+from kober.loader import from_yaml
 from kober.spec import (
     BytesType,
     Computed,
@@ -1406,3 +1407,58 @@ def test_a_selects_default_sees_no_element_under_either_name():
         ]
     )
     assert any("unknown name" in message for message in errors(spec))
+
+
+# --- findings say where they are -------------------------------------------
+#
+# `check` reports every fault rather than stopping at the first, so a dozen
+# faults with no line numbers is a dozen things to go hunting for.
+
+BAD_SPEC_YAML = """\
+name: dns
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: id, bits: 16}
+      - {name: body, bytes: {size: {expr: "later"}}}
+      - {name: later, bits: 8}
+"""
+
+
+def test_a_finding_carries_the_line_it_is_about():
+    spec = from_yaml(BAD_SPEC_YAML, source="dns.yaml")
+    findings = check(spec)
+    assert findings
+    assert findings[0].where.source == "dns.yaml"
+    assert findings[0].where.line == 8
+    assert findings[0].where.path == "dns.message.body"
+
+
+def test_a_finding_renders_file_line_path_then_message():
+    spec = from_yaml(BAD_SPEC_YAML, source="dns.yaml")
+    rendered = str(check(spec)[0])
+    assert rendered.startswith("error: dns.yaml:8: dns.message.body: ")
+
+
+def test_a_finding_from_a_mapping_reads_as_it_always_did():
+    """`from_dict` has no source, and the message must not degrade beyond that."""
+    spec = Spec.from_dict(
+        {
+            "name": "dns",
+            "version": "1.0",
+            "entry": "message",
+            "units": {
+                "message": {
+                    "fields": [
+                        {"name": "body", "bytes": {"size": {"expr": "later"}}},
+                        {"name": "later", "bits": 8},
+                    ]
+                }
+            },
+        }
+    )
+    finding = check(spec)[0]
+    assert finding.where.line is None
+    assert str(finding).startswith("error: dns.message.body: ")

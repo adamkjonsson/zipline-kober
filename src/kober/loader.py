@@ -50,17 +50,29 @@ which is what makes reading to a delimiter shallow —
 Every shorthand builds the **identical model**. Nothing downstream — the
 checker, the engine, the compiler — can tell which spelling was used, which is
 what makes them shorthands rather than features.
+
+**Every fault knows where it is.** A position — an ``_At``, private to this
+module — is threaded through every constructor rather than a dotted string, so a
+:class:`~kober.errors.SpecError` names the file and the line as well as the
+path. YAML mappings carry the line they started on; JSON and a mapping built in
+memory carry none, and then a message reads exactly as it did before. The
+constructs :func:`kober.check.check` reports on are additionally recorded in
+the *checker's* vocabulary, since it runs later with the document gone. See
+:mod:`kober.source`.
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from enum import Enum
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from kober.errors import SpecError
 from kober.expr import ExprType, parse
+from kober.source import Location, SourceMap
 from kober.spec import (
     BytesType,
     Computed,
@@ -118,14 +130,126 @@ _PARAM_KEYS = frozenset({"name", "type"})
 _ENUM_KEYS = frozenset({"members", "doc"})
 
 
+# --- where we are ----------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _At:
+    """Where the loader is in the document, and what it has learned getting there.
+
+    One value threaded through every constructor, rather than a parameter per
+    thing that needs carrying. It holds the location a fault would be reported
+    at, and the map of lines the checker will look faults up in later — and it
+    is where a *lexical default* goes when the format grows one, since that is
+    the same shape of question: what does this position inherit from above it.
+
+    Attributes:
+        loc: Path, line and file of the construct being read.
+        lines: The map being filled in, shared by every position in one load.
+
+    """
+
+    loc: Location
+    lines: dict[str, int]
+
+    def child(self, step: object) -> _At:
+        """Return the position of a step below this one."""
+        return _At(self.loc.child(step), self.lines)
+
+    def within(self, document: object) -> _At:
+        """Return this position carrying ``document``'s own line, if it has one.
+
+        A mapping parsed from YAML knows the line it started on; one from JSON
+        or from memory does not, and then this changes nothing.
+        """
+        line = getattr(document, "line", None)
+        return self if not isinstance(line, int) else _At(self.loc.at_line(line), self.lines)
+
+    def record(self, path: str) -> None:
+        """Note this position's line under a path in the checker's vocabulary.
+
+        The loader's paths (``spec.units.message.fields[0]``) and the checker's
+        (``dns.message.id``) name the same constructs in different words, so
+        the things :func:`kober.check.check` reports on are recorded under the
+        words it will ask in. See :mod:`kober.source`.
+        """
+        if self.loc.line is not None:
+            self.lines[path] = self.loc.line
+
+
+def _root(document: object, source: str | None) -> _At:
+    """Return the position of the whole document."""
+    return _At(Location("spec", source=source), {}).within(document)
+
+
+class _LinedDict(dict[Any, Any]):
+    """A mapping that remembers the line it started on.
+
+    The line travels **on the object** rather than in a side table keyed by
+    ``id()``. A side table has two ways to be wrong and no third: hold every
+    mapping alive so its id stays valid, and it leaks; do not, and it reports
+    some other object's line once an id has been reused.
+
+    It is a ``dict`` in every other respect, and compares equal to one, so
+    nothing downstream needs to know it exists.
+    """
+
+    __slots__ = ("line",)
+
+    line: int
+
+
+@cache
+def _lined_loader(yaml: Any) -> Any:
+    """Return a ``SafeLoader`` subclass that records where each mapping starts.
+
+    Built on first use rather than at import: PyYAML is an optional extra, so
+    there is nothing of its to subclass until a YAML spec is actually loaded.
+
+    Still **safe**: this adds a constructor for the plain mapping tag and
+    changes nothing else, so a document naming a Python type to build is
+    refused here exactly as it is by ``safe_load``.
+
+    Args:
+        yaml: The imported PyYAML module.
+
+    Returns:
+        The loader class, the same one every time.
+
+    """
+
+    class LinedLoader(yaml.SafeLoader):  # type: ignore[misc, name-defined]
+        """``SafeLoader``, plus the line each mapping starts on."""
+
+        def construct_yaml_map(self, node: Any) -> Any:
+            """Build a mapping that carries its own line."""
+            data = _LinedDict()
+            data.line = node.start_mark.line + 1
+            # Two-step, as PyYAML's own does: the empty mapping is yielded
+            # first so a document that refers to itself has something to
+            # point at before its contents exist.
+            yield data
+            data.update(self.construct_mapping(node))
+
+    LinedLoader.add_constructor("tag:yaml.org,2002:map", LinedLoader.construct_yaml_map)
+    return LinedLoader
+
+
 # --- entry points ----------------------------------------------------------
 
 
-def from_dict(document: Mapping[str, Any]) -> Spec:
+def from_dict(document: Mapping[str, Any], *, source: str | None = None) -> Spec:
     """Build a spec from an already-parsed mapping.
+
+    Every path leads here, including the two that know where the document came
+    from, so line tracking is one implementation rather than three: a mapping
+    parsed by :func:`from_yaml` carries its own lines and this reads them off,
+    and a mapping from anywhere else does not and this reports paths alone.
 
     Args:
         document: The spec document.
+        source: The file it was read from, for error messages. ``None`` when it
+            came from memory, which is the ordinary case for a generated spec.
 
     Returns:
         The spec. It is well formed; run :func:`kober.check.check` to learn
@@ -135,14 +259,17 @@ def from_dict(document: Mapping[str, Any]) -> Spec:
         SpecError: If the document is malformed.
 
     """
-    return _spec(document, "spec")
+    return _spec(document, _root(document, source))
 
 
-def from_json(text: str) -> Spec:
+def from_json(text: str, *, source: str | None = None) -> Spec:
     """Build a spec from JSON text.
+
+    ``json`` reports no positions, so a fault carries its path and no line.
 
     Args:
         text: The JSON document.
+        source: The file it was read from, for error messages.
 
     Returns:
         The spec.
@@ -156,14 +283,16 @@ def from_json(text: str) -> Spec:
     except json.JSONDecodeError as exc:
         msg = f"cannot parse JSON: {exc}"
         raise SpecError(msg) from exc
-    return from_dict(_require_mapping(document, "spec"))
+    at = _root(document, source)
+    return from_dict(_require_mapping(document, at), source=source)
 
 
-def from_yaml(text: str) -> Spec:
+def from_yaml(text: str, *, source: str | None = None) -> Spec:
     """Build a spec from YAML text.
 
     Args:
         text: The YAML document.
+        source: The file it was read from, for error messages.
 
     Returns:
         The spec.
@@ -184,11 +313,12 @@ def from_yaml(text: str) -> Spec:
     try:
         # safe_load only: a spec is data, and full_load would let a document
         # name Python types to construct.
-        document = yaml.safe_load(text)
+        document = yaml.load(text, _lined_loader(yaml))
     except yaml.YAMLError as exc:
         msg = f"cannot parse YAML: {exc}"
         raise SpecError(msg) from exc
-    return from_dict(_require_mapping(document, "spec"))
+    at = _root(document, source)
+    return from_dict(_require_mapping(document, at), source=source)
 
 
 def from_file(path: str | Path) -> Spec:
@@ -219,7 +349,8 @@ def from_file(path: str | Path) -> Spec:
     except OSError as exc:
         msg = f"cannot read {resolved}: {exc}"
         raise SpecError(msg) from exc
-    return from_json(text) if fmt == "json" else from_yaml(text)
+    source = str(resolved)
+    return from_json(text, source=source) if fmt == "json" else from_yaml(text, source=source)
 
 
 # --- scalar accessors ------------------------------------------------------
@@ -237,17 +368,17 @@ def _yaml_hint(value: object) -> str:
     return ""
 
 
-def _require_mapping(value: object, where: str) -> Mapping[str, Any]:
+def _require_mapping(value: object, at: _At) -> Mapping[str, Any]:
     """Return ``value`` as a mapping with string keys, or raise."""
-    mapping = _require_any_mapping(value, where)
+    mapping = _require_any_mapping(value, at)
     for key in mapping:
         if not isinstance(key, str):
-            msg = f"{where}: keys must be strings, got {key!r}"
-            raise SpecError(msg)
+            msg = f"keys must be strings, got {key!r}"
+            raise SpecError(msg, at.loc)
     return mapping
 
 
-def _require_any_mapping(value: object, where: str) -> Mapping[Any, Any]:
+def _require_any_mapping(value: object, at: _At) -> Mapping[Any, Any]:
     """Return ``value`` as a mapping, whatever its keys are.
 
     Enum members and switch cases are keyed by the *value* they name, which
@@ -256,224 +387,253 @@ def _require_any_mapping(value: object, where: str) -> Mapping[Any, Any]:
     rest of the schema follows.
     """
     if not isinstance(value, dict):
-        msg = f"{where}: expected a mapping, got {type(value).__name__}"
-        raise SpecError(msg)
+        msg = f"expected a mapping, got {type(value).__name__}"
+        raise SpecError(msg, at.loc)
     return value
 
 
-def _require_list(value: object, where: str) -> list[Any]:
+def _require_list(value: object, at: _At) -> list[Any]:
     """Return ``value`` as a list, or raise."""
     if not isinstance(value, list):
-        msg = f"{where}: expected a list, got {type(value).__name__}"
-        raise SpecError(msg)
+        msg = f"expected a list, got {type(value).__name__}"
+        raise SpecError(msg, at.loc)
     return value
 
 
-def _require_str(value: object, where: str) -> str:
+def _require_str(value: object, at: _At) -> str:
     """Return ``value`` as a string, or raise with a YAML hint."""
     if not isinstance(value, str):
-        msg = f"{where}: expected a string, got {type(value).__name__}{_yaml_hint(value)}"
-        raise SpecError(msg)
+        msg = f"expected a string, got {type(value).__name__}{_yaml_hint(value)}"
+        raise SpecError(msg, at.loc)
     return value
 
 
-def _require_int(value: object, where: str) -> int:
+def _require_int(value: object, at: _At) -> int:
     """Return ``value`` as an integer, or raise. Booleans are not integers."""
     if isinstance(value, bool) or not isinstance(value, int):
-        msg = f"{where}: expected an integer, got {type(value).__name__}{_yaml_hint(value)}"
-        raise SpecError(msg)
+        msg = f"expected an integer, got {type(value).__name__}{_yaml_hint(value)}"
+        raise SpecError(msg, at.loc)
     return value
 
 
-def _require_bool(value: object, where: str) -> bool:
+def _require_bool(value: object, at: _At) -> bool:
     """Return ``value`` as a boolean, or raise."""
     if not isinstance(value, bool):
-        msg = f"{where}: expected true or false, got {type(value).__name__}"
-        raise SpecError(msg)
+        msg = f"expected true or false, got {type(value).__name__}"
+        raise SpecError(msg, at.loc)
     return value
 
 
-def _reject_unknown(mapping: Mapping[str, Any], allowed: frozenset[str], where: str) -> None:
+def _reject_unknown(mapping: Mapping[str, Any], allowed: frozenset[str], at: _At) -> None:
     """Refuse keys outside the schema, naming the nearest allowed one."""
     unknown = sorted(set(mapping) - allowed)
     if unknown:
         known = ", ".join(sorted(allowed))
         listed = ", ".join(repr(key) for key in unknown)
-        msg = f"{where}: unknown key(s) {listed}; allowed here: {known}"
-        raise SpecError(msg)
+        msg = f"unknown key(s) {listed}; allowed here: {known}"
+        raise SpecError(msg, at.loc)
 
 
-def _tagged(mapping: Mapping[str, Any], where: str, kinds: frozenset[str]) -> tuple[str, Any]:
+def _tagged(mapping: Mapping[str, Any], at: _At, kinds: frozenset[str]) -> tuple[str, Any]:
     """Unpack a single-key tagged mapping, e.g. ``{int: {...}}``."""
     if len(mapping) != 1:
         known = ", ".join(sorted(kinds))
         listed = ", ".join(repr(key) for key in sorted(mapping)) or "nothing"
         msg = (
-            f"{where}: expected exactly one key naming the kind, got {listed}. "
+            f"expected exactly one key naming the kind, got {listed}. "
             f"Choose one of: {known}"
         )
-        raise SpecError(msg)
+        raise SpecError(msg, at.loc)
     tag, value = next(iter(mapping.items()))
     if tag not in kinds:
         known = ", ".join(sorted(kinds))
-        msg = f"{where}: unknown kind {tag!r}; expected one of: {known}"
-        raise SpecError(msg)
+        msg = f"unknown kind {tag!r}; expected one of: {known}"
+        raise SpecError(msg, at.loc)
     return tag, value
 
 
-def _member(enum_class: type[_E], value: object, where: str) -> _E:
+def _member(enum_class: type[_E], value: object, at: _At) -> _E:
     """Look a string up in an enumeration, listing the alternatives."""
-    text = _require_str(value, where)
+    text = _require_str(value, at)
     for member in enum_class:
         if member.value == text:
             return member
     known = ", ".join(sorted(str(member.value) for member in enum_class))
-    msg = f"{where}: unknown value {text!r}; expected one of: {known}"
-    raise SpecError(msg)
+    msg = f"unknown value {text!r}; expected one of: {known}"
+    raise SpecError(msg, at.loc)
 
 
-def _expr(value: object, where: str) -> Expr:
+def _expr(value: object, at: _At) -> Expr:
     """Parse an expression, accepting a bare integer as a literal."""
     if isinstance(value, bool):
-        msg = f"{where}: expected an expression{_yaml_hint(value)}"
-        raise SpecError(msg)
+        msg = f"expected an expression{_yaml_hint(value)}"
+        raise SpecError(msg, at.loc)
     if isinstance(value, int):
-        return parse(str(value), where)
-    return parse(_require_str(value, where), where)
+        return parse(str(value), at.loc)
+    return parse(_require_str(value, at), at.loc)
 
 
 # --- the document ----------------------------------------------------------
 
 
-def _spec(document: Mapping[str, Any], where: str) -> Spec:
-    """Build the top-level spec."""
-    mapping = _require_mapping(document, where)
-    _reject_unknown(mapping, _SPEC_KEYS, where)
+def _spec(document: Mapping[str, Any], at: _At) -> Spec:
+    """Build the top-level spec, recording where its named parts are."""
+    mapping = _require_mapping(document, at)
+    _reject_unknown(mapping, _SPEC_KEYS, at)
     for required in ("name", "version", "entry", "units"):
         if required not in mapping:
-            msg = f"{where}: missing required key {required!r}"
-            raise SpecError(msg)
+            msg = f"missing required key {required!r}"
+            raise SpecError(msg, at.loc)
 
-    units_doc = _require_mapping(mapping["units"], f"{where}.units")
+    # The checker's paths lead with the spec's name, so the name is needed
+    # before the units are built rather than when the spec is constructed. It
+    # is read without validating: a name that is not a string is still an
+    # error, raised where it always was, below.
+    declared = mapping["name"]
+    owner = declared if isinstance(declared, str) else "spec"
+    at.record(owner)
+
+    units_doc = _require_mapping(mapping["units"], at.child("units"))
     units = {
-        name: _unit(name, value, f"{where}.units.{name}") for name, value in units_doc.items()
+        name: _unit(name, value, at.child("units").child(name), owner)
+        for name, value in units_doc.items()
     }
-    enums_doc = _require_mapping(mapping.get("enums", {}), f"{where}.enums")
+    enums_doc = _require_mapping(mapping.get("enums", {}), at.child("enums"))
     enums = {
-        name: _enum(name, value, f"{where}.enums.{name}") for name, value in enums_doc.items()
+        name: _enum(name, value, at.child("enums").child(name)) for name, value in enums_doc.items()
     }
     shape = (
         InputShape.EITHER
         if "input" not in mapping
-        else _member(InputShape, mapping["input"], f"{where}.input")
+        else _member(InputShape, mapping["input"], at.child("input"))
     )
     return Spec(
-        name=_require_str(mapping["name"], f"{where}.name"),
-        version=_require_str(mapping["version"], f"{where}.version"),
-        entry=_require_str(mapping["entry"], f"{where}.entry"),
+        name=_require_str(mapping["name"], at.child("name")),
+        version=_require_str(mapping["version"], at.child("version")),
+        entry=_require_str(mapping["entry"], at.child("entry")),
         units=units,
         enums=enums,
         input=shape,
-        doc=_optional_str(mapping, "doc", where),
+        doc=_optional_str(mapping, "doc", at),
+        sources=SourceMap(source=at.loc.source, lines=dict(at.lines)),
     )
 
 
-def _optional_str(mapping: Mapping[str, Any], key: str, where: str) -> str | None:
+def _optional_str(mapping: Mapping[str, Any], key: str, at: _At) -> str | None:
     """Read an optional string key."""
     if key not in mapping or mapping[key] is None:
         return None
-    return _require_str(mapping[key], f"{where}.{key}")
+    return _require_str(mapping[key], at.child(key))
 
 
-def _enum(name: str, document: object, where: str) -> EnumDef:
+def _enum(name: str, document: object, at: _At) -> EnumDef:
     """Build an enum, accepting the plain ``{0: label}`` shorthand."""
-    mapping = _require_any_mapping(document, where)
+    at = at.within(document)
+    mapping = _require_any_mapping(document, at)
     # A bare {0: query} mapping has no schema keys, so treat anything without
     # 'members' as the shorthand for it.
     if "members" not in mapping:
-        return EnumDef(name=name, members=_enum_members(mapping, where))
-    _reject_unknown(_require_mapping(mapping, where), _ENUM_KEYS, where)
-    members = _require_any_mapping(mapping["members"], f"{where}.members")
+        return EnumDef(name=name, members=_enum_members(mapping, at))
+    _reject_unknown(_require_mapping(mapping, at), _ENUM_KEYS, at)
+    members = _require_any_mapping(mapping["members"], at.child("members"))
     return EnumDef(
         name=name,
-        members=_enum_members(members, f"{where}.members"),
-        doc=_optional_str(mapping, "doc", where),
+        members=_enum_members(members, at.child("members")),
+        doc=_optional_str(mapping, "doc", at),
     )
 
 
-def _enum_members(mapping: Mapping[Any, Any], where: str) -> dict[int, str]:
+def _enum_members(mapping: Mapping[Any, Any], at: _At) -> dict[int, str]:
     """Read enum members, whose keys are integers however they were written."""
     members: dict[int, str] = {}
     for key, label in mapping.items():
         # JSON object keys are always strings; YAML gives real ints. A bool is
         # not a member value, however Python spells its subclassing.
         if isinstance(key, bool):
-            msg = f"{where}: enum member key {key!r} is not an integer{_yaml_hint(key)}"
-            raise SpecError(msg)
+            msg = f"enum member key {key!r} is not an integer{_yaml_hint(key)}"
+            raise SpecError(msg, at.loc)
         try:
             value = int(key)
         except (TypeError, ValueError):
-            msg = f"{where}: enum member key {key!r} is not an integer"
-            raise SpecError(msg) from None
-        members[value] = _require_str(label, f"{where}.{key}")
+            msg = f"enum member key {key!r} is not an integer"
+            raise SpecError(msg, at.loc) from None
+        members[value] = _require_str(label, at.child(key))
     return members
 
 
-def _unit(name: str, document: object, where: str) -> Unit:
-    """Build one unit."""
-    mapping = _require_mapping(document, where)
-    _reject_unknown(mapping, _UNIT_KEYS, where)
+def _unit(name: str, document: object, at: _At, owner: str) -> Unit:
+    """Build one unit.
+
+    Args:
+        name: The unit's name, which is its key in the ``units`` mapping.
+        document: The unit's body.
+        at: Where in the document this is.
+        owner: The spec's name, which leads the paths the checker reports at.
+
+    Returns:
+        The unit.
+
+    Raises:
+        SpecError: If the body is malformed.
+
+    """
+    at = at.within(document)
+    path = f"{owner}.{name}"
+    at.record(path)
+    mapping = _require_mapping(document, at)
+    _reject_unknown(mapping, _UNIT_KEYS, at)
     if "fields" not in mapping:
-        msg = f"{where}: missing required key 'fields'"
-        raise SpecError(msg)
+        msg = "missing required key 'fields'"
+        raise SpecError(msg, at.loc)
     fields = [
-        _field(item, f"{where}.fields[{index}]")
-        for index, item in enumerate(_require_list(mapping["fields"], f"{where}.fields"))
+        _field(item, at.child("fields").child(f"[{index}]"), path)
+        for index, item in enumerate(_require_list(mapping["fields"], at.child("fields")))
     ]
     params = [
-        _param(item, f"{where}.params[{index}]")
-        for index, item in enumerate(_require_list(mapping.get("params", []), f"{where}.params"))
+        _param(item, at.child("params").child(f"[{index}]"))
+        for index, item in enumerate(_require_list(mapping.get("params", []), at.child("params")))
     ]
     return Unit(
         name=name,
         fields=fields,
         params=params,
-        confirm=_optional_expr(mapping, "confirm", where),
-        reject=_optional_expr(mapping, "reject", where),
-        emit=_optional_emit(mapping, where),
-        doc=_optional_str(mapping, "doc", where),
+        confirm=_optional_expr(mapping, "confirm", at),
+        reject=_optional_expr(mapping, "reject", at),
+        emit=_optional_emit(mapping, at),
+        doc=_optional_str(mapping, "doc", at),
     )
 
 
-def _optional_expr(mapping: Mapping[str, Any], key: str, where: str) -> Expr | None:
+def _optional_expr(mapping: Mapping[str, Any], key: str, at: _At) -> Expr | None:
     """Read an optional expression key."""
     if key not in mapping or mapping[key] is None:
         return None
-    return _expr(mapping[key], f"{where}.{key}")
+    return _expr(mapping[key], at.child(key))
 
 
-def _optional_emit(mapping: Mapping[str, Any], where: str) -> Emit | None:
+def _optional_emit(mapping: Mapping[str, Any], at: _At) -> Emit | None:
     """Read an optional emit key."""
     if "emit" not in mapping or mapping["emit"] is None:
         return None
-    return _member(Emit, mapping["emit"], f"{where}.emit")
+    return _member(Emit, mapping["emit"], at.child("emit"))
 
 
-def _param(document: object, where: str) -> Param:
+def _param(document: object, at: _At) -> Param:
     """Build one unit parameter."""
-    mapping = _require_mapping(document, where)
-    _reject_unknown(mapping, _PARAM_KEYS, where)
+    at = at.within(document)
+    mapping = _require_mapping(document, at)
+    _reject_unknown(mapping, _PARAM_KEYS, at)
     for required in ("name", "type"):
         if required not in mapping:
-            msg = f"{where}: missing required key {required!r}"
-            raise SpecError(msg)
+            msg = f"missing required key {required!r}"
+            raise SpecError(msg, at.loc)
     return Param(
-        name=_require_str(mapping["name"], f"{where}.name"),
-        type=_member(ExprType, mapping["type"], f"{where}.type"),
+        name=_require_str(mapping["name"], at.child("name")),
+        type=_member(ExprType, mapping["type"], at.child("type")),
     )
 
 
-def _field(document: object, where: str) -> Field:
+def _field(document: object, at: _At, owner: str) -> Field:
     """Build one field, from either spelling of its type.
 
     The kind key may be **lifted into the field** — ``{name: n, int: {bits: 8}}``
@@ -482,49 +642,66 @@ def _field(document: object, where: str) -> Field:
     and the type keys do not overlap, and it costs no strictness: exactly one
     key must name a kind, zero is an error, two is an error, and a key in
     neither set is still an error.
+
+    Args:
+        document: The field's mapping.
+        at: Where in the document this is.
+        owner: The unit's path, which the checker reports this field under.
+
+    Returns:
+        The field.
+
+    Raises:
+        SpecError: If the mapping is malformed.
+
     """
-    mapping = _require_mapping(document, where)
-    _reject_unknown(mapping, _FIELD_KEYS | _TYPE_KEYS, where)
+    at = at.within(document)
+    mapping = _require_mapping(document, at)
+    _reject_unknown(mapping, _FIELD_KEYS | _TYPE_KEYS, at)
     if "name" not in mapping:
-        msg = f"{where}: missing required key 'name'; use 'name: null' for an anonymous field"
-        raise SpecError(msg)
+        msg = "missing required key 'name'; use 'name: null' for an anonymous field"
+        raise SpecError(msg, at.loc)
     raw_name = mapping["name"]
-    name = None if raw_name is None else _require_str(raw_name, f"{where}.name")
+    name = None if raw_name is None else _require_str(raw_name, at.child("name"))
+    if name is not None:
+        # An anonymous field is recorded under nothing: the checker has no name
+        # to report it by either, so there is no path to key it on.
+        at.record(f"{owner}.{name}")
     return Field(
         name=name,
-        type=_declared_type(mapping, where),
-        condition=_optional_expr(mapping, "condition", where),
-        repeat=_repeat(mapping["repeat"], f"{where}.repeat") if mapping.get("repeat") else None,
-        emit=_optional_emit(mapping, where),
-        doc=_optional_str(mapping, "doc", where),
+        type=_declared_type(mapping, at),
+        condition=_optional_expr(mapping, "condition", at),
+        repeat=_repeat(mapping["repeat"], at.child("repeat")) if mapping.get("repeat") else None,
+        emit=_optional_emit(mapping, at),
+        doc=_optional_str(mapping, "doc", at),
     )
 
 
-def _declared_type(mapping: Mapping[str, Any], where: str) -> FieldType:
+def _declared_type(mapping: Mapping[str, Any], at: _At) -> FieldType:
     """Read a field's type, from ``type:`` or from a lifted kind key."""
     lifted = sorted(set(mapping) & _TYPE_KEYS)
     if "type" in mapping:
         if lifted:
             listed = ", ".join(repr(key) for key in lifted)
             msg = (
-                f"{where}: a field states its type once; it has 'type' and also "
+                "a field states its type once; it has 'type' and also "
                 f"{listed}. Drop one."
             )
-            raise SpecError(msg)
-        return _field_type(mapping["type"], f"{where}.type")
+            raise SpecError(msg, at.loc)
+        return _field_type(mapping["type"], at.child("type"))
     if len(lifted) > 1:
         listed = ", ".join(repr(key) for key in lifted)
-        msg = f"{where}: a field states its type once, and this names {listed}"
-        raise SpecError(msg)
+        msg = f"a field states its type once, and this names {listed}"
+        raise SpecError(msg, at.loc)
     if not lifted:
         known = ", ".join(sorted(_TYPE_KEYS))
         msg = (
-            f"{where}: missing required key 'type'; a field must say what it "
+            "missing required key 'type'; a field must say what it "
             f"decodes, either as 'type:' or as one of: {known}"
         )
-        raise SpecError(msg)
+        raise SpecError(msg, at.loc)
     tag = lifted[0]
-    return _field_type({tag: mapping[tag]}, where)
+    return _field_type({tag: mapping[tag]}, at)
 
 
 # --- types, sizes, repeats -------------------------------------------------
@@ -559,11 +736,12 @@ _SIZE_KINDS = frozenset({"fixed", "expr", "terminated", "remaining", "fill"})
 _REPEAT_KINDS = frozenset({"count", "until", "to_end"})
 
 
-def _field_type(document: object, where: str) -> FieldType:
+def _field_type(document: object, at: _At) -> FieldType:
     """Build a field type from its single-key tagged mapping."""
-    mapping = _require_mapping(document, where)
-    tag, value = _tagged(mapping, where, _TYPE_KEYS)
-    site = f"{where}.{tag}"
+    at = at.within(document)
+    mapping = _require_mapping(document, at)
+    tag, value = _tagged(mapping, at, _TYPE_KEYS)
+    site = at.child(tag)
     if tag == "bits":
         # The alias, and it takes the number directly: `bits` *is* the key it
         # would otherwise name, so a mapping under it would be `bits: {bits: 4}`.
@@ -579,7 +757,9 @@ def _field_type(document: object, where: str) -> FieldType:
         encoding = body.get("encoding")
         return StringType(
             size=_body_size(body, site, _STRING_KEYS),
-            encoding="utf-8" if encoding is None else _require_str(encoding, f"{site}.encoding"),
+            encoding=(
+                "utf-8" if encoding is None else _require_str(encoding, site.child("encoding"))
+            ),
         )
     if tag == "unit":
         return _unit_ref(value, site)
@@ -592,7 +772,7 @@ def _field_type(document: object, where: str) -> FieldType:
     return Computed(expr=_expr(value, site))
 
 
-def _body_size(document: object, where: str, allowed: frozenset[str]) -> SizeSpec:
+def _body_size(document: object, at: _At, allowed: frozenset[str]) -> SizeSpec:
     r"""Read how far a ``bytes`` or ``string`` value extends.
 
     Three spellings, and the last two are the reason this is one function.
@@ -620,7 +800,7 @@ def _body_size(document: object, where: str, allowed: frozenset[str]) -> SizeSpe
 
     Args:
         document: The type's body, or a bare scalar.
-        where: Dotted location, for error messages.
+        at: Where in the document this is.
         allowed: The keys this type's body accepts.
 
     Returns:
@@ -631,70 +811,73 @@ def _body_size(document: object, where: str, allowed: frozenset[str]) -> SizeSpe
             terminator key and no delimiter.
 
     """
+    at = at.within(document)
     if isinstance(document, bool) or not isinstance(document, dict):
-        return _size(document, f"{where}.size")
-    _reject_unknown(document, allowed, where)
+        return _size(document, at.child("size"))
+    _reject_unknown(document, allowed, at)
     delimited = sorted(set(document) & _TERMINATED_KEYS)
     if "size" in document:
         if delimited:
             listed = ", ".join(repr(key) for key in delimited)
             msg = (
-                f"{where}: a value states its extent once; it has 'size' and also "
+                "a value states its extent once; it has 'size' and also "
                 f"{listed}. Put the terminator under size: {{terminated: ...}}, "
                 "or drop size."
             )
-            raise SpecError(msg)
-        return _size(document["size"], f"{where}.size")
+            raise SpecError(msg, at.loc)
+        return _size(document["size"], at.child("size"))
     if not delimited:
-        msg = f"{where}: missing required key 'size'"
-        raise SpecError(msg)
+        msg = "missing required key 'size'"
+        raise SpecError(msg, at.loc)
     if "delimiter" not in document:
         listed = ", ".join(repr(key) for key in delimited)
         verb = "means" if len(delimited) == 1 else "mean"
         msg = (
-            f"{where}: {listed} only {verb} something beside a 'delimiter', and "
+            f"{listed} only {verb} something beside a 'delimiter', and "
             "there is none here"
         )
-        raise SpecError(msg)
-    return _terminated(document, where)
+        raise SpecError(msg, at.loc)
+    return _terminated(document, at)
 
 
-def _int_type(document: object, where: str) -> IntType:
+def _int_type(document: object, at: _At) -> IntType:
     """Build an integer type, accepting a bare width."""
+    at = at.within(document)
     if isinstance(document, bool) or not isinstance(document, dict):
-        return IntType(bits=_require_int(document, f"{where}.bits"))
-    mapping = _require_mapping(document, where)
-    _reject_unknown(mapping, _INT_KEYS, where)
+        return IntType(bits=_require_int(document, at.child("bits")))
+    mapping = _require_mapping(document, at)
+    _reject_unknown(mapping, _INT_KEYS, at)
     if "bits" not in mapping:
-        msg = f"{where}: missing required key 'bits'"
-        raise SpecError(msg)
+        msg = "missing required key 'bits'"
+        raise SpecError(msg, at.loc)
     endian = mapping.get("endian")
     enum = mapping.get("enum")
     return IntType(
-        bits=_require_int(mapping["bits"], f"{where}.bits"),
-        signed=_require_bool(mapping.get("signed", False), f"{where}.signed"),
-        endian=Endian.BIG if endian is None else _member(Endian, endian, f"{where}.endian"),
-        enum=None if enum is None else _require_str(enum, f"{where}.enum"),
+        bits=_require_int(mapping["bits"], at.child("bits")),
+        signed=_require_bool(mapping.get("signed", False), at.child("signed")),
+        endian=Endian.BIG if endian is None else _member(Endian, endian, at.child("endian")),
+        enum=None if enum is None else _require_str(enum, at.child("enum")),
     )
 
 
-def _unit_ref(document: object, where: str) -> UnitRef:
+def _unit_ref(document: object, at: _At) -> UnitRef:
     """Build a unit reference, accepting the bare-name shorthand."""
+    at = at.within(document)
     if isinstance(document, str):
         return UnitRef(unit=document)
-    mapping = _require_mapping(document, where)
-    _reject_unknown(mapping, frozenset({"name", "args"}), where)
+    mapping = _require_mapping(document, at)
+    _reject_unknown(mapping, frozenset({"name", "args"}), at)
     if "name" not in mapping:
-        msg = f"{where}: missing required key 'name'"
-        raise SpecError(msg)
-    args = _require_list(mapping.get("args", []), f"{where}.args")
+        msg = "missing required key 'name'"
+        raise SpecError(msg, at.loc)
+    args = _require_list(mapping.get("args", []), at.child("args"))
     return UnitRef(
-        unit=_require_str(mapping["name"], f"{where}.name"),
-        args=[_expr(item, f"{where}.args[{index}]") for index, item in enumerate(args)],
+        unit=_require_str(mapping["name"], at.child("name")),
+        args=[_expr(item, at.child("args").child(f"[{index}]")) for index, item in enumerate(args)],
     )
 
 
-def _select(document: object, where: str) -> Select:
+def _select(document: object, at: _At) -> Select:
     """Build a select: which repetition, which element, and what to take from it.
 
     All four keys are required, ``default`` included, and the error names every
@@ -707,7 +890,7 @@ def _select(document: object, where: str) -> Select:
 
     Args:
         document: The mapping under the ``select`` tag.
-        where: Dotted location, for error messages.
+        at: Where in the document this is.
 
     Returns:
         The select.
@@ -716,32 +899,33 @@ def _select(document: object, where: str) -> Select:
         SpecError: If a key is missing, unknown, or the wrong shape.
 
     """
-    mapping = _require_mapping(document, where)
-    _reject_unknown(mapping, _SELECT_KEYS, where)
+    at = at.within(document)
+    mapping = _require_mapping(document, at)
+    _reject_unknown(mapping, _SELECT_KEYS, at)
     missing = sorted(_SELECT_REQUIRED - set(mapping))
     if missing:
         listed = ", ".join(repr(key) for key in missing)
-        msg = f"{where}: missing required key(s) {listed}"
-        raise SpecError(msg)
+        msg = f"missing required key(s) {listed}"
+        raise SpecError(msg, at.loc)
     return Select(
-        source=_require_str(mapping["from"], f"{where}.from"),
-        where=_expr(mapping["where"], f"{where}.where"),
-        value=_expr(mapping["value"], f"{where}.value"),
-        default=_expr(mapping["default"], f"{where}.default"),
-        alias=_optional_str(mapping, "as", where),
+        source=_require_str(mapping["from"], at.child("from")),
+        where=_expr(mapping["where"], at.child("where")),
+        value=_expr(mapping["value"], at.child("value")),
+        default=_expr(mapping["default"], at.child("default")),
+        alias=_optional_str(mapping, "as", at),
     )
 
 
-def _pointer(document: object, where: str) -> Pointer:
+def _pointer(document: object, at: _At) -> Pointer:
     """Build a pointer: where to read, and what is there.
 
     Both keys are required. There is deliberately no shorthand and no default
-    offset space — ``at`` is always message-relative, so there is nothing for
-    a spec to mean by accident.
+    offset space — the ``at`` key is always message-relative, so there is
+    nothing for a spec to mean by accident.
 
     Args:
         document: The mapping under the ``pointer`` tag.
-        where: Path to this node, for error messages.
+        at: Where in the document this is.
 
     Returns:
         The pointer.
@@ -750,41 +934,44 @@ def _pointer(document: object, where: str) -> Pointer:
         SpecError: If a key is missing or unknown.
 
     """
-    mapping = _require_mapping(document, where)
-    _reject_unknown(mapping, _POINTER_KEYS, where)
+    at = at.within(document)
+    mapping = _require_mapping(document, at)
+    _reject_unknown(mapping, _POINTER_KEYS, at)
     for required in ("at", "type"):
         if required not in mapping:
-            msg = f"{where}: missing required key {required!r}"
-            raise SpecError(msg)
+            msg = f"missing required key {required!r}"
+            raise SpecError(msg, at.loc)
     return Pointer(
-        at=_expr(mapping["at"], f"{where}.at"),
-        type=_field_type(mapping["type"], f"{where}.type"),
+        at=_expr(mapping["at"], at.child("at")),
+        type=_field_type(mapping["type"], at.child("type")),
     )
 
 
-def _switch(document: object, where: str) -> Switch:
+def _switch(document: object, at: _At) -> Switch:
     """Build a switch, naming the old dispatch key if it is still being used."""
-    raw = _require_any_mapping(document, where)
-    _reject_renamed_dispatch(raw, where)
-    mapping = _require_mapping(raw, where)
-    _reject_unknown(mapping, _SWITCH_KEYS, where)
+    at = at.within(document)
+    raw = _require_any_mapping(document, at)
+    _reject_renamed_dispatch(raw, at)
+    mapping = _require_mapping(raw, at)
+    _reject_unknown(mapping, _SWITCH_KEYS, at)
     for required in ("dispatch", "cases"):
         if required not in mapping:
-            msg = f"{where}: missing required key {required!r}"
-            raise SpecError(msg)
-    cases_doc = _require_any_mapping(mapping["cases"], f"{where}.cases")
+            msg = f"missing required key {required!r}"
+            raise SpecError(msg, at.loc)
+    cases_doc = _require_any_mapping(mapping["cases"], at.child("cases"))
     cases: dict[int | str, FieldType] = {}
     for key, value in cases_doc.items():
-        cases[_case_key(key)] = _field_type(value, f"{where}.cases.{key}")
+        site = at.child("cases").child(key)
+        cases[_case_key(key, site)] = _field_type(value, site)
     default = mapping.get("default")
     return Switch(
-        dispatch=_expr(mapping["dispatch"], f"{where}.dispatch"),
+        dispatch=_expr(mapping["dispatch"], at.child("dispatch")),
         cases=cases,
-        default=None if default is None else _field_type(default, f"{where}.default"),
+        default=None if default is None else _field_type(default, at.child("default")),
     )
 
 
-def _reject_renamed_dispatch(mapping: Mapping[Any, Any], where: str) -> None:
+def _reject_renamed_dispatch(mapping: Mapping[Any, Any], at: _At) -> None:
     """Name the rename for a spec still written with the old ``on`` key.
 
     ``on`` was the dispatch key until 0.1.0 and is now ``dispatch``. Both
@@ -800,20 +987,31 @@ def _reject_renamed_dispatch(mapping: Mapping[Any, Any], where: str) -> None:
     for key in (True, "on"):
         if key in mapping:
             msg = (
-                f"{where}: the switch dispatch key is 'dispatch'; it was 'on' "
+                "the switch dispatch key is 'dispatch'; it was 'on' "
                 "until 0.1.0 and was renamed because YAML 1.1 reads an unquoted "
                 "on: as the boolean true. Write dispatch: instead."
             )
-            raise SpecError(msg)
+            raise SpecError(msg, at.loc)
 
 
-def _case_key(key: object) -> int | str:
+def _case_key(key: object, at: _At) -> int | str:
     """Read a case key as an integer where it looks like one.
 
     JSON object keys are always strings, so ``{"1": ...}`` and YAML's ``{1:
     ...}`` have to mean the same thing. Whether the key is *correct* is the
     checker's call, against the type dispatched on — including a ``true:`` key
     YAML invented, which survives to be reported there rather than here.
+
+    Args:
+        key: The case key as authored.
+        at: Where in the document this is.
+
+    Returns:
+        The key, as an integer where it reads as one.
+
+    Raises:
+        SpecError: If the key is neither an integer nor a string.
+
     """
     if isinstance(key, (bool, int)):
         return key
@@ -823,22 +1021,23 @@ def _case_key(key: object) -> int | str:
         except ValueError:
             return key
     msg = f"switch case key {key!r} must be an integer or a string"
-    raise SpecError(msg)
+    raise SpecError(msg, at.loc)
 
 
-def _size(document: object, where: str) -> SizeSpec:
+def _size(document: object, at: _At) -> SizeSpec:
     """Build a size spec, accepting a bare integer as ``fixed``."""
+    at = at.within(document)
     if document is None:
-        msg = f"{where}: missing required key 'size'"
-        raise SpecError(msg)
+        msg = "missing required key 'size'"
+        raise SpecError(msg, at.loc)
     if isinstance(document, bool):
-        msg = f"{where}: expected a size{_yaml_hint(document)}"
-        raise SpecError(msg)
+        msg = f"expected a size{_yaml_hint(document)}"
+        raise SpecError(msg, at.loc)
     if isinstance(document, int):
         return Fixed(count=document)
-    mapping = _require_mapping(document, where)
-    tag, value = _tagged(mapping, where, _SIZE_KINDS)
-    site = f"{where}.{tag}"
+    mapping = _require_mapping(document, at)
+    tag, value = _tagged(mapping, at, _SIZE_KINDS)
+    site = at.child(tag)
     if tag == "fixed":
         return Fixed(count=_require_int(value, site))
     if tag == "expr":
@@ -850,47 +1049,50 @@ def _size(document: object, where: str) -> SizeSpec:
     body = _require_mapping(value, site)
     _reject_unknown(body, _TERMINATED_KEYS, site)
     if "delimiter" not in body:
-        msg = f"{site}: missing required key 'delimiter'"
-        raise SpecError(msg)
+        msg = "missing required key 'delimiter'"
+        raise SpecError(msg, site.loc)
     return _terminated(body, site)
 
 
-def _terminated(body: Mapping[str, Any], where: str) -> Terminated:
+def _terminated(body: Mapping[str, Any], at: _At) -> Terminated:
     """Build a delimited size from the keys ``delimiter`` heads.
 
     One reader for both spellings — the long ``size: {terminated: {…}}`` and the
     ``delimiter:`` written beside ``size:`` — so a shorthand cannot come to mean
     anything the long form does not.
     """
+    at = at.within(body)
     within = body.get("within")
     return Terminated(
-        delimiter=_delimiter(body["delimiter"], f"{where}.delimiter"),
-        consume=_require_bool(body.get("consume", True), f"{where}.consume"),
-        required=_require_bool(body.get("required", True), f"{where}.required"),
-        within=None if within is None else _delimiter(within, f"{where}.within"),
+        delimiter=_delimiter(body["delimiter"], at.child("delimiter")),
+        consume=_require_bool(body.get("consume", True), at.child("consume")),
+        required=_require_bool(body.get("required", True), at.child("required")),
+        within=None if within is None else _delimiter(within, at.child("within")),
     )
 
 
-def _delimiter(document: object, where: str) -> bytes:
+def _delimiter(document: object, at: _At) -> bytes:
     """Read a delimiter, as text or as a list of byte values."""
+    at = at.within(document)
     if isinstance(document, str):
         return document.encode("utf-8")
-    values = _require_list(document, where)
+    values = _require_list(document, at)
     out = bytearray()
     for index, item in enumerate(values):
-        value = _require_int(item, f"{where}[{index}]")
+        value = _require_int(item, at.child(f"[{index}]"))
         if not 0 <= value <= 0xFF:
-            msg = f"{where}[{index}]: byte value must be 0..255, got {value}"
-            raise SpecError(msg)
+            msg = f"byte value must be 0..255, got {value}"
+            raise SpecError(msg, at.child(f"[{index}]").loc)
         out.append(value)
     return bytes(out)
 
 
-def _repeat(document: object, where: str) -> Repeat:
+def _repeat(document: object, at: _At) -> Repeat:
     """Build a repeat clause."""
-    mapping = _require_mapping(document, where)
-    tag, value = _tagged(mapping, where, _REPEAT_KINDS)
-    site = f"{where}.{tag}"
+    at = at.within(document)
+    mapping = _require_mapping(document, at)
+    tag, value = _tagged(mapping, at, _REPEAT_KINDS)
+    site = at.child(tag)
     if tag == "count":
         return Count(expr=_expr(value, site))
     if tag == "until":
@@ -898,7 +1100,7 @@ def _repeat(document: object, where: str) -> Repeat:
     return ToEnd()
 
 
-def _until(document: object, where: str) -> Until:
+def _until(document: object, at: _At) -> Until:
     """Build an ``until``, accepting the bare-expression shorthand.
 
     ``expr`` is the principal key, so ``{until: "x == 0"}`` is
@@ -906,14 +1108,15 @@ def _until(document: object, where: str) -> Until:
     ``fixed``. The long form exists to carry ``as``, which names the element
     the condition tests rather than borrowing the repeated field's own name.
     """
+    at = at.within(document)
     if not isinstance(document, dict):
-        return Until(expr=_expr(document, where))
-    mapping = _require_mapping(document, where)
-    _reject_unknown(mapping, _UNTIL_KEYS, where)
+        return Until(expr=_expr(document, at))
+    mapping = _require_mapping(document, at)
+    _reject_unknown(mapping, _UNTIL_KEYS, at)
     if "expr" not in mapping:
-        msg = f"{where}: missing required key 'expr'"
-        raise SpecError(msg)
+        msg = "missing required key 'expr'"
+        raise SpecError(msg, at.loc)
     return Until(
-        expr=_expr(mapping["expr"], f"{where}.expr"),
-        alias=_optional_str(mapping, "as", where),
+        expr=_expr(mapping["expr"], at.child("expr")),
+        alias=_optional_str(mapping, "as", at),
     )

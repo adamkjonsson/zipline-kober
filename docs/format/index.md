@@ -16,11 +16,14 @@ these pages describe what an author actually types.
 
 The schema is **strict**: an unknown key is an error rather than something
 ignored, because a misspelled key that loads and does nothing is a decoder
-silently doing the wrong thing. Errors carry a path:
+silently doing the wrong thing. Errors carry the file, the line, and the path:
 
 ```
-spec.units.message.fields[0].type: unknown kind 'enum'; expected one of: bytes, computed, int, pointer, select, string, switch, unit
+dns.yaml:27: spec.units.message.fields[0].type: unknown kind 'enum'; expected one of: bytes, computed, int, pointer, select, string, switch, unit
 ```
+
+A spec read from JSON, or built as a mapping in memory, has no line to report —
+`json` gives no positions — so those carry the path alone.
 
 Two complete specs ship with the project and are exercised by the test suite,
 so they cannot drift:

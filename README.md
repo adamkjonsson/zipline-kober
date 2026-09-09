@@ -27,15 +27,17 @@ $ kober check dns.yaml
 dns 1.0: ok
 
 $ kober check broken.yaml
-error: bad.message.body: size: 'length' is declared later in unit 'message';
-  a field may only reference fields decoded before it
-error: bad.message.length: unknown enum 'nope'; declared enums: none
-warning: bad.orphan: unit is never referenced from the entry unit
+error: broken.yaml:24: bad.message.body: size: 'length' is declared later in
+  unit 'message'; a field may only reference fields decoded before it
+error: broken.yaml:31: bad.message.length: unknown enum 'nope'; declared enums: none
+warning: broken.yaml:52: bad.orphan: unit is never referenced from the entry unit
 bad 1.0: 2 error(s), 1 warning(s)
 ```
 
 It reports every fault it can see rather than stopping at the first, so a spec
-gets fixed in one pass. `--strict` makes warnings fail too.
+gets fixed in one pass, and each one names the line to fix. `--strict` makes
+warnings fail too. JSON reports no positions, so a spec read from JSON — or
+built as a mapping in memory — carries the path alone.
 
 ### What a spec can say
 

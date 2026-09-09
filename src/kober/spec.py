@@ -31,6 +31,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from kober.errors import SpecError
+from kober.source import SourceMap
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -626,6 +627,10 @@ class Spec:
         enums: Every enum, by name.
         input: The stream shape this spec is written against.
         doc: Free-text description.
+        sources: Where the spec was read from, for the checker's messages.
+            **Not compared**: it says where a spec came from, not what it is,
+            and two spellings of the same spec must stay equal even though
+            their lines differ. See :mod:`kober.source`.
 
     """
 
@@ -636,6 +641,7 @@ class Spec:
     enums: Mapping[str, EnumDef] = field(default_factory=dict)
     input: InputShape = InputShape.EITHER
     doc: str | None = None
+    sources: SourceMap = field(default_factory=SourceMap, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         for label, value in (("name", self.name), ("version", self.version)):
@@ -659,11 +665,12 @@ class Spec:
     # module does the parsing.
 
     @classmethod
-    def from_dict(cls, document: Mapping[str, object]) -> Spec:
+    def from_dict(cls, document: Mapping[str, object], *, source: str | None = None) -> Spec:
         """Build a spec from an already-parsed mapping.
 
         Args:
             document: The spec document.
+            source: The file it was read from, for error messages.
 
         Returns:
             The spec. It is well formed; run :func:`kober.check.check` to
@@ -675,14 +682,15 @@ class Spec:
         """
         from kober.loader import from_dict
 
-        return from_dict(document)
+        return from_dict(document, source=source)
 
     @classmethod
-    def from_json(cls, text: str) -> Spec:
+    def from_json(cls, text: str, *, source: str | None = None) -> Spec:
         """Build a spec from JSON text.
 
         Args:
             text: The JSON document.
+            source: The file it was read from, for error messages.
 
         Returns:
             The spec.
@@ -693,14 +701,15 @@ class Spec:
         """
         from kober.loader import from_json
 
-        return from_json(text)
+        return from_json(text, source=source)
 
     @classmethod
-    def from_yaml(cls, text: str) -> Spec:
+    def from_yaml(cls, text: str, *, source: str | None = None) -> Spec:
         """Build a spec from YAML text, which needs the ``yaml`` extra.
 
         Args:
             text: The YAML document.
+            source: The file it was read from, for error messages.
 
         Returns:
             The spec.
@@ -711,7 +720,7 @@ class Spec:
         """
         from kober.loader import from_yaml
 
-        return from_yaml(text)
+        return from_yaml(text, source=source)
 
     @classmethod
     def from_file(cls, path: str | Path) -> Spec:

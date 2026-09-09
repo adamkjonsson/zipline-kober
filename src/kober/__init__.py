@@ -84,6 +84,7 @@ from kober.runtime import (
     read_int_le,
     span,
 )
+from kober.source import Location, SourceMap
 from kober.spec import (
     MAX_INT_BITS,
     BytesType,
@@ -151,6 +152,7 @@ __all__ = [
     "IntType",
     "Kind",
     "KoberError",
+    "Location",
     "Names",
     "Node",
     "NodeStatus",
@@ -165,6 +167,7 @@ __all__ = [
     "Severity",
     "Sink",
     "SizeSpec",
+    "SourceMap",
     "Spanned",
     "Spec",
     "SpecError",

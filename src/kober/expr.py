@@ -41,6 +41,8 @@ from kober.errors import EvalError, ExprError
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from kober.source import Location
+
 
 class ExprType(Enum):
     """The type of an expression's value.
@@ -341,12 +343,12 @@ class Scope(Protocol):
         ...
 
 
-def parse(source: str, where: str | None = None) -> Expr:
+def parse(source: str, where: Location | None = None) -> Expr:
     """Parse expression text to an AST.
 
     Args:
         source: The expression as authored.
-        where: Dotted path to the field or unit it belongs to, for messages.
+        where: Where the expression belongs, for messages.
 
     Returns:
         The parsed expression.
@@ -371,7 +373,7 @@ def parse(source: str, where: str | None = None) -> Expr:
     return _translate(tree.body, source, where)
 
 
-def _translate(node: ast.expr, source: str, where: str | None) -> Expr:
+def _translate(node: ast.expr, source: str, where: Location | None) -> Expr:
     """Translate one whitelisted Python AST node to ours."""
     if isinstance(node, ast.Constant):
         return _translate_constant(node, source, where)
@@ -403,7 +405,7 @@ def _translate(node: ast.expr, source: str, where: str | None) -> Expr:
     raise ExprError(msg, source, where)
 
 
-def _translate_call(node: ast.Call, source: str, where: str | None) -> Expr:
+def _translate_call(node: ast.Call, source: str, where: Location | None) -> Expr:
     """Translate a call, refusing anything outside :data:`BUILTINS`.
 
     The refusal is by *name*, against a closed table, which is what keeps "a
@@ -436,7 +438,7 @@ def _translate_call(node: ast.Call, source: str, where: str | None) -> Expr:
     )
 
 
-def _translate_constant(node: ast.Constant, source: str, where: str | None) -> Expr:
+def _translate_constant(node: ast.Constant, source: str, where: Location | None) -> Expr:
     """Translate a literal, refusing the types the language has no use for."""
     value = node.value
     # bool before int: bool is a subclass of int, and True is Constant(True).
@@ -456,7 +458,7 @@ def _translate_constant(node: ast.Constant, source: str, where: str | None) -> E
     raise ExprError(msg, source, where)
 
 
-def _translate_compare(node: ast.Compare, source: str, where: str | None) -> Expr:
+def _translate_compare(node: ast.Compare, source: str, where: Location | None) -> Expr:
     """Translate a comparison, refusing Python's chained form."""
     if len(node.ops) != 1:
         msg = (
@@ -473,7 +475,7 @@ def _translate_compare(node: ast.Compare, source: str, where: str | None) -> Exp
 
 
 def _lookup(
-    table: Mapping[Any, str], key: type[ast.AST], node: ast.AST, source: str, where: str | None
+    table: Mapping[Any, str], key: type[ast.AST], node: ast.AST, source: str, where: Location | None
 ) -> str:
     """Look an operator up in its table, refusing it by name if absent."""
     try:
@@ -483,7 +485,7 @@ def _lookup(
         raise ExprError(msg, source, where) from None
 
 
-def _flatten_path(node: ast.expr, source: str, where: str | None) -> tuple[str, ...]:
+def _flatten_path(node: ast.expr, source: str, where: Location | None) -> tuple[str, ...]:
     """Flatten ``a.b.c`` into ``("a", "b", "c")``."""
     parts: list[str] = []
     current = node
@@ -547,14 +549,14 @@ def _describe(node: ast.AST) -> str:
     return f"{type(node).__name__}"
 
 
-def infer_type(expr: Expr, scope: Scope, source: str, where: str | None = None) -> ExprType:
+def infer_type(expr: Expr, scope: Scope, source: str, where: Location | None = None) -> ExprType:
     """Infer an expression's type, resolving references through ``scope``.
 
     Args:
         expr: The parsed expression.
         scope: Resolver for reference paths.
         source: The expression as authored, for error messages.
-        where: Dotted path to the field or unit it belongs to.
+        where: Where the expression belongs, for messages.
 
     Returns:
         The expression's type.
@@ -583,7 +585,7 @@ def infer_type(expr: Expr, scope: Scope, source: str, where: str | None = None) 
     return _infer_compare(expr, scope, source, where)
 
 
-def _infer_call(expr: Call, scope: Scope, source: str, where: str | None) -> ExprType:
+def _infer_call(expr: Call, scope: Scope, source: str, where: Location | None) -> ExprType:
     """Type a builtin call. Arity was settled at parse time."""
     builtin = BUILTINS[expr.name]
     for index, argument in enumerate(expr.args):
@@ -594,7 +596,7 @@ def _infer_call(expr: Call, scope: Scope, source: str, where: str | None) -> Exp
 
 
 def _require(
-    actual: ExprType, wanted: ExprType, context: str, source: str, where: str | None
+    actual: ExprType, wanted: ExprType, context: str, source: str, where: Location | None
 ) -> None:
     """Raise unless ``actual`` is ``wanted``."""
     if actual is not wanted:
@@ -602,7 +604,7 @@ def _require(
         raise ExprError(msg, source, where)
 
 
-def _infer_unary(expr: UnaryOp, scope: Scope, source: str, where: str | None) -> ExprType:
+def _infer_unary(expr: UnaryOp, scope: Scope, source: str, where: Location | None) -> ExprType:
     """Type a unary operator."""
     operand = infer_type(expr.operand, scope, source, where)
     wanted = ExprType.BOOL if expr.op == "not" else ExprType.INT
@@ -610,7 +612,7 @@ def _infer_unary(expr: UnaryOp, scope: Scope, source: str, where: str | None) ->
     return wanted
 
 
-def _infer_binary(expr: BinOp, scope: Scope, source: str, where: str | None) -> ExprType:
+def _infer_binary(expr: BinOp, scope: Scope, source: str, where: Location | None) -> ExprType:
     """Type an arithmetic or bitwise operator: integers only, both sides."""
     left = infer_type(expr.left, scope, source, where)
     right = infer_type(expr.right, scope, source, where)
@@ -619,7 +621,7 @@ def _infer_binary(expr: BinOp, scope: Scope, source: str, where: str | None) -> 
     return ExprType.INT
 
 
-def _infer_boolop(expr: BoolOp, scope: Scope, source: str, where: str | None) -> ExprType:
+def _infer_boolop(expr: BoolOp, scope: Scope, source: str, where: Location | None) -> ExprType:
     """Type ``and``/``or``: every operand must already be boolean.
 
     No truthiness. A spec saying ``qdcount and ...`` is either a mistake or a
@@ -632,7 +634,7 @@ def _infer_boolop(expr: BoolOp, scope: Scope, source: str, where: str | None) ->
     return ExprType.BOOL
 
 
-def _infer_compare(expr: Compare, scope: Scope, source: str, where: str | None) -> ExprType:
+def _infer_compare(expr: Compare, scope: Scope, source: str, where: Location | None) -> ExprType:
     """Type a comparison: ordering is integer-only, equality is same-type."""
     left = infer_type(expr.left, scope, source, where)
     right = infer_type(expr.right, scope, source, where)

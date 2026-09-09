@@ -82,8 +82,8 @@ Because a later field has not been decoded when the expression runs. This is
 checked when the spec loads, not when it fails:
 
 ```
-error: dns.message.body: size: 'length' is declared later in unit 'message';
-  a field may only reference fields decoded before it
+error: dns.yaml:24: dns.message.body: size: 'length' is declared later in
+  unit 'message'; a field may only reference fields decoded before it
 ```
 
 `parent` obeys the same rule from the referencing site's position, and is

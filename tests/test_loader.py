@@ -870,3 +870,142 @@ def test_an_unknown_key_in_an_until_is_refused():
         sole_field(
             {"name": "a", "bits": 8, "repeat": {"until": {"expr": "a == 0", "az": "e"}}}
         )
+
+
+# --- source locations ------------------------------------------------------
+#
+# A spec is hand-written YAML, so a fault that names the construct and not the
+# line is a description rather than a way to find it. These check the line is
+# right, and that the paths without one still say everything they used to.
+
+SPEC_YAML = """\
+name: dns
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: id, bits: 16}
+      - name: flags
+        bits: 8
+      - {name: bad, bits: wide}
+"""
+
+
+def test_a_yaml_fault_carries_its_line():
+    with pytest.raises(SpecError) as caught:
+        from_yaml(SPEC_YAML, source="dns.yaml")
+    assert caught.value.loc is not None
+    assert caught.value.loc.line == 10
+    assert caught.value.loc.source == "dns.yaml"
+    assert str(caught.value).startswith("dns.yaml:10: spec.units.message.fields[2]")
+
+
+def test_the_line_is_of_the_construct_not_of_the_document():
+    """A fault in a block-style field reports that field, not the unit."""
+    text = SPEC_YAML.replace("        bits: 8", "        bits: wide")
+    with pytest.raises(SpecError) as caught:
+        from_yaml(text, source="dns.yaml")
+    assert caught.value.loc is not None
+    assert caught.value.loc.line == 8
+
+
+def test_a_fault_in_a_nested_unit_carries_the_nested_line():
+    text = """\
+name: dns
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: q, unit: question}
+  question:
+    fields:
+      - {name: qtype, bits: notanumber}
+"""
+    with pytest.raises(SpecError) as caught:
+        from_yaml(text, source="dns.yaml")
+    assert caught.value.loc is not None
+    assert caught.value.loc.line == 10
+
+
+def test_a_fault_under_a_block_scalar_reports_the_field_it_is_in():
+    text = """\
+name: dns
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - name: id
+        doc: >
+          A long description
+          spread over lines.
+        bits: wide
+"""
+    with pytest.raises(SpecError) as caught:
+        from_yaml(text, source="dns.yaml")
+    assert caught.value.loc is not None
+    assert caught.value.loc.line == 7
+
+
+def test_from_file_names_the_file(tmp_path: Path):
+    path = tmp_path / "broken.yaml"
+    path.write_text(SPEC_YAML, encoding="utf-8")
+    with pytest.raises(SpecError) as caught:
+        from_file(path)
+    assert caught.value.loc is not None
+    assert caught.value.loc.source == str(path)
+    assert f"{path}:10:" in str(caught.value)
+
+
+def test_json_degrades_to_the_path_alone():
+    """`json` reports no positions, so the message is exactly what it always was."""
+    document = dict(MINIMAL)
+    document["units"] = {"message": {"fields": [{"name": "a", "bits": "wide"}]}}
+    with pytest.raises(SpecError) as caught:
+        from_json(json.dumps(document), source="dns.json")
+    assert caught.value.loc is not None
+    assert caught.value.loc.line is None
+    assert str(caught.value).startswith("spec.units.message.fields[0]")
+
+
+def test_from_dict_has_no_source_at_all():
+    document = dict(MINIMAL)
+    document["units"] = {"message": {"fields": [{"name": "a", "bits": "wide"}]}}
+    with pytest.raises(SpecError) as caught:
+        from_dict(document)
+    assert caught.value.loc is not None
+    assert caught.value.loc.source is None
+    assert caught.value.loc.line is None
+
+
+def test_a_line_is_not_part_of_what_a_spec_is():
+    """Two spellings must stay equal, so the source cannot enter equality."""
+    from_file_spec = from_yaml(
+        "name: dns\nversion: '1.0'\nentry: m\nunits:\n  m:\n    fields: []\n",
+        source="dns.yaml",
+    )
+    from_memory = from_dict(
+        {"name": "dns", "version": "1.0", "entry": "m", "units": {"m": {"fields": []}}}
+    )
+    assert from_file_spec == from_memory
+    assert from_file_spec.sources.source == "dns.yaml"
+    assert from_memory.sources.source is None
+
+
+def test_the_source_map_speaks_the_checkers_vocabulary():
+    spec = from_yaml(SPEC_YAML.replace("bits: wide", "bits: 8"), source="dns.yaml")
+    assert spec.sources.locate("dns").line == 1
+    # The unit's body begins at its first key, which is where PyYAML marks a
+    # mapping — `fields:` rather than the `message:` naming it a line above.
+    assert spec.sources.locate("dns.message").line == 6
+    assert spec.sources.locate("dns.message.id").line == 7
+    assert spec.sources.locate("dns.message.flags").line == 8
+
+
+def test_an_unnamed_construct_falls_back_to_the_one_above_it():
+    """A guard has no line of its own; its unit's is the useful answer."""
+    spec = from_yaml(SPEC_YAML.replace("bits: wide", "bits: 8"), source="dns.yaml")
+    assert spec.sources.locate("dns.message.confirm").line == 6
+    assert spec.sources.locate("dns.message.confirm").path == "dns.message.confirm"

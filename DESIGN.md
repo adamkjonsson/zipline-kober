@@ -754,6 +754,7 @@ from kober import Decoder, Spec
 spec = Spec.from_file("dns.yaml")       # dispatches on suffix
 spec = Spec.from_json(text)             # stdlib only
 spec = Spec.from_dict(mapping)
+spec = Spec.from_yaml(text, source="dns.yaml")  # name the file for messages
 
 decoder = Decoder(spec, emit=Emit.FIELD)
 
@@ -787,6 +788,20 @@ children, status). It is deliberately *not* written to the file — it is what
 `decode_bytes` returns and what `Emit.FIELD` walks to produce records. Keeping
 it out of the file is what avoids inventing a parallel representation
 alongside `zpf`'s.
+
+**A fault says where it is.** `SpecError` carries a `Location` — path, line,
+file — and `check.Finding.where` is one rather than the dotted string it was
+until `0.2.0`. The line comes off the YAML parser and travels on the mapping
+object itself, so nothing has to keep a side table alive to answer for it. The
+paths the loader raises at (`spec.units.message.fields[0]`) and the ones the
+checker reports at (`dns.message.id`) name the same constructs in different
+vocabularies, so the loader records the second kind in a `SourceMap` that
+travels on the `Spec` — **not compared**, since two spellings of one spec must
+stay equal and their lines differ.
+
+`json` reports no positions and a mapping built in memory has no file, so a
+line is `None` there and a message carries the path alone. That is the path the
+standard library alone supports, and it stays first-class.
 
 The compiler's half of the same surface, added in revision 7 (§14):
 
