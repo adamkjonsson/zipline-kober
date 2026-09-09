@@ -125,8 +125,10 @@ SUFFIXES: Mapping[str, str] = {
     ".yml": "yaml",
 }
 
-_SPEC_KEYS = frozenset({"name", "version", "entry", "units", "enums", "input", "doc"})
-_UNIT_KEYS = frozenset({"fields", "params", "confirm", "reject", "emit", "doc"})
+_SPEC_KEYS = frozenset(
+    {"name", "version", "entry", "units", "enums", "input", "endian", "doc"}
+)
+_UNIT_KEYS = frozenset({"fields", "params", "confirm", "reject", "emit", "endian", "doc"})
 _FIELD_KEYS = frozenset({"name", "type", "condition", "repeat", "emit", "doc"})
 _INT_KEYS = frozenset({"bits", "signed", "endian", "enum"})
 _TERMINATED_KEYS = frozenset({"delimiter", "consume", "required", "within"})
@@ -148,23 +150,31 @@ class _At:
     """Where the loader is in the document, and what it has learned getting there.
 
     One value threaded through every constructor, rather than a parameter per
-    thing that needs carrying. It holds the location a fault would be reported
-    at, and the map of lines the checker will look faults up in later — and it
-    is where a *lexical default* goes when the format grows one, since that is
-    the same shape of question: what does this position inherit from above it.
+    thing that needs carrying: the location a fault would be reported at, the
+    map of lines the checker will look faults up in later, and what this
+    position inherits from the document above it.
+
+    :attr:`endian` is the last of those, and it is why this is a record rather
+    than a bare :class:`~kober.source.Location`. Byte order resolves **field →
+    unit → document → big**, lexically, because a unit's integers are read the
+    same way wherever the unit is referenced from — unlike emission
+    granularity, whose chain has a dynamic hop through the enclosing unit and
+    so cannot be folded in at load time.
 
     Attributes:
         loc: Path, line and file of the construct being read.
         lines: The map being filled in, shared by every position in one load.
+        endian: Byte order an integer here takes unless it says otherwise.
 
     """
 
     loc: Location
     lines: dict[str, int]
+    endian: Endian = Endian.BIG
 
     def child(self, step: object) -> _At:
         """Return the position of a step below this one."""
-        return _At(self.loc.child(step), self.lines)
+        return _At(self.loc.child(step), self.lines, self.endian)
 
     def within(self, document: object) -> _At:
         """Return this position carrying ``document``'s own line, if it has one.
@@ -173,7 +183,32 @@ class _At:
         or from memory does not, and then this changes nothing.
         """
         line = getattr(document, "line", None)
-        return self if not isinstance(line, int) else _At(self.loc.at_line(line), self.lines)
+        if not isinstance(line, int):
+            return self
+        return _At(self.loc.at_line(line), self.lines, self.endian)
+
+    def defaulting(self, mapping: Mapping[str, Any]) -> _At:
+        """Return this position with any lexical default ``mapping`` declares.
+
+        Read where a scope opens — the document, and each unit — so everything
+        built below it inherits. A scope that declares nothing inherits what it
+        was given.
+
+        Args:
+            mapping: The document or unit body opening the scope.
+
+        Returns:
+            This position, or one carrying the declared default.
+
+        Raises:
+            SpecError: If the declared byte order is not one of the two.
+
+        """
+        declared = mapping.get("endian")
+        if declared is None:
+            return self
+        endian = _member(Endian, declared, self.child("endian"))
+        return _At(self.loc, self.lines, endian)
 
     def record(self, path: str) -> None:
         """Note this position's line under a path in the checker's vocabulary.
@@ -525,6 +560,7 @@ def _spec(document: Mapping[str, Any], at: _At) -> Spec:
     declared = mapping["name"]
     owner = declared if isinstance(declared, str) else "spec"
     at.record(owner)
+    at = at.defaulting(mapping)
 
     units_doc = _require_mapping(mapping["units"], at.child("units"))
     units = {
@@ -615,6 +651,7 @@ def _unit(name: str, document: object, at: _At, owner: str) -> Unit:
     at.record(path)
     mapping = _require_mapping(document, at)
     _reject_unknown(mapping, _UNIT_KEYS, at)
+    at = at.defaulting(mapping)
     if "fields" not in mapping:
         msg = "missing required key 'fields'"
         raise SpecError(msg, at.loc)
@@ -870,7 +907,9 @@ def _field_type(document: object, at: _At) -> FieldType:
     if tag == "bits":
         # The alias, and it takes the number directly: `bits` *is* the key it
         # would otherwise name, so a mapping under it would be `bits: {bits: 4}`.
-        return IntType(bits=_require_int(value, site))
+        # It is the shorthand an inherited byte order exists to keep usable, so
+        # it takes the default like any other integer.
+        return IntType(bits=_require_int(value, site), endian=at.endian)
     if tag == "int":
         return _int_type(value, site)
     if tag == "bytes":
@@ -969,7 +1008,7 @@ def _int_type(document: object, at: _At) -> IntType:
     """Build an integer type, accepting a bare width."""
     at = at.within(document)
     if isinstance(document, bool) or not isinstance(document, dict):
-        return IntType(bits=_require_int(document, at.child("bits")))
+        return IntType(bits=_require_int(document, at.child("bits")), endian=at.endian)
     mapping = _require_mapping(document, at)
     _reject_unknown(mapping, _INT_KEYS, at)
     if "bits" not in mapping:
@@ -980,7 +1019,7 @@ def _int_type(document: object, at: _At) -> IntType:
     return IntType(
         bits=_require_int(mapping["bits"], at.child("bits")),
         signed=_require_bool(mapping.get("signed", False), at.child("signed")),
-        endian=Endian.BIG if endian is None else _member(Endian, endian, at.child("endian")),
+        endian=at.endian if endian is None else _member(Endian, endian, at.child("endian")),
         enum=None if enum is None else _require_str(enum, at.child("enum")),
     )
 

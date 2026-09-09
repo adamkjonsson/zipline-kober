@@ -44,6 +44,37 @@ minor bump here too.
 
   `examples/dns.yaml` and `examples/http.yaml` are written the short way.
 
+- **`endian` on the document and on the unit**, so a little-endian spec can use
+  the format's principal shorthand
+  ([#22](https://github.com/adamkjonsson/zipline-kober/issues/22)). Byte order
+  resolves **field → unit → document → `big`**:
+
+  ```yaml
+  endian: little          # every integer below, unless it says otherwise
+
+  units:
+    header:
+      fields:
+        - {name: magic, bits: 32}
+        - {name: version, bits: 16}
+        - {name: crc, int: {bits: 32, endian: big}}   # the exception, stated
+  ```
+
+  The cost this removes is not the word. A field needing `endian` had to write
+  `int: {bits: 32, endian: little}`, so **no integer field in a little-endian
+  spec could use `bits:` at all** — invisible in both shipped examples, which
+  are big-endian network protocols, and unavoidable in anything not on a wire.
+
+  Resolved **when the spec loads** and folded into each field, so nothing
+  downstream can tell which spelling was used: a spec written with an inherited
+  default builds a `Spec` equal to one with `endian` on every integer. `kober
+  show` prints the resolved byte order, which is where to look when a field's
+  own line no longer says.
+
+  `signed` does **not** inherit: a protocol is little-endian, it is not
+  *signed*. `endian` beside `bits:` at field level remains an unknown-key
+  error.
+
 - **A unit parameter may be written as a single-key mapping of name to type**
   ([#24](https://github.com/adamkjonsson/zipline-kober/issues/24)), like every
   other tagged construct in the schema:

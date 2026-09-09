@@ -1141,3 +1141,131 @@ def test_a_short_parameter_checks_its_type():
 def test_a_short_parameter_still_binds_positionally():
     spec = param_spec([{"high": "int"}, {"low": "int"}])
     assert [p.name for p in spec.unit("p").params] == ["high", "low"]
+
+
+# --- byte order inherits ---------------------------------------------------
+#
+# Invisible in both shipped examples, which are big-endian network protocols.
+# That is a property of the examples: anything not on a wire is little-endian
+# throughout, and before this every integer in such a spec had to write the
+# long form — so the format's principal shorthand was unusable on any of them.
+
+
+def endian_spec(**scopes: Any) -> Spec:
+    """Build a spec whose document and unit scopes come from the arguments."""
+    document = dict(MINIMAL)
+    unit: dict[str, Any] = {
+        "fields": [
+            {"name": "a", "bits": 16},
+            {"name": "b", "int": {"bits": 32}},
+            {"name": "c", "int": {"bits": 16, "endian": "big"}},
+        ]
+    }
+    if "unit" in scopes:
+        unit["endian"] = scopes["unit"]
+    if "document" in scopes:
+        document["endian"] = scopes["document"]
+    document["units"] = {"message": unit}
+    return from_dict(document)
+
+
+def endians(spec: Spec) -> list[str]:
+    return [field.type.endian.value for field in spec.unit("message").fields]
+
+
+def test_byte_order_defaults_to_big():
+    assert endians(endian_spec()) == ["big", "big", "big"]
+
+
+def test_a_document_declares_byte_order_for_everything_below_it():
+    assert endians(endian_spec(document="little")) == ["little", "little", "big"]
+
+
+def test_a_unit_overrides_the_document():
+    assert endians(endian_spec(document="little", unit="big")) == ["big", "big", "big"]
+    assert endians(endian_spec(document="big", unit="little")) == ["little", "little", "big"]
+
+
+def test_a_field_overrides_a_unit_overriding_a_document():
+    """The whole chain in one spec, which is the case each level alone misses."""
+    spec = endian_spec(document="big", unit="little")
+    assert endians(spec) == ["little", "little", "big"]
+
+
+def test_an_inherited_default_builds_the_identical_spec():
+    """What makes this a shorthand rather than a feature."""
+    inherited = from_dict(
+        dict(
+            MINIMAL,
+            endian="little",
+            units={"message": {"fields": [{"name": "a", "bits": 16}, {"name": "b", "bits": 8}]}},
+        )
+    )
+    written_out = from_dict(
+        dict(
+            MINIMAL,
+            units={
+                "message": {
+                    "fields": [
+                        {"name": "a", "int": {"bits": 16, "endian": "little"}},
+                        {"name": "b", "int": {"bits": 8, "endian": "little"}},
+                    ]
+                }
+            },
+        )
+    )
+    assert inherited == written_out
+
+
+def test_an_inherited_order_reaches_a_switch_case_and_a_pointer_target():
+    """Both reach an integer through _field_type rather than from a field."""
+    spec = from_dict(
+        dict(
+            MINIMAL,
+            endian="little",
+            units={
+                "message": {
+                    "fields": [
+                        {"name": "tag", "bits": 8},
+                        {
+                            "name": "body",
+                            "switch": {"dispatch": "tag", "cases": {1: {"bits": 16}}},
+                        },
+                        {"name": "ptr", "pointer": {"at": "tag", "type": {"int": {"bits": 16}}}},
+                    ]
+                }
+            },
+        )
+    )
+    fields = {field.name: field.type for field in spec.unit("message").fields}
+    assert fields["body"].cases[1].endian is Endian.LITTLE
+    assert fields["ptr"].type.endian is Endian.LITTLE
+
+
+def test_signedness_does_not_inherit():
+    """A protocol is little-endian; it is not *signed*."""
+    spec = endian_spec(document="little")
+    assert all(not field.type.signed for field in spec.unit("message").fields)
+
+
+def test_a_sub_byte_field_inherits_harmlessly():
+    """`endian` applies only to a whole-byte read, so a bits: 4 is unaffected."""
+    spec = from_dict(
+        dict(
+            MINIMAL,
+            endian="little",
+            units={"message": {"fields": [{"name": "nibble", "bits": 4}]}},
+        )
+    )
+    assert spec.unit("message").fields[0].type.endian is Endian.LITTLE
+
+
+def test_endian_beside_bits_at_field_level_is_still_an_unknown_key():
+    """The key is added to the spec and unit sets, not to the field's."""
+    with pytest.raises(SpecError, match="unknown key\\(s\\) 'endian'"):
+        sole_field({"name": "a", "bits": 16, "endian": "little"})
+
+
+def test_an_unknown_byte_order_is_refused():
+    with pytest.raises(SpecError, match="unknown value 'middle'"):
+        endian_spec(document="middle")

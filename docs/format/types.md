@@ -87,12 +87,13 @@ type: {int: {bits: 16, signed: false, endian: big, enum: opcode}}
 | --- | --- | --- |
 | `bits` | **required** | Width, 1 to 64. Need not be a multiple of 8. |
 | `signed` | `false` | Two's complement. |
-| `endian` | `big` | `big` or `little`. Network order is the default. |
+| `endian` | the unit's, else the document's, else `big` | `big` or `little`. See [`endian`](document.md#endian). |
 | `enum` | none | Name of an enum labelling the value. |
 
 Bits are read **most significant first**, both within a byte and across a byte
 boundary from an unaligned position. `endian` applies only to a whole-byte read
-from an aligned position — byte order is not a property a four-bit field has.
+from an aligned position — byte order is not a property a four-bit field has,
+which is why inheriting one is harmless for a `bits: 4`.
 
 A sub-byte field cites the byte **containing** it, since `zpf` spans are byte
 offsets. Several fields citing the same byte is normal and legal: a flags word

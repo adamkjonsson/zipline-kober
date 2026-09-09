@@ -34,10 +34,59 @@ units:
 | `units` | **yes** | Every unit, by name. |
 | `enums` | no | Named values for integer fields. |
 | `input` | no | `stream`, `datagram`, or `either` (the default). |
+| `endian` | no | Byte order for every integer below, unless it says otherwise. |
 | `doc` | no | Free text. |
 
 Anything else is an error. That is deliberate: a misspelled key that loads and
 does nothing is a decoder silently doing the wrong thing.
+
+### `endian`
+
+Byte order resolves **field → unit → document → `big`**, and network order is
+the default because the protocols this was written for are on a wire.
+
+```yaml
+name: some_container
+version: "1.0"
+entry: header
+endian: little          # every integer below, unless it says otherwise
+
+units:
+  header:
+    fields:
+      - {name: magic, bits: 32}
+      - {name: version, bits: 16}
+      - {name: crc, int: {bits: 32, endian: big}}   # the exception, stated
+```
+
+It exists because of what the alternative costs: a field needing `endian` must
+write `int: {bits: 32, endian: little}`, so **a little-endian spec could not use
+`bits:` on any integer field at all**. That is most formats not on a wire — a
+filesystem structure, a USB descriptor, a capture container.
+
+Resolution happens **when the spec loads**, so the byte order is folded into
+each field and nothing downstream can tell which spelling was used. It is a
+shorthand, not a feature.
+
+The cost is that a field's meaning depends on a distant line: `bits: 32` no
+longer says how it is read. `kober show` prints the resolved answer, so the
+question has a one-command answer that does not involve scrolling:
+
+```console
+$ kober show container.yaml
+header
+├── magic: u32 little-endian
+├── version: u16 little-endian
+└── crc: u32
+```
+
+Note what does **not** inherit: `signed`. Signedness is a property of what an
+individual field means, where byte order is a property of the format as a
+whole. A protocol is little-endian; it is not *signed*.
+
+`endian` beside `bits:` at field level is an unknown-key error, as it was
+before — the key is on the document and the unit, and an individual integer
+still says it inside `int: {…}`.
 
 ### `input`
 
@@ -72,6 +121,7 @@ units:
 | `confirm` | no | Boolean. The unit is abandoned unless this holds. |
 | `reject` | no | Boolean. The unit is abandoned if this holds. |
 | `emit` | no | Default granularity inside this unit. |
+| `endian` | no | Byte order for this unit's integers, overriding the document's. |
 | `doc` | no | Free text. |
 
 `confirm` and `reject` are how a wrong protocol guess becomes an honest
@@ -152,6 +202,18 @@ over the unit holding it.
 - `field` — one record per leaf, each citing the exact bytes it came from.
 - `none` — decode for control flow and write nothing. The bytes are marked
   `skipped`, which says the spec deliberately passed over them.
+
+Two chains, resolved differently, and the difference is the point:
+
+| | Chain | Resolved |
+| --- | --- | --- |
+| [`endian`](#endian) | field → unit → document → `big` | when the spec **loads** |
+| `emit` | field → unit → enclosing unit → decoder | while it **decodes** |
+
+`emit`'s hop through the *enclosing* unit is dynamic: granularity depends on
+where a unit was referenced from, so the same unit can emit differently at two
+sites. Byte order cannot — a unit's integers are read the same way wherever it
+is referenced from — so it is folded in at load time and leaves no trace.
 
 ## Enums
 
