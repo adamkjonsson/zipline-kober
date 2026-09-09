@@ -34,24 +34,34 @@ type: {bytes: {size: 4}}               # a bare size is `fixed`
 type: {bytes: 4}                       # a bare bytes/string body is its size
 type: {int: 8}                         # a bare int body is its width
 type: {unit: question}                 # a bare unit body is its name
-repeat: {until: {expr: "n == 0"}}      # long
-repeat: {until: "n == 0"}              # a bare until body is its expression
+until: {expr: "n == 0"}                # long
+until: "n == 0"                        # a bare until body is its expression
 ```
 
 Anything carrying a second key writes the long form: `{int: {bits: 4, enum:
 opcode}}`, not `{int: 4, enum: opcode}`.
 
-**The kind key may be lifted into the field.** The field keys (`name`, `type`,
-`condition`, `repeat`, `emit`, `doc`) and the type keys do not overlap, so there
-is nothing to be ambiguous about:
+**A tagged construct's kind may lift into its parent** where the key sets do
+not overlap. That is one rule covering both constructs a field carries — its
+type, and its repetition:
 
 ```yaml
 - {name: count, type: {int: {bits: 8}}}
 - {name: count, int: {bits: 8}}
+
+- {name: questions, unit: question, repeat: {count: "qdcount"}}
+- {name: questions, unit: question, count: qdcount}
 ```
 
-Exactly one key must name a kind. Zero is an error, two is an error, `type:`
-beside a lifted kind is an error, and a key in neither set is still an error.
+A field's keys therefore come from three sets that share no member: its own
+(`name`, `type`, `condition`, `repeat`, `emit`, `doc`), the type kinds, and the
+repeat kinds (`count`, `until`, `to_end`).
+
+Exactly one key must name a type kind, and at most one a repeat kind — a
+repetition is optional where a type is not. Two kinds of the same construct is
+an error, a kind beside its own wrapper (`count:` and `repeat:`) is an error,
+and a key in none of the three sets is still an error, which names the set each
+allowed key belongs to.
 
 **`bits` names the integer kind**, because the word says what the number counts:
 
@@ -357,11 +367,19 @@ larger than what remains is `truncated`.
 
 ## Repeats
 
-| Kind | Form | Meaning |
-| --- | --- | --- |
-| `count` | `{count: "n"}` | An integer expression giving the number of elements. |
-| `until` | `{until: "item.tag == 0"}` | Repeat until the condition holds, tested **after** each element. |
-| `to_end` | `{to_end: true}` | Repeat until the run is exhausted. |
+The kind lifts into the field, as a type kind does, so the short spelling is
+the ordinary one and `repeat:` is what an unusual case reaches for.
+
+| Kind | Written | Long form | Meaning |
+| --- | --- | --- | --- |
+| `count` | `count: n` | `repeat: {count: "n"}` | An integer expression giving the number of elements. |
+| `until` | `until: "item.tag == 0"` | `repeat: {until: "item.tag == 0"}` | Repeat until the condition holds, tested **after** each element. |
+| `to_end` | `to_end: true` | `repeat: {to_end: true}` | Repeat until the run is exhausted. |
+
+```yaml
+- {name: questions, unit: question, count: qdcount}
+- {name: answers, unit: rr, count: ancount}
+```
 
 An `until` expression sees the field it repeats, and there it means **the
 element just decoded** rather than the list. A [`select`](#select)'s `where`
@@ -374,10 +392,11 @@ element for the length of one expression.
 
 Under the rule above the same name means the repetition on one line and one
 element on the next, with nothing marking the change. `as:` names the element
-instead, on either construct:
+instead, on either construct — and a lifted `until:` takes the same body the
+wrapped one does, so it carries `as` unchanged:
 
 ```yaml
-repeat: {until: {expr: "label.length == 0", as: label}}
+until: {expr: "label.length == 0", as: label}
 
 select:
   from: headers
@@ -416,7 +435,7 @@ label or in a compression pointer:
     fields:
       - name: labels
         unit: label
-        repeat: {until: "labels.length == 0 or labels.length >= 192"}
+        until: "labels.length == 0 or labels.length >= 192"
 
   label:
     fields:

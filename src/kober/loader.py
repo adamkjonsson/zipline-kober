@@ -32,12 +32,22 @@ bare size is ``fixed``; ``{bytes: 4}`` and ``{string: 4}`` are a fixed size;
 ``{int: 8}`` is a width; ``{unit: question}`` is a reference with no arguments.
 Anything carrying a second key writes the long form.
 
-*The kind key may be lifted into the field*, since the field keys and the type
-keys do not overlap::
+*A tagged construct's kind may lift into its parent where the key sets do not
+overlap.* This is the general rule, stated once because it now governs two
+constructs and will govern the next one:
 
     - {name: count, type: {int: {bits: 8}}}      # both mean the same thing
     - {name: count, int: {bits: 8}}
     - {name: count, bits: 8}
+
+    - {name: qs, unit: q, repeat: {count: "n"}}  # and so do these
+    - {name: qs, unit: q, count: n}
+
+A field's keys are therefore drawn from three sets — its own, the type kinds,
+and the repeat kinds — and no member of any of them appears in another, which
+is what makes a lifted key unambiguous. Strictness is untouched: naming a kind
+*and* its wrapper is an error, naming two kinds of the same construct is an
+error, and a key in none of the three sets is an error as it always was.
 
 *``bits`` names the integer kind*, because the word says what the number counts
 where ``int: 8`` cannot.
@@ -424,13 +434,36 @@ def _require_bool(value: object, at: _At) -> bool:
     return value
 
 
-def _reject_unknown(mapping: Mapping[str, Any], allowed: frozenset[str], at: _At) -> None:
-    """Refuse keys outside the schema, naming the nearest allowed one."""
-    unknown = sorted(set(mapping) - allowed)
+def _reject_unknown(
+    mapping: Mapping[str, Any],
+    allowed: frozenset[str],
+    at: _At,
+    *groups: tuple[str, frozenset[str]],
+) -> None:
+    """Refuse keys outside the schema, saying which set each allowed key is from.
+
+    A field's keys come from three sets rather than one, since both the type
+    kind and the repeat kind lift into it. Listing all eighteen as a single
+    alphabetical run would say nothing about why each is there, so ``groups``
+    names the extra sets and the message keeps them apart.
+
+    Args:
+        mapping: The mapping to check.
+        allowed: The keys this construct takes in its own right.
+        at: Where in the document this is.
+        *groups: Further ``(label, keys)`` sets, each named in the message.
+
+    Raises:
+        SpecError: If any key is in none of the sets.
+
+    """
+    every = allowed.union(*(keys for _, keys in groups))
+    unknown = sorted(set(mapping) - every)
     if unknown:
-        known = ", ".join(sorted(allowed))
         listed = ", ".join(repr(key) for key in unknown)
-        msg = f"unknown key(s) {listed}; allowed here: {known}"
+        named = [f"allowed here: {', '.join(sorted(allowed))}"]
+        named += [f"{label}: {', '.join(sorted(keys))}" for label, keys in groups]
+        msg = f"unknown key(s) {listed}; " + "; ".join(named)
         raise SpecError(msg, at.loc)
 
 
@@ -634,14 +667,18 @@ def _param(document: object, at: _At) -> Param:
 
 
 def _field(document: object, at: _At, owner: str) -> Field:
-    """Build one field, from either spelling of its type.
+    """Build one field, from either spelling of its type and its repetition.
 
-    The kind key may be **lifted into the field** — ``{name: n, int: {bits: 8}}``
-    rather than ``{name: n, type: {int: {bits: 8}}}`` — which removes one level
-    from the commonest line in a spec. It is unambiguous because the field keys
-    and the type keys do not overlap, and it costs no strictness: exactly one
-    key must name a kind, zero is an error, two is an error, and a key in
-    neither set is still an error.
+    Both tagged constructs a field carries may be **lifted into it**, under the
+    rule this module's docstring states: a kind key stands where its wrapper
+    would have gone, because the three key sets do not overlap.
+
+        - {name: n, type: {int: {bits: 8}}, repeat: {count: "n"}}
+        - {name: n, bits: 8, count: n}
+
+    It costs no strictness either way: exactly one key may name a type kind and
+    at most one a repeat kind, naming both a kind and its wrapper is an error,
+    and a key in none of the three sets is still an error.
 
     Args:
         document: The field's mapping.
@@ -657,7 +694,13 @@ def _field(document: object, at: _At, owner: str) -> Field:
     """
     at = at.within(document)
     mapping = _require_mapping(document, at)
-    _reject_unknown(mapping, _FIELD_KEYS | _TYPE_KEYS, at)
+    _reject_unknown(
+        mapping,
+        _FIELD_KEYS,
+        at,
+        ("a type kind", _TYPE_KEYS),
+        ("a repeat kind", _REPEAT_KINDS),
+    )
     if "name" not in mapping:
         msg = "missing required key 'name'; use 'name: null' for an anonymous field"
         raise SpecError(msg, at.loc)
@@ -671,7 +714,7 @@ def _field(document: object, at: _At, owner: str) -> Field:
         name=name,
         type=_declared_type(mapping, at),
         condition=_optional_expr(mapping, "condition", at),
-        repeat=_repeat(mapping["repeat"], at.child("repeat")) if mapping.get("repeat") else None,
+        repeat=_declared_repeat(mapping, at),
         emit=_optional_emit(mapping, at),
         doc=_optional_str(mapping, "doc", at),
     )
@@ -702,6 +745,38 @@ def _declared_type(mapping: Mapping[str, Any], at: _At) -> FieldType:
         raise SpecError(msg, at.loc)
     tag = lifted[0]
     return _field_type({tag: mapping[tag]}, at)
+
+
+def _declared_repeat(mapping: Mapping[str, Any], at: _At) -> Repeat | None:
+    """Read a field's repetition, from ``repeat:`` or from a lifted kind key.
+
+    The same rule as :func:`_declared_type`, applied to the construct beside
+    it: repetition is the second most common thing a field says, and it was
+    the only common one still paying for its wrapper.
+
+    Unlike a type, a repetition is **optional**, so no kind at all is the
+    ordinary case rather than an error.
+    """
+    lifted = sorted(set(mapping) & _REPEAT_KINDS)
+    if "repeat" in mapping:
+        if lifted:
+            listed = ", ".join(repr(key) for key in lifted)
+            msg = (
+                "a field repeats one way; it has 'repeat' and also "
+                f"{listed}. Drop one."
+            )
+            raise SpecError(msg, at.loc)
+        # A falsy body — `repeat:` with nothing under it — has always meant no
+        # repetition rather than an empty one.
+        return _repeat(mapping["repeat"], at.child("repeat")) if mapping["repeat"] else None
+    if len(lifted) > 1:
+        listed = ", ".join(repr(key) for key in lifted)
+        msg = f"a field repeats one way, and this names {listed}"
+        raise SpecError(msg, at.loc)
+    if not lifted:
+        return None
+    tag = lifted[0]
+    return _repeat({tag: mapping[tag]}, at)
 
 
 # --- types, sizes, repeats -------------------------------------------------

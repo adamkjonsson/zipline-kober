@@ -1009,3 +1009,88 @@ def test_an_unnamed_construct_falls_back_to_the_one_above_it():
     spec = from_yaml(SPEC_YAML.replace("bits: wide", "bits: 8"), source="dns.yaml")
     assert spec.sources.locate("dns.message.confirm").line == 6
     assert spec.sources.locate("dns.message.confirm").path == "dns.message.confirm"
+
+
+# --- the repeat kind lifts into the field ----------------------------------
+#
+# The same rule as the type kind, applied to the construct beside it. Every
+# test here has a long-form twin above it; the ones that matter are the two
+# that say a lifted spelling builds the identical model.
+
+
+def test_the_three_key_sets_do_not_overlap():
+    """The rule rests on this, so it is asserted rather than assumed."""
+    from kober import loader
+
+    assert not loader._FIELD_KEYS & loader._TYPE_KEYS
+    assert not loader._FIELD_KEYS & loader._REPEAT_KINDS
+    assert not loader._TYPE_KEYS & loader._REPEAT_KINDS
+
+
+def test_a_lifted_count_repeats():
+    field = sole_field({"name": "a", "bits": 8, "count": "3"})
+    assert isinstance(field.repeat, Count)
+    assert unparse(field.repeat.expr) == "3"
+
+
+def test_a_lifted_until_repeats():
+    field = sole_field({"name": "a", "bits": 8, "until": "a == 0"})
+    assert isinstance(field.repeat, Until)
+    assert unparse(field.repeat.expr) == "a == 0"
+    assert field.repeat.alias is None
+
+
+def test_a_lifted_until_may_still_name_its_element():
+    field = sole_field({"name": "a", "bits": 8, "until": {"expr": "e == 0", "as": "e"}})
+    assert isinstance(field.repeat, Until)
+    assert field.repeat.alias == "e"
+
+
+def test_a_lifted_to_end_repeats():
+    field = sole_field({"name": "a", "bits": 8, "to_end": True})
+    assert isinstance(field.repeat, ToEnd)
+
+
+@pytest.mark.parametrize(
+    ("lifted", "wrapped"),
+    [
+        ({"count": "3"}, {"repeat": {"count": "3"}}),
+        ({"until": "a == 0"}, {"repeat": {"until": "a == 0"}}),
+        (
+            {"until": {"expr": "e == 0", "as": "e"}},
+            {"repeat": {"until": {"expr": "e == 0", "as": "e"}}},
+        ),
+        ({"to_end": True}, {"repeat": {"to_end": True}}),
+    ],
+)
+def test_both_repeat_spellings_build_the_same_field(
+    lifted: dict[str, Any], wrapped: dict[str, Any]
+):
+    """A shorthand nothing downstream can detect, which is what makes it one."""
+    assert sole_field({"name": "a", "bits": 8, **lifted}) == sole_field(
+        {"name": "a", "bits": 8, **wrapped}
+    )
+
+
+def test_a_field_repeats_one_way():
+    with pytest.raises(SpecError, match="repeats one way, and this names 'count', 'until'"):
+        sole_field({"name": "a", "bits": 8, "count": "3", "until": "a == 0"})
+
+
+def test_a_lifted_repeat_beside_its_wrapper_names_both():
+    with pytest.raises(SpecError, match="it has 'repeat' and also 'count'"):
+        sole_field({"name": "a", "bits": 8, "count": "3", "repeat": {"to_end": True}})
+
+
+def test_a_field_may_still_say_nothing_about_repeating():
+    assert sole_field({"name": "a", "bits": 8}).repeat is None
+
+
+def test_an_unknown_field_key_says_which_set_it_was_looked_for_in():
+    """Three sets listed as one alphabetical run would say nothing about why."""
+    with pytest.raises(SpecError) as caught:
+        sole_field({"name": "a", "bits": 8, "conditon": "x > 1"})
+    message = str(caught.value)
+    assert "allowed here: condition, doc, emit, name, repeat, type" in message
+    assert "a type kind: bits," in message
+    assert "a repeat kind: count, to_end, until" in message

@@ -100,6 +100,21 @@ A parameter's `type` is one of `int`, `bool`, `str`, `bytes`.
 | `emit` | no | Granularity for this field. |
 | `doc` | no | Free text. |
 
+Two of those are usually written **without their wrapper**, because a tagged
+construct's kind may lift into the field where the key sets do not overlap:
+
+| Instead of | Write | Which set |
+| --- | --- | --- |
+| `type: {int: {bits: 8}}` | `bits: 8`, `int: …`, `unit: …`, `bytes: …`, `string: …`, `switch: …`, `computed: …`, `pointer: …`, `select: …` | a type kind |
+| `repeat: {count: "n"}` | `count: n`, `until: …`, `to_end: true` | a repeat kind |
+
+```yaml
+- {name: questions, unit: question, count: qdcount}
+```
+
+Both spellings build the identical spec. See
+[Shorthands](types.md#shorthands) for the rule and what it refuses.
+
 `name` is required even when it is `null`, so that an anonymous field is a
 choice rather than an omission. Anonymous fields are decoded and cited like any
 other but cannot be referenced from an expression, which is what makes them

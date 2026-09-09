@@ -24,6 +24,26 @@ minor bump here too.
 
 ### Added
 
+- **A repeat kind may be written on the field**, as a type kind already could
+  ([#23](https://github.com/adamkjonsson/zipline-kober/issues/23)):
+
+  ```yaml
+  - {name: questions, unit: question, repeat: {count: "qdcount"}}   # still works
+  - {name: questions, unit: question, count: qdcount}               # and so does this
+  ```
+
+  `count`, `until` and `to_end` all lift, and a lifted `until` takes the same
+  body the wrapped one does, `as` included. Both spellings build the identical
+  spec.
+
+  The rule behind it is now stated once rather than as a list of special
+  cases: **a tagged construct's kind may lift into its parent where the key
+  sets do not overlap.** A field's keys come from three sets that share no
+  member — its own, the type kinds, the repeat kinds — and an unknown key is
+  refused with each set named separately.
+
+  `examples/dns.yaml` and `examples/http.yaml` are written the short way.
+
 - **A spec fault says which file and line it is on**
   ([#25](https://github.com/adamkjonsson/zipline-kober/issues/25)). A spec is
   written by hand in YAML, and until now a fault named the construct and never

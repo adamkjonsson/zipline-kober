@@ -30,10 +30,10 @@ units:
       - {name: ancount, bits: 16}
       - {name: nscount, bits: 16}
       - {name: arcount, bits: 16}
-      - {name: questions, unit: question, repeat: {count: "qdcount"}}
-      - {name: answers, unit: rr, repeat: {count: "ancount"}}
-      - {name: authority, unit: rr, repeat: {count: "nscount"}}
-      - {name: additional, unit: rr, repeat: {count: "arcount"}}
+      - {name: questions, unit: question, count: qdcount}
+      - {name: answers, unit: rr, count: ancount}
+      - {name: authority, unit: rr, count: nscount}
+      - {name: additional, unit: rr, count: arcount}
 
   flags:
     doc: The 16-bit flags word, MSB first.
@@ -72,7 +72,7 @@ units:
     fields:
       - name: labels
         unit: label
-        repeat: {until: "labels.length == 0 or labels.length >= 192"}
+        until: "labels.length == 0 or labels.length >= 192"
 
   label:
     doc: >
