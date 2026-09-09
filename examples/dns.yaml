@@ -94,7 +94,7 @@ units:
     doc: >
       The second half of a compression pointer: the offset is the low 14 bits
       of the two bytes, counted from the start of the message.
-    params: [{name: high, type: int}]
+    params: [{high: int}]
     fields:
       - {name: low, bits: 8}
       - name: target

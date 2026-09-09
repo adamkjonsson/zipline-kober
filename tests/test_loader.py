@@ -1094,3 +1094,50 @@ def test_an_unknown_field_key_says_which_set_it_was_looked_for_in():
     assert "allowed here: condition, doc, emit, name, repeat, type" in message
     assert "a type kind: bits," in message
     assert "a repeat kind: count, to_end, until" in message
+
+
+# --- a parameter is a single-key mapping too --------------------------------
+
+
+def param_spec(params: list[Any]) -> Spec:
+    return from_dict(
+        dict(
+            MINIMAL,
+            units={
+                "message": {"fields": [{"name": "a", "unit": {"name": "p", "args": ["1"]}}]},
+                "p": {"params": params, "fields": [{"name": "b", "bits": 8}]},
+            },
+        )
+    )
+
+
+def test_a_parameter_may_be_written_as_a_name_and_a_type():
+    param = param_spec([{"high": "int"}]).unit("p").params[0]
+    assert param.name == "high"
+    assert param.type is ExprType.INT
+
+
+def test_both_parameter_spellings_build_the_same_unit():
+    assert param_spec([{"high": "int"}]) == param_spec([{"name": "high", "type": "int"}])
+
+
+def test_an_entry_naming_two_parameters_is_refused():
+    """Arguments bind in order, so one entry cannot stand for two."""
+    with pytest.raises(SpecError, match="names one parameter, and this names 'high', 'low'"):
+        param_spec([{"high": "int", "low": "int"}])
+
+
+def test_an_entry_naming_name_is_read_as_the_long_form():
+    """`{name: high}` is a long form missing its type, not a parameter called 'name'."""
+    with pytest.raises(SpecError, match="missing required key 'type'"):
+        param_spec([{"name": "high"}])
+
+
+def test_a_short_parameter_checks_its_type():
+    with pytest.raises(SpecError, match="unknown value 'wide'"):
+        param_spec([{"high": "wide"}])
+
+
+def test_a_short_parameter_still_binds_positionally():
+    spec = param_spec([{"high": "int"}, {"low": "int"}])
+    assert [p.name for p in spec.unit("p").params] == ["high", "low"]

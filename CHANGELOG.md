@@ -44,6 +44,20 @@ minor bump here too.
 
   `examples/dns.yaml` and `examples/http.yaml` are written the short way.
 
+- **A unit parameter may be written as a single-key mapping of name to type**
+  ([#24](https://github.com/adamkjonsson/zipline-kober/issues/24)), like every
+  other tagged construct in the schema:
+
+  ```yaml
+  params: [{name: high, type: int}]   # still works
+  params: [{high: int}]               # and so does this
+  ```
+
+  An entry naming `name` or `type` is read as the long form, so `{name: high}`
+  stays a long form missing its type rather than becoming a parameter called
+  `name`. `params` remains a **list**: arguments bind positionally, and YAML
+  does not promise the order of a mapping's keys.
+
 - **A spec fault says which file and line it is on**
   ([#25](https://github.com/adamkjonsson/zipline-kober/issues/25)). A spec is
   written by hand in YAML, and until now a fault named the construct and never

@@ -59,7 +59,7 @@ units:
     doc: One DNS message.
     fields:
       - {name: id, type: {int: {bits: 16}}}
-    params: [{name: size, type: int}]
+    params: [{size: int}]
     confirm: "id != 0"
     reject: "id == 0"
     emit: field
@@ -78,7 +78,25 @@ units:
 `undecodable` region rather than a fabricated field tree. Both are evaluated
 once the unit's fields are decoded, so both see all of them.
 
-A parameter's `type` is one of `int`, `bool`, `str`, `bytes`.
+Each `params` entry is a **single-key mapping of name to type**, like every
+other tagged construct in the schema, and a parameter's type is one of `int`,
+`bool`, `str`, `bytes`:
+
+```yaml
+params: [{name: size, type: int}]   # long
+params: [{size: int}]               # the same thing
+```
+
+An entry naming `name` or `type` is read as the long form, so `{name: size}` is
+a long form missing its type rather than a parameter called `name`. A parameter
+actually called `name` or `type` is written out in full, which is what the long
+form is for.
+
+**`params` is a list and not a mapping**, deliberately: arguments bind
+positionally, so the order is load-bearing, and YAML does not promise the order
+of a mapping's keys. Every other mapping in this schema — `units`, `enums`, a
+switch's `cases` — may be reordered without changing meaning, and there is no
+precedent here to lean on.
 
 ## Fields
 

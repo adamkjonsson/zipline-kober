@@ -652,18 +652,68 @@ def _optional_emit(mapping: Mapping[str, Any], at: _At) -> Emit | None:
 
 
 def _param(document: object, at: _At) -> Param:
-    """Build one unit parameter."""
+    """Build one unit parameter, from either spelling.
+
+    A parameter is a name and a type, and every other tagged construct in the
+    schema is a single-key mapping from a name to a body — so a parameter may
+    be written as one too::
+
+        params: [{name: high, type: int}]   # long
+        params: [{high: int}]               # the same thing
+
+    **Which form is meant is decided by the keys, not by the count.** A mapping
+    naming ``name`` or ``type`` is the long form, so ``{name: high}`` is a long
+    form missing its type rather than a parameter called ``name`` of type
+    ``high`` — which would be the reading a count-based rule gave it, and an
+    unhelpful error. The cost is that the short form cannot declare a parameter
+    called ``name`` or ``type``; the long form can, and that is what it is for.
+
+    **The list stays a list.** Arguments bind positionally, so parameter order
+    is load-bearing, and YAML does not promise mapping order — a bare
+    ``params: {high: int}`` would make argument binding depend on something the
+    encoding does not guarantee.
+
+    Args:
+        document: One entry of ``params``.
+        at: Where in the document this is.
+
+    Returns:
+        The parameter.
+
+    Raises:
+        SpecError: If a key is missing, unknown, or the entry names more than
+            one parameter.
+
+    """
     at = at.within(document)
     mapping = _require_mapping(document, at)
+    if not _PARAM_KEYS & set(mapping):
+        return _short_param(mapping, at)
     _reject_unknown(mapping, _PARAM_KEYS, at)
     for required in ("name", "type"):
         if required not in mapping:
-            msg = f"missing required key {required!r}"
+            msg = (
+                f"missing required key {required!r}; a parameter is "
+                "{name: type}, or {name: …, type: …} written out"
+            )
             raise SpecError(msg, at.loc)
     return Param(
         name=_require_str(mapping["name"], at.child("name")),
         type=_member(ExprType, mapping["type"], at.child("type")),
     )
+
+
+def _short_param(mapping: Mapping[str, Any], at: _At) -> Param:
+    """Build a parameter from the single-key ``{name: type}`` spelling."""
+    if len(mapping) != 1:
+        listed = ", ".join(repr(key) for key in sorted(mapping)) or "nothing"
+        msg = (
+            f"a parameter entry names one parameter, and this names {listed}. "
+            "Give each its own entry, since arguments bind in order."
+        )
+        raise SpecError(msg, at.loc)
+    name, declared = next(iter(mapping.items()))
+    return Param(name=name, type=_member(ExprType, declared, at.child(name)))
 
 
 def _field(document: object, at: _At, owner: str) -> Field:

@@ -160,7 +160,7 @@ A unit's fields sometimes cannot be read without something the *caller* knows.
             3: {unit: {name: compressed, args: ["length"]}}
 
   compressed:
-    params: [{name: high, type: int}]
+    params: [{high: int}]
     fields:
       - {name: low, bits: 8}
       - name: target
