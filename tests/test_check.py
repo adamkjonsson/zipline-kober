@@ -1462,3 +1462,59 @@ def test_a_finding_from_a_mapping_reads_as_it_always_did():
     finding = check(spec)[0]
     assert finding.where.line is None
     assert str(finding).startswith("error: dns.message.body: ")
+
+
+# --- const ------------------------------------------------------------------
+#
+# Each of these is otherwise found by a decode that never matches anything,
+# which looks like traffic that is not ours rather than a spec that cannot
+# match — so they are worth catching before any data exists.
+
+
+def const_spec(kind: FieldType, const: object) -> Spec:
+    return build([Unit(name="message", fields=[Field(name="f", type=kind, const=const)])])
+
+
+def test_a_constant_needs_a_field_that_holds_a_value():
+    kind = Switch(dispatch=parse("1"), cases={1: IntType(bits=8)})
+    assert "a constant needs a field that holds a value" in only_error(const_spec(kind, 1))
+
+
+def test_a_constant_on_a_unit_is_refused():
+    spec = build(
+        [
+            Unit(name="message", fields=[Field(name="f", type=UnitRef("other"), const=1)]),
+            Unit(name="other", fields=[Field(name="g", type=IntType(bits=8))]),
+        ]
+    )
+    assert "a constant needs a field that holds a value" in only_error(spec)
+
+
+@pytest.mark.parametrize(
+    ("kind", "const"),
+    [
+        (IntType(bits=8), "GET"),
+        (StringType(size=Fixed(3)), 7),
+        (BytesType(size=Fixed(2)), "no"),
+    ],
+)
+def test_a_constant_must_be_the_type_the_field_decodes(kind: FieldType, const: object):
+    assert "and the field decodes" in only_error(const_spec(kind, const))
+
+
+@pytest.mark.parametrize("const", [256, -1])
+def test_an_integer_constant_must_fit_the_field(const: int):
+    assert "does not fit 8 bits" in only_error(const_spec(IntType(bits=8), const))
+
+
+def test_a_signed_field_holds_a_negative_constant():
+    assert not errors(const_spec(IntType(bits=8, signed=True), -1))
+    assert "does not fit 8 signed bits" in only_error(
+        const_spec(IntType(bits=8, signed=True), 128)
+    )
+
+
+def test_a_constant_that_fits_is_no_finding():
+    assert not errors(const_spec(IntType(bits=16), 0x5345))
+    assert not errors(const_spec(StringType(size=Fixed(3)), "GET"))
+    assert not errors(const_spec(BytesType(size=Fixed(2)), b"\x89P"))

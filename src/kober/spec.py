@@ -540,6 +540,11 @@ class Field:
         emit: Emission granularity for this field; ``None`` inherits from the
             unit, and then from the decoder.
         doc: Free-text description — the reason specs are authored in YAML.
+        const: A value the decoded field must equal, or ``None``. A magic
+            number is the ordinary way a decoder refuses traffic that is not
+            its own, and it belongs on the field it constrains rather than in
+            a unit-level ``confirm``, which is only evaluated once every field
+            has been read against a protocol already known to be wrong.
 
     """
 
@@ -549,6 +554,7 @@ class Field:
     repeat: Repeat | None = None
     emit: Emit | None = None
     doc: str | None = None
+    const: int | bytes | str | None = None
 
     def __post_init__(self) -> None:
         if self.name is not None and not self.name.strip():

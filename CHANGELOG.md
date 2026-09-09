@@ -44,6 +44,36 @@ minor bump here too.
 
   `examples/dns.yaml` and `examples/http.yaml` are written the short way.
 
+- **`const` on a field**, the ordinary way a decoder refuses traffic that is
+  not its own ([#26](https://github.com/adamkjonsson/zipline-kober/issues/26)):
+
+  ```yaml
+  - {name: magic, bits: 16, const: 0x5345}
+  - {name: null, bits: 8, const: 0}          # reserved bits that must be zero
+  - {name: verb, string: 3, const: "GET"}
+  - {name: sig, bytes: 2, const: [137, 80]}  # or as byte values
+  ```
+
+  It took two places to say before — the constant in a unit-level `confirm`,
+  away from the field it constrains — and a guard is evaluated **once the
+  unit's fields are decoded**. A run holds as many messages as fit, so a
+  message that read the wrong number of bytes leaves every message behind it
+  misaligned: a wrong guess caught at byte two ends one message, where the same
+  guess caught by a guard has already consumed an arbitrary number of them.
+
+  **A field that disagrees is `undecodable`, and nothing is raised** — this
+  project's existing vocabulary for *tried and could not*, and the verdict a
+  failing `confirm` already produces. Its bytes are still cited. A constant on
+  a repeated field constrains every element.
+
+  `check` verifies that the field's type holds a value at all, that the
+  constant's type matches it, and that an integer constant fits the field's
+  `bits` — each otherwise found only by a decode that never matches anything.
+  `kober show` prints the constant beside the field.
+
+  `confirm` and `reject` are unchanged, and remain what a condition spanning
+  more than one field is written as.
+
 - **`endian` on the document and on the unit**, so a little-endian spec can use
   the format's principal shorthand
   ([#22](https://github.com/adamkjonsson/zipline-kober/issues/22)). Byte order

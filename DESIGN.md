@@ -382,11 +382,27 @@ class Field:
     repeat: Repeat | None = None
     emit: Emit | None = None            # see §4; None inherits from the unit
     doc: str | None = None
+    const: int | bytes | str | None = None   # a value it must equal
 ```
 
 `confirm`/`reject` survive from revision 1 and matter more here than they did
 in Spicy, because rejecting cleanly is how a wrong protocol guess becomes an
 honest `undecodable` region instead of a fabricated field tree.
+
+`const` is the same need one field wide, and the timing is why it is not just a
+`confirm`. A guard runs **once the unit's fields are decoded**; a run holds as
+many messages as fit and the driver decodes the entry unit again and again, so
+a message that read the wrong number of bytes leaves every message behind it
+misaligned. A wrong guess caught at byte two ends one message. The same guess
+caught by a guard has already consumed an arbitrary and probably wrong number
+of them.
+
+A field whose constant disagrees is `undecodable` and **nothing is raised** —
+the existing vocabulary for *tried and could not*. Its bytes are still cited: a
+constant is not a spec-side value that vanishes from the output. The compiled
+decoder raises `Undecodable` where the interpreter records the verdict, which
+is the split `errors.py` documents, and both name the same region: the refused
+field's own bytes, which no record claims because the record is never written.
 
 ### 3.2 Field types
 

@@ -411,6 +411,14 @@ def _size_of(kind: FieldType) -> SizeSpec | None:
     return None
 
 
+def _int_range(kind: IntType) -> tuple[int, int]:
+    """Return the lowest and highest value an integer field can hold."""
+    if kind.signed:
+        half = 1 << (kind.bits - 1)
+        return -half, half - 1
+    return 0, (1 << kind.bits) - 1
+
+
 def _visible_names(unit: Unit, upto: int) -> set[str]:
     """Names a field at index ``upto`` may reference.
 
@@ -650,11 +658,48 @@ class _Checker:
         if item.repeat is not None:
             self._check_repeat(unit, index, item, where)
 
+        if item.const is not None:
+            self._check_const(item, where)
+
         for kind in _walk_types(item.type):
             self._check_type(unit, kind, visible, where)
 
         if isinstance(item.type, Switch):
             self._check_switch(unit, item.type, visible, where)
+
+    def _check_const(self, item: Field, where: str) -> None:
+        """Check that a field's constant is something the field could read.
+
+        Three ways it cannot be, and each is otherwise found by a decode that
+        never matches anything — which looks like traffic that is not ours
+        rather than like a spec that cannot match.
+        """
+        const = item.const
+        kind = item.type
+        if not isinstance(kind, (IntType, BytesType, StringType)):
+            self.error(
+                where,
+                f"a constant needs a field that holds a value, and this is a "
+                f"{type(kind).__name__.removesuffix('Type').lower()}; a condition "
+                "over more than one field is a unit's 'confirm'",
+            )
+            return
+        wanted = {IntType: int, BytesType: bytes, StringType: str}[type(kind)]
+        if not isinstance(const, wanted):
+            self.error(
+                where,
+                f"the constant is {type(const).__name__}, and the field decodes "
+                f"{wanted.__name__}",
+            )
+            return
+        if isinstance(kind, IntType) and isinstance(const, int):
+            low, high = _int_range(kind)
+            if not low <= const <= high:
+                self.error(
+                    where,
+                    f"the constant {const} does not fit {kind.bits} "
+                    f"{'signed ' if kind.signed else ''}bits, which holds {low} to {high}",
+                )
 
     def _check_repeat(self, unit: Unit, index: int, item: Field, where: str) -> None:
         """Check a repeat clause. ``until`` additionally sees its own field."""

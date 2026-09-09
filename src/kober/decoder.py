@@ -508,11 +508,11 @@ class Decoder:
     def _one(
         self, item: Field, kind: FieldType, frame: _Frame, cursor: Cursor, read: _Read
     ) -> Node:
-        """Decode one value of ``kind``."""
+        """Decode one value of ``kind``, and check any constant it must equal."""
         env = _Environment(frame)
         mark = cursor.tell()
         try:
-            return self._value(item, kind, frame, cursor, read, mark, env)
+            return self._constrained(item, kind, frame, cursor, read, mark, env)
         except TruncatedRead as exc:
             start, end = cursor.span(mark)
             return Node(
@@ -535,6 +535,45 @@ class Decoder:
                 spec_field=item,
                 resolved_type=kind,
             )
+
+    def _constrained(
+        self,
+        item: Field,
+        kind: FieldType,
+        frame: _Frame,
+        cursor: Cursor,
+        read: _Read,
+        mark: int,
+        env: _Environment,
+    ) -> Node:
+        """Decode one value, and refuse it if it disagrees with the field's ``const``.
+
+        **The region is undecodable, and nothing is raised.** That is this
+        project's existing vocabulary for *tried and could not*, and the same
+        verdict a failing ``confirm`` already produces. packeteer, where the
+        key comes from, raises instead — its decoder is allowed to, because
+        the bytes fall back to an opaque payload; here the coverage guarantee
+        means a failed decode is recorded rather than thrown (``DESIGN.md``
+        §2).
+
+        The bytes stay cited either way. A constant is not a spec-side value
+        that vanishes from the output: it was read, it is real, and it is
+        accounted for.
+
+        This sits in :meth:`_one` rather than in :meth:`_field`, so a constant
+        on a repeated field constrains **every element** — which is what it
+        should mean, and what stops the repetition at the first that disagrees.
+        """
+        node = self._value(item, kind, frame, cursor, read, mark, env)
+        if item.const is None or node.status is not NodeStatus.OK:
+            return node
+        if node.value == item.const and type(node.value) is type(item.const):
+            return node
+        return replace(
+            node,
+            status=NodeStatus.UNDECODABLE,
+            detail=f"expected {item.const!r}, read {node.value!r}",
+        )
 
     def _value(
         self,

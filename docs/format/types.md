@@ -267,6 +267,67 @@ value that is not a number, say — makes the field `undecodable`, exactly as an
 unevaluable size does. It is not quietly treated as "no match", because that
 would report the author's default as though it were read from the input.
 
+## `const`
+
+A value the decoded field must equal — the ordinary way a decoder refuses
+traffic that is not its own:
+
+```yaml
+- {name: magic, bits: 16, const: 0x5345}
+- {name: null, bits: 8, const: 0}          # reserved bits that must be zero
+- {name: verb, string: 3, const: "GET"}
+- {name: sig, bytes: 2, const: [137, 80]}  # or as byte values
+```
+
+It goes on `int`, `bytes` and `string` — the types that hold a value. A
+`bytes` constant may be written as text, which is encoded for you, so a magic
+number reads as what it is.
+
+**A field that disagrees is `undecodable`, and nothing is raised.** That is
+this format's vocabulary for *tried and could not*, and the same verdict a
+failing `confirm` produces. The bytes are still cited: they were read, they are
+real, and the coverage guarantee accounts for them.
+
+### Why not `confirm`
+
+A unit-level `confirm` can say the same thing, and it says it in the wrong
+place and at the wrong time:
+
+```yaml
+units:
+  message:
+    fields:
+      - {name: magic, bits: 16}
+      # … every other field …
+    confirm: "magic == 0x5345"
+```
+
+`confirm` and `reject` are evaluated **once the unit's fields are decoded**,
+which is right for a condition spanning several fields and wrong for a magic
+number. A run holds as many messages as fit and the driver decodes the entry
+unit again and again, so a message that reads the wrong number of bytes leaves
+every message behind it misaligned. A wrong guess caught at byte two ends one
+message; the same guess caught after the unit has decoded has already consumed
+an arbitrary and probably wrong number of bytes.
+
+`confirm` and `reject` stay, unchanged, for the conditions that span more than
+one field or that are not equality. `const` is not a general assertion and is
+not meant to grow into one — the moment it wants an expression, it is a
+`confirm`.
+
+### What `check` verifies
+
+Each of these is otherwise found by a decode that never matches anything, which
+looks like traffic that is not yours rather than like a spec that cannot match:
+
+- the field's type is one that holds a value — not a `unit` or a `switch`;
+- the constant's type matches the field's;
+- an integer constant fits the field's `bits`.
+
+A constant on a **repeated** field constrains every element, and the repetition
+stops at the first that disagrees. `kober show` prints the constant beside the
+field, since it is the most useful thing on that line.
+
 ## Sizes
 
 | Kind | Form | Meaning |

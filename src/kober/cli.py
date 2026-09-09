@@ -405,7 +405,12 @@ def _descend(spec: Spec, kind: FieldType, prefix: str, seen: tuple[str, ...]) ->
 def _field_label(item: Field) -> str:
     """Render one field as a single line."""
     name = item.name if item.name is not None else "(anonymous)"
-    parts = [f"{name}: {_render_type(item.type)}"]
+    written = f"{name}: {_render_type(item.type)}"
+    if item.const is not None:
+        # A magic number is the most useful thing on this line: it says what
+        # the field must be, not merely how wide it is.
+        written += f" = {item.const!r}"
+    parts = [written]
     if item.repeat is not None:
         parts.append(_render_repeat(item.repeat))
     if item.condition is not None:

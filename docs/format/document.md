@@ -165,6 +165,7 @@ precedent here to lean on.
 | `type` | **yes** | What to decode. See [Types](types.md). |
 | `condition` | no | Boolean. The field is decoded only if it holds. |
 | `repeat` | no | Decode it repeatedly. |
+| `const` | no | A value the decoded field must equal. See [`const`](types.md#const). |
 | `emit` | no | Granularity for this field. |
 | `doc` | no | Free text. |
 

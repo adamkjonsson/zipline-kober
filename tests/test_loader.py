@@ -1091,7 +1091,7 @@ def test_an_unknown_field_key_says_which_set_it_was_looked_for_in():
     with pytest.raises(SpecError) as caught:
         sole_field({"name": "a", "bits": 8, "conditon": "x > 1"})
     message = str(caught.value)
-    assert "allowed here: condition, doc, emit, name, repeat, type" in message
+    assert "allowed here: condition, const, doc, emit, name, repeat, type" in message
     assert "a type kind: bits," in message
     assert "a repeat kind: count, to_end, until" in message
 
@@ -1269,3 +1269,51 @@ def test_endian_beside_bits_at_field_level_is_still_an_unknown_key():
 def test_an_unknown_byte_order_is_refused():
     with pytest.raises(SpecError, match="unknown value 'middle'"):
         endian_spec(document="middle")
+
+
+# --- const ------------------------------------------------------------------
+#
+# The value is read in the spelling the field's own type gives it. Whether it
+# *fits* is the checker's; see tests/test_check.py.
+
+
+def test_an_integer_constant_is_a_number():
+    assert sole_field({"name": "magic", "bits": 16, "const": 0x5345}).const == 0x5345
+
+
+def test_a_string_constant_is_text():
+    assert sole_field({"name": "verb", "string": 3, "const": "GET"}).const == "GET"
+
+
+def test_a_bytes_constant_may_be_written_as_text():
+    """A magic number reads as what it is rather than as four numbers."""
+    assert sole_field({"name": "sig", "bytes": 3, "const": "GET"}).const == b"GET"
+
+
+def test_a_bytes_constant_may_be_written_as_byte_values():
+    assert sole_field({"name": "sig", "bytes": 2, "const": [137, 80]}).const == b"\x89P"
+
+
+def test_a_field_without_a_constant_has_none():
+    assert sole_field({"name": "a", "bits": 8}).const is None
+    assert sole_field({"name": "a", "bits": 8, "const": None}).const is None
+
+
+def test_an_anonymous_field_may_carry_a_constant():
+    """Reserved bits that must be zero need no name to be checked."""
+    assert sole_field({"name": None, "bits": 8, "const": 0}).const == 0
+
+
+def test_a_boolean_constant_is_refused_with_a_yaml_hint():
+    with pytest.raises(SpecError, match="on/off/yes/no"):
+        sole_field({"name": "a", "bits": 8, "const": True})
+
+
+def test_a_mapping_is_not_a_constant():
+    with pytest.raises(SpecError, match="a constant is a number, text, or a list"):
+        sole_field({"name": "a", "bits": 8, "const": {"nope": 1}})
+
+
+def test_a_byte_value_outside_a_byte_is_refused():
+    with pytest.raises(SpecError, match="must be 0..255"):
+        sole_field({"name": "a", "bytes": 2, "const": [137, 300]})

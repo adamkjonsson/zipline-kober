@@ -54,6 +54,7 @@ from kober.expr import (
     references,
     unparse,
 )
+from kober.node import NodeStatus
 from kober.ops import Kind, Plan, nonnegative, walk_path
 from kober.runtime import TEXT_CONTENT_TYPE, prim_token
 from kober.spec import Count, Emit, Fill, Fixed, FromExpr, Remaining, Terminated, ToEnd, Until
@@ -243,6 +244,15 @@ POINTER_HOPS = "_hops"
 #: The local holding ``_base + _at``, so a byte range is an addition rather than
 #: a translation. Reset wherever the anchor is.
 ORIGIN = "_b"
+
+#: Where a field carrying a ``const`` began, written down before its read. A
+#: field its constant refuses writes no record, so its own bytes have to be
+#: named by the field itself where nothing above it will.
+CONST_MARK = "_cmark"
+
+#: The reason a refused constant leaves behind, spelled as `zpf` spells it and
+#: as :class:`kober.node.NodeStatus` does — *tried and could not*.
+UNDECODABLE = NodeStatus.UNDECODABLE.value
 
 #: The runtime helpers a shift compiles to when its count is not provably in
 #: range. ``1 << n`` with ``n`` off the wire is a memory-exhaustion bug, which
@@ -1274,7 +1284,8 @@ class _Function:
         if self.plan.recursive:
             return True
         return any(
-            not item.exhaustive
+            item.const is not None
+            or not item.exhaustive
             or (item.repeat is not None and not item.element_consumes)
             or (isinstance(item.repeat, Count) and not self.provable(item.repeat.expr))
             or any(
@@ -1403,12 +1414,13 @@ class _Function:
 
         An anonymous field has no attribute and no expression may name it, so
         nothing holds its value — unless it is emitted, because a record still
-        has to carry what was read. Its path segment is ``_``, which is the only
-        name it ever gets.
+        has to carry what was read, or unless it declares a ``const``, which
+        has to be compared against something. Reserved bits that must be zero
+        are exactly that field, and they need no name to be checked.
         """
         if item.name is not None:
             return self.names.attribute_of(self.obj.unit, item.name)
-        if self.emits(item) or self.skips(item):
+        if self.emits(item) or self.skips(item) or item.const is not None:
             return f"_anon{index}"
         return None
 
@@ -1859,7 +1871,9 @@ class _Function:
         pad = " " * indent
         path = role if role is not None else self.segment(item, index)
         if item.selector is None:
+            mark = self.constant_mark(item, indent)
             self.read(index, item.types[0], target, indent, path)
+            self.constant(item, target, indent, mark)
             return
         self.index_of = index
         self.emit(f"{pad}_selector = {self.evaluate(item.selector, indent)}")
@@ -1886,6 +1900,61 @@ class _Function:
             f"{self.stopped()})"
         )
         self.delta = 0
+
+    def constant_mark(self, item: FieldPlan, indent: int) -> str | None:
+        """Emit the local holding where a field carrying a ``const`` begins.
+
+        Written down **before** the read, because a field its constant refuses
+        writes no record and its bytes are then claimed by nothing — so the
+        region that has to be named runs from here to wherever the read got to.
+        """
+        if item.const is None:
+            return None
+        self.settle(indent)
+        self.emit(f"{' ' * indent}{CONST_MARK} = {ANCHOR}")
+        return CONST_MARK
+
+    def constant(self, item: FieldPlan, target: str | None, indent: int, mark: str | None) -> None:
+        """Emit the comparison against a field's ``const``, if it has one.
+
+        Where the interpreter records an ``undecodable`` verdict on a node,
+        generated code has no tree to record it on and says so by raising —
+        the split :mod:`kober.errors` documents. The entry point turns it back
+        into an ``undecodable`` region, so the two agree on what a caller sees.
+
+        Emitted here rather than beside the field, so a constant on a repeated
+        field constrains **every element**: this is the one value's read, and
+        the loop calls it once per element.
+        """
+        if item.const is None or mark is None:
+            return
+        # A const on a switch is refused by the checker — a switch holds no
+        # value of its own to compare — and `Plan.from_spec` will not build a
+        # plan for a spec the checker rejects, so nothing reaches here.
+        pad = " " * indent
+        if target is None:  # pragma: no cover - local_of keeps one for a const
+            return
+        self.settle(indent)
+        # The expected value goes in through `_literal` twice — once as the
+        # value compared against, once inside the message — and never by
+        # interpolation into an f-string, where a text constant's own quotes
+        # would close the message early. `repr` supplies what was read.
+        said = _literal(f"expected {item.const!r}, read ")
+        self.emit(f"{pad}if {target} != {_literal(item.const)}:")
+        if self.threads:
+            # The refused field names its own bytes, because at this
+            # granularity nothing else will: the entry point marks from the
+            # message's start only where the whole message is one record, and
+            # here the fields before this one have already cited theirs. The
+            # interpreter says the same thing by leaving an `undecodable` node
+            # over exactly this range — and adversarial input is what found
+            # them disagreeing.
+            self.emit(f"{pad}    if _sink is not None:")
+            self.emit(
+                f"{pad}        _sink.undecoded(_base + {mark}, {ORIGIN}, "
+                f'"{UNDECODABLE}")'
+            )
+        self.emit(f"{pad}    raise Undecodable({said} + repr({target}), {self.stopped()})")
 
     def read(
         self, index: int, value: ValueType, target: str | None, indent: int, role: str

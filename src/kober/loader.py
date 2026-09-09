@@ -129,7 +129,7 @@ _SPEC_KEYS = frozenset(
     {"name", "version", "entry", "units", "enums", "input", "endian", "doc"}
 )
 _UNIT_KEYS = frozenset({"fields", "params", "confirm", "reject", "emit", "endian", "doc"})
-_FIELD_KEYS = frozenset({"name", "type", "condition", "repeat", "emit", "doc"})
+_FIELD_KEYS = frozenset({"name", "type", "condition", "repeat", "emit", "const", "doc"})
 _INT_KEYS = frozenset({"bits", "signed", "endian", "enum"})
 _TERMINATED_KEYS = frozenset({"delimiter", "consume", "required", "within"})
 #: A ``bytes`` body says its extent with ``size``, or with ``delimiter`` and its
@@ -797,14 +797,59 @@ def _field(document: object, at: _At, owner: str) -> Field:
         # An anonymous field is recorded under nothing: the checker has no name
         # to report it by either, so there is no path to key it on.
         at.record(f"{owner}.{name}")
+    kind = _declared_type(mapping, at)
     return Field(
         name=name,
-        type=_declared_type(mapping, at),
+        type=kind,
         condition=_optional_expr(mapping, "condition", at),
         repeat=_declared_repeat(mapping, at),
         emit=_optional_emit(mapping, at),
         doc=_optional_str(mapping, "doc", at),
+        const=_const(mapping, kind, at),
     )
+
+
+def _const(mapping: Mapping[str, Any], kind: FieldType, at: _At) -> int | bytes | str | None:
+    """Read a field's constant, in the spelling its own type gives it.
+
+    A number for an integer, text for a string, and for ``bytes`` either a list
+    of byte values or text — which is encoded here, so a magic number reads as
+    what it is (``const: "GET"``) rather than as four numbers.
+
+    That one conversion is the whole of what this knows about types. Whether
+    the constant *fits* the field — that the type holds a value at all, that
+    the two types agree, that an integer is not wider than its field — is
+    :func:`kober.check.check`'s, which reports every fault at once rather than
+    stopping at this one.
+
+    Args:
+        mapping: The field's mapping.
+        kind: The field's type, already built.
+        at: Where in the document this is.
+
+    Returns:
+        The constant, or ``None`` when the field declares none.
+
+    Raises:
+        SpecError: If the value is not a number, text, or a list of byte
+            values.
+
+    """
+    if "const" not in mapping or mapping["const"] is None:
+        return None
+    site = at.child("const")
+    value = mapping["const"]
+    if isinstance(value, bool):
+        msg = f"a constant is a number, text, or a list of byte values{_yaml_hint(value)}"
+        raise SpecError(msg, site.loc)
+    if isinstance(value, list):
+        return _delimiter(value, site)
+    if isinstance(value, str) and isinstance(kind, BytesType):
+        return value.encode("utf-8")
+    if isinstance(value, (int, str)):
+        return value
+    msg = f"a constant is a number, text, or a list of byte values, not {type(value).__name__}"
+    raise SpecError(msg, site.loc)
 
 
 def _declared_type(mapping: Mapping[str, Any], at: _At) -> FieldType:
