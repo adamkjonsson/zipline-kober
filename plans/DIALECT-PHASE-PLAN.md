@@ -1,6 +1,13 @@
 # The dialect phase — `0.2.0`
 
-> **Plan.** Written 2026-09-09 against `0.1.0` and the seven issues on the
+**State: done.** All seven issues landed on `implement_v0.2.0` and shipped in
+[`v0.2.0`](https://github.com/adamkjonsson/zipline-kober/releases/tag/v0.2.0)
+(2026-09-10), in the order §2 argues for. What the plan got right and wrong is
+recorded in §9, which is the only section written after the fact — the rest is
+left as it was on 2026-09-09, because a plan is a record of what was intended
+and `CHANGELOG.md` is the record of what shipped.
+
+> **Written 2026-09-09** against `0.1.0` and the seven issues on the
 > [`0.2.0` milestone](https://github.com/adamkjonsson/zipline-kober/milestone/1),
 > whose statement is *focus on the syntax of spec files: add some
 > simplifications to improve usability, and improve alignment with the
@@ -110,6 +117,12 @@ onto the model is `dataclasses.field(compare=False, repr=False)`. The equality
 tests keep working unchanged, and they keep meaning what they say.
 
 ### 3.2 The checker cannot see lines unless something hands them over
+
+> **This section's reasoning is wrong; see [§9.1](#91-32s-source-map-assumed-one-vocabulary-and-there-are-two).**
+> The conclusion — a non-comparing map on the `Spec` — is what shipped. The
+> reason given for it is not: the loader and the checker do not spell a
+> construct's path the same way, so the key `check` "already builds" is not the
+> key the loader has.
 
 [#25](https://github.com/adamkjonsson/zipline-kober/issues/25) says
 `Finding.where` becomes a location. It does not say how `check` learns one, and
@@ -347,23 +360,25 @@ Left for a later release, on its own merits.
 
 ## 7. Definition of done
 
-- [ ] `pyproject.toml` at `0.2.0.dev0` from the first commit, `0.2.0` at the last.
-- [ ] Seven issues implemented; each has a `CHANGELOG.md` entry under
+Every box below was met. The three that did **not** go as written are §9.
+
+- [x] `pyproject.toml` at `0.2.0.dev0` from the first commit, `0.2.0` at the last.
+- [x] Seven issues implemented; each has a `CHANGELOG.md` entry under
       `Unreleased` **in the change that introduces it**, not batched at the end.
-- [ ] `Documentation` for #21; `Added` for #22, #23, #24, #26, #27; `Added`
+- [x] `Documentation` for #21; `Added` for #22, #23, #24, #26, #27; `Added`
       plus a `Breaking:` note under `Changed` for #25.
-- [ ] `DESIGN.md` updated where the model and the public API changed: §3.1/§3.2
+- [x] `DESIGN.md` updated where the model and the public API changed: §3.1/§3.2
       for `const`, §6 for `Location`, `Finding` and the foreign-key records.
-- [ ] Both spellings of every shorthand build an equal `Spec`, and
+- [x] Both spellings of every shorthand build an equal `Spec`, and
       `compiled_dns.py` is byte-identical after the examples convert.
-- [ ] `tests/test_fuzz.py` carries a `const`-bearing spec, and the "a decode
+- [x] `tests/test_fuzz.py` carries a `const`-bearing spec, and the "a decode
       never raises" invariant still holds.
-- [ ] A regression test for each fix is checked against the bug it claims to
+- [x] A regression test for each fix is checked against the bug it claims to
       catch: revert, watch it fail, restore.
-- [ ] packeteer's two examples load, producing exactly the expected warnings.
-- [ ] `.venv/bin/pytest` clean; `ruff check` clean on every touched file;
-      `.venv/bin/sphinx-build -W docs docs/_build/html` clean.
-- [ ] The deeper fuzzing pipeline in the README run before the release — this
+- [x] packeteer's two examples load, producing exactly the expected warnings.
+- [x] `.venv/bin/pytest` clean (1526); `ruff check` clean on every touched
+      file; `.venv/bin/sphinx-build -W docs docs/_build/html` clean.
+- [x] The deeper fuzzing pipeline in the README run before the release — this
       release touches the loader, not the stage driver, so it is the release
       gate rather than a per-change one.
 
@@ -375,3 +390,92 @@ bottom of `CHANGELOG.md`; tag `v0.2.0`; **then** close the seven issues and the
 milestone. Issues close at release, not at merge — work sits on `main` under
 `Unreleased` until it is in a release, and closing earlier claims a delivery
 that has not happened.
+
+Done as written. `v0.2.0` is on the merge commit of
+[#29](https://github.com/adamkjonsson/zipline-kober/pull/29), where `v0.1.0`
+sits on the merge commit of #20; the seven issues and the milestone were closed
+after the tag.
+
+---
+
+## 9. What this plan got wrong
+
+Written after the release. The rest of this document is left as it was, because
+the point of keeping a plan is to know what was believed at the time.
+
+### 9.1 §3.2's source map assumed one vocabulary, and there are two
+
+The largest error, and it was in the section that claimed to have resolved an
+open question the issue left. §3.2 decided the loader should record lines into
+"one dotted-path → `Location` map" and argued that `check` "already computes
+the dotted path for every finding it emits; a lookup on that path is the whole
+integration".
+
+**The two sides do not spell the same construct the same way.** The loader
+raises at `spec.units.message.fields[0]`, from the shape of the document; the
+checker reports at `dns.message.id`, from the names in the model. A map keyed by
+the first is unusable to the second, and nothing in the issue or in this plan
+noticed, because both were described as "the dotted path" and neither was
+written out beside the other.
+
+What was built instead: the loader records the constructs the checker reports
+on **in the checker's vocabulary**, as it builds them, and a path with no line
+of its own falls back to the nearest one above it — so `dns.message.confirm`,
+which is a guard rather than a field, answers with its unit's line. The
+conclusion §3.2 reached survived; the reason it gave for it did not.
+
+### 9.2 §3.3's context object was justified, and by more than expected
+
+§3.3 argued for threading one private record rather than two parameters, and
+called it the reason to do #25 before #22. That held: `endian` became a field on
+`_At` rather than a second argument through four constructors, and #22's
+"plumbing, which is the real cost" did not materialise.
+
+It paid a third time, unplanned. #27 needed the loader to collect foreign keys
+as it descended, and that was another field on the same record rather than
+another parameter.
+
+### 9.3 §5's byte-identical proof was the most useful thing in the plan
+
+`tests/compiled_dns.py` is regenerated from `examples/dns.yaml` and compared
+character for character, so converting the examples to the lifted spellings had
+to leave it untouched. It did, through #23, #24 and #22 — three separate format
+changes, each claiming the model does not move, checked end to end through the
+compiler rather than asserted about a dataclass.
+
+### 9.4 What the plan did not anticipate at all
+
+**`const` shipped with two bugs that only adversarial input found**, and §4's
+entry for #26 predicted neither. It correctly said the construct was the one
+with real risk and correctly demanded a fuzz corpus; what it did not imagine
+was *where* the risk was.
+
+- A text constant's own quotes closed the generated f-string, so any spec with
+  a string magic number produced a module that would not parse. No example
+  would have caught it; the first `const: "GET"` in the corpus did.
+- The interpreter and the compiled decoder named **different regions** at field
+  granularity. A field refused by its constant writes no record, and the
+  generated entry point only marks from the message's start where the whole
+  message is one record — so the refused field's own bytes were accounted for
+  by nobody. This is a coverage-guarantee bug, and only the interpreter-against-
+  compiled *file* comparison could have found it: both stopped at the same
+  offset, and the files differed.
+
+**A regression test that passes either way is worth nothing**, and this plan
+quoted that rule from `CLAUDE.md` without applying it to itself. The first
+`const` tests for the interpreter passed whether the decoder recorded a verdict
+on the node or unwound past it with `_Stop` — which are observably different,
+since unwinding throws away the node that says which field disagreed and what it
+read. Caught by sabotage, not by review.
+
+### 9.5 The ordering held
+
+§2's schedule was followed exactly and nothing wanted reordering. The two
+arguments it rested on both proved out: locations first meant every later issue
+wrote against the new signature rather than being retrofitted five times, and
+the documentation sweep last meant those three pages were written once, against
+the final dialect.
+
+§6's exclusion held too. `FORMAT-ERGONOMICS.md` §3.2 — the bare-string size —
+stayed out, and the release kept the single verifiable claim §6 said it would:
+*shorter to write, better diagnostics, same decode.*
