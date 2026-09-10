@@ -28,11 +28,13 @@ from typing import TYPE_CHECKING, Any
 import pytest
 import zpf
 from fuzzing import (
+    CONST_SPEC,
     DNS_RESPONSE,
     SEEDS,
     SELECT_MESSAGE,
     SELECT_SPEC,
     cases,
+    const_cases,
     framing_cases,
     pointer_cases,
     select_cases,
@@ -1758,3 +1760,108 @@ def test_a_conditional_repeat_of_a_consuming_element_needs_no_progress_guard():
 def test_a_conditional_repeat_decodes_the_same_both_ways(data: bytes):
     """Dropping the guard must not change a single decode."""
     compare(inline(CONDITIONAL_REPEAT), data)
+
+
+# --- const -----------------------------------------------------------------
+
+
+ONE_CONST_SPEC = """
+    name: t
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - {name: magic, bits: 16, const: 21317}
+          - {name: rest, bits: 8}
+"""
+
+
+def test_a_constant_that_holds_decodes_the_same_way():
+    compare(inline(ONE_CONST_SPEC), b"\x53\x45\x07")
+
+
+def test_a_constant_that_does_not_hold_refuses_the_same_input():
+    """Both must stop in the same place: that offset is what gets marked."""
+    compare(inline(ONE_CONST_SPEC), b"\x99\x99\x07")
+
+
+def test_an_anonymous_constant_refuses_the_same_input():
+    """Reserved bits that must be zero need no name to be checked."""
+    spec = inline("""
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: null, bits: 8, const: 0}
+              - {name: rest, bits: 8}
+    """)
+    compare(spec, b"\x00\x07")
+    compare(spec, b"\x01\x07")
+
+
+def test_a_constant_on_a_repeated_field_constrains_every_element():
+    spec = inline("""
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: n, bits: 8}
+              - {name: marks, bits: 8, const: 255, count: n}
+    """)
+    compare(spec, b"\x03\xff\xff\xff")
+    compare(spec, b"\x03\xff\x01\xff")
+
+
+def test_a_string_constant_refuses_the_same_input():
+    spec = inline("""
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: verb, string: 3, const: "GET"}
+    """)
+    compare(spec, b"GET")
+    compare(spec, b"PUT")
+
+
+def test_a_bytes_constant_refuses_the_same_input():
+    spec = inline("""
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: sig, bytes: 2, const: [137, 80]}
+    """)
+    compare(spec, bytes([137, 80]))
+    compare(spec, bytes([137, 81]))
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_constant_fails_at_the_same_offset_on_adversarial_input(seed: int):
+    """Where a constant disagrees, both must stop at the same byte for the same reason.
+
+    That offset is what stage 5 marks undecoded, so a difference here is a
+    difference in the output file — and the two implementations say a constant
+    failed in different ways, one recording a verdict on a node and the other
+    raising.
+    """
+    spec = Spec.from_yaml(CONST_SPEC)
+    for data in const_cases(seed):
+        compare(spec, data)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_a_constant_writes_the_same_file_on_adversarial_input(seed: int, emit: Emit):
+    spec = Spec.from_yaml(CONST_SPEC)
+    for data in const_cases(seed):
+        writes(spec, data, emit)

@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING
 
 from kober.errors import ExprError, SpecError
 from kober.expr import ExprType, IntLiteral, infer_type, unparse
+from kober.loader import FOREIGN_KEYS
 from kober.spec import (
     BytesType,
     Computed,
@@ -78,6 +79,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from kober.expr import Expr, Scope
+    from kober.source import Location
     from kober.spec import FieldType, Repeat, SizeSpec, Spec
 
 
@@ -96,15 +98,22 @@ class Severity(Enum):
 class Finding:
     """One problem found in a spec.
 
+    ``where`` is a :class:`~kober.source.Location` rather than the dotted
+    string it was before ``0.2.0``. :func:`check` reports every fault it can
+    see rather than stopping at the first, and a list of a dozen faults with no
+    line numbers is a list of a dozen things to go hunting for. The path is
+    still on it, as :attr:`~kober.source.Location.path`.
+
     Attributes:
         severity: Whether this stops the spec from running.
-        where: Dotted location, e.g. ``"dns.message.qdcount"``.
+        where: Where the problem is: the path always, and the file and line
+            when the spec was read from a source that reports them.
         message: What is wrong, in the author's vocabulary.
 
     """
 
     severity: Severity
-    where: str
+    where: Location
     message: str
 
     def __str__(self) -> str:
@@ -403,6 +412,14 @@ def _size_of(kind: FieldType) -> SizeSpec | None:
     return None
 
 
+def _int_range(kind: IntType) -> tuple[int, int]:
+    """Return the lowest and highest value an integer field can hold."""
+    if kind.signed:
+        half = 1 << (kind.bits - 1)
+        return -half, half - 1
+    return 0, (1 << kind.bits) - 1
+
+
 def _visible_names(unit: Unit, upto: int) -> set[str]:
     """Names a field at index ``upto`` may reference.
 
@@ -438,8 +455,13 @@ class _Checker:
         self._index_parents()
 
     def report(self, severity: Severity, where: str, message: str) -> None:
-        """Record one finding."""
-        self.findings.append(Finding(severity, where, message))
+        """Record one finding, looking up where in the document it is.
+
+        Every check builds its path from model names, which is the vocabulary
+        the loader recorded lines under — so this is the one place a path
+        becomes a location, and the checks themselves need not carry one.
+        """
+        self.findings.append(Finding(severity, self.spec.sources.locate(where), message))
 
     def error(self, where: str, message: str) -> None:
         """Record an error."""
@@ -456,7 +478,25 @@ class _Checker:
             self._check_unit(unit)
         self._check_reachability()
         self._check_left_recursion()
+        self._check_foreign()
         return tuple(self.findings)
+
+    def _check_foreign(self) -> None:
+        """Report every packeteer key the spec used, and why it means nothing here.
+
+        A **warning**, because ignoring any of them changes no decode: the spec
+        describes the same messages either way, which is the whole basis of the
+        claim that one dialect covers both projects. ``--strict`` turns them
+        into failures for a project that wants them refused outright.
+        """
+        for item in self.spec.foreign:
+            reason = FOREIGN_KEYS.get(item.key)
+            if reason is None:  # pragma: no cover - the loader collects no others
+                continue
+            self.warn(
+                item.where,
+                f"{item.key!r} is a packeteer key and has no meaning here; {reason}",
+            )
 
     # --- structure ---------------------------------------------------------
 
@@ -637,11 +677,48 @@ class _Checker:
         if item.repeat is not None:
             self._check_repeat(unit, index, item, where)
 
+        if item.const is not None:
+            self._check_const(item, where)
+
         for kind in _walk_types(item.type):
             self._check_type(unit, kind, visible, where)
 
         if isinstance(item.type, Switch):
             self._check_switch(unit, item.type, visible, where)
+
+    def _check_const(self, item: Field, where: str) -> None:
+        """Check that a field's constant is something the field could read.
+
+        Three ways it cannot be, and each is otherwise found by a decode that
+        never matches anything — which looks like traffic that is not ours
+        rather than like a spec that cannot match.
+        """
+        const = item.const
+        kind = item.type
+        if not isinstance(kind, (IntType, BytesType, StringType)):
+            self.error(
+                where,
+                f"a constant needs a field that holds a value, and this is a "
+                f"{type(kind).__name__.removesuffix('Type').lower()}; a condition "
+                "over more than one field is a unit's 'confirm'",
+            )
+            return
+        wanted = {IntType: int, BytesType: bytes, StringType: str}[type(kind)]
+        if not isinstance(const, wanted):
+            self.error(
+                where,
+                f"the constant is {type(const).__name__}, and the field decodes "
+                f"{wanted.__name__}",
+            )
+            return
+        if isinstance(kind, IntType) and isinstance(const, int):
+            low, high = _int_range(kind)
+            if not low <= const <= high:
+                self.error(
+                    where,
+                    f"the constant {const} does not fit {kind.bits} "
+                    f"{'signed ' if kind.signed else ''}bits, which holds {low} to {high}",
+                )
 
     def _check_repeat(self, unit: Unit, index: int, item: Field, where: str) -> None:
         """Check a repeat clause. ``until`` additionally sees its own field."""

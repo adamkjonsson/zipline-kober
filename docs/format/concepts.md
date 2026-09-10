@@ -25,7 +25,7 @@ unit is also the boundary at which everything else is expressed:
 
 - **One unit is the message.** `entry:` names it, and decoding "a message"
   means decoding that unit once.
-- **A field can be a unit**, which is how structure nests: `type: {unit: person}`
+- **A field can be a unit**, which is how structure nests: `unit: person`
   reads a whole `person` where that field stands.
 - **A `switch` chooses between units**, which is how a format that says
   *what comes next depends on this byte* gets written down.
@@ -54,14 +54,14 @@ units:
   message:
     doc: One greeting.
     fields:
-      - {name: count, type: {int: {bits: 8}}}
-      - {name: people, type: {unit: person}, repeat: {count: "count"}}
+      - {name: count, bits: 8}
+      - {name: people, unit: person, count: count}
 
   person:
     doc: One person's name, length-prefixed.
     fields:
-      - {name: length, type: {int: {bits: 8}}}
-      - {name: name, type: {string: {size: {expr: "length"}}}}
+      - {name: length, bits: 8}
+      - {name: name, string: {size: {expr: "length"}}}
 ```
 
 **As a shape.** `kober show` expands nested units in place, so the tree is what
@@ -160,7 +160,7 @@ A unit's fields sometimes cannot be read without something the *caller* knows.
             3: {unit: {name: compressed, args: ["length"]}}
 
   compressed:
-    params: [{name: high, type: int}]
+    params: [{high: int}]
     fields:
       - {name: low, bits: 8}
       - name: target

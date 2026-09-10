@@ -1,7 +1,17 @@
 # Types, sizes, and repeats
 
-Types, sizes, and repeats all follow one convention: **a single-key mapping
-naming the kind**.
+**A field says what it decodes on the field itself**, with the kind as one of
+its keys:
+
+```yaml
+- {name: qdcount, bits: 16}
+- {name: questions, unit: question, count: qdcount}
+- {name: body, bytes: {size: {expr: "length"}}}
+```
+
+That is the dialect this project's own examples are written in, and the one to
+write. Underneath it every construct follows a single convention — **a tagged
+mapping naming the kind** — and the spellings above are three rules over it:
 
 ```yaml
 type: {int: {bits: 16}}
@@ -9,7 +19,7 @@ size: {expr: "header.length"}
 repeat: {count: "qdcount"}
 ```
 
-Two keys in one of these mappings is an error, not a merge — which is why
+Two keys in one of those mappings is an error, not a merge — which is why
 `{int: {bits: 4}, enum: opcode}` does not work and `{int: {bits: 4, enum:
 opcode}}` does.
 
@@ -19,41 +29,46 @@ happened — `undecodable`, `truncated`, `gap`, `skipped` — and the difference
 between them is the difference between "we tried and could not" and "we chose
 not to".
 
-## Shorthands
+## The three rules
 
-The convention above is uniform, and uniformity has a cost: an integer field is
-four levels deep to say *count is eight bits*. Three rules shorten it. Each
-builds the **identical** spec — nothing downstream can tell which spelling was
-used — so a spec may mix them freely.
+Each builds the **identical** spec — nothing downstream can tell which spelling
+was used — so a spec may mix them freely.
 
-**A scalar where a mapping is expected fills in the one key that matters.**
-
-```yaml
-type: {bytes: {size: {fixed: 4}}}      # long
-type: {bytes: {size: 4}}               # a bare size is `fixed`
-type: {bytes: 4}                       # a bare bytes/string body is its size
-type: {int: 8}                         # a bare int body is its width
-type: {unit: question}                 # a bare unit body is its name
-repeat: {until: {expr: "n == 0"}}      # long
-repeat: {until: "n == 0"}              # a bare until body is its expression
-```
-
-Anything carrying a second key writes the long form: `{int: {bits: 4, enum:
-opcode}}`, not `{int: 4, enum: opcode}`.
-
-**The kind key may be lifted into the field.** The field keys (`name`, `type`,
-`condition`, `repeat`, `emit`, `doc`) and the type keys do not overlap, so there
-is nothing to be ambiguous about:
+**1. A tagged construct's kind lifts into its parent** where the key sets do
+not overlap. That covers both constructs a field carries, its type and its
+repetition:
 
 ```yaml
 - {name: count, type: {int: {bits: 8}}}
 - {name: count, int: {bits: 8}}
+
+- {name: questions, unit: question, repeat: {count: "qdcount"}}
+- {name: questions, unit: question, count: qdcount}
 ```
 
-Exactly one key must name a kind. Zero is an error, two is an error, `type:`
-beside a lifted kind is an error, and a key in neither set is still an error.
+A field's keys therefore come from three sets that share no member: its own
+(`name`, `condition`, `const`, `emit`, `doc`, and the `type`/`repeat`
+wrappers), the type kinds, and the repeat kinds (`count`, `until`, `to_end`).
 
-**`bits` names the integer kind**, because the word says what the number counts:
+Exactly one key must name a type kind, and at most one a repeat kind — a
+repetition is optional where a type is not. Two kinds of the same construct is
+an error, a kind beside its own wrapper (`count:` and `repeat:`) is an error,
+and a key in none of the three sets is still an error, which names the set each
+allowed key belongs to.
+
+**2. A scalar where a mapping is expected fills in the one key that matters.**
+
+```yaml
+- {name: body, bytes: {size: {fixed: 4}}}   # long
+- {name: body, bytes: {size: 4}}            # a bare size is `fixed`
+- {name: body, bytes: 4}                    # a bare bytes/string body is its size
+- {name: n, int: 8}                         # a bare int body is its width
+- {name: q, unit: question}                 # a bare unit body is its name
+- {name: ls, unit: label, until: "ls.length == 0"}   # a bare until is its expression
+```
+
+**3. `bits` names the integer kind**, because the word says what the number
+counts:
 
 ```yaml
 - {name: qr, bits: 1}
@@ -61,28 +76,45 @@ beside a lifted kind is an error, and a key in neither set is still an error.
 
 `int: 8` is one character shorter and cannot say whether the 8 is bits or bytes
 — Kaitai's `u8` means eight *bytes* — and sub-byte fields are the ordinary case
-here rather than the exotic one. The moment a field needs `enum`, `signed` or
-`endian` it writes `int: {bits: …, …}`; putting one of those beside `bits:` at
-field level is an unknown-key error, which is loud rather than quiet.
+here rather than the exotic one.
+
+## When the long form is needed
+
+It is the fallback rather than the norm, and there are three occasions for it:
+
+- **A body carrying a second key.** `int: {bits: 4, enum: opcode}`, not
+  `{int: 4, enum: opcode}`; putting `enum`, `signed` or `endian` beside `bits:`
+  at field level is an unknown-key error, which is loud rather than quiet.
+- **A type inside a construct rather than on a field.** A `pointer`'s target
+  and a `switch`'s cases are written `type:`-style because they are not field
+  keys and nothing lifts there.
+- **Readability**, where a wrapper says more than a lifted key does. Both
+  spellings are equally valid and the checker cannot tell them apart.
+
+Each entry below leads with the short spelling and gives the long one beside
+it.
 
 ## Field types
 
 ### `int`
 
 ```yaml
-type: {int: {bits: 16, signed: false, endian: big, enum: opcode}}
+- {name: qr, bits: 1}                                     # the common case
+- {name: opcode, int: {bits: 4, enum: opcode}}            # a second key
+- {name: id, type: {int: {bits: 16, signed: false}}}      # the long form
 ```
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `bits` | **required** | Width, 1 to 64. Need not be a multiple of 8. |
 | `signed` | `false` | Two's complement. |
-| `endian` | `big` | `big` or `little`. Network order is the default. |
+| `endian` | the unit's, else the document's, else `big` | `big` or `little`. See [`endian`](document.md#endian). |
 | `enum` | none | Name of an enum labelling the value. |
 
 Bits are read **most significant first**, both within a byte and across a byte
 boundary from an unaligned position. `endian` applies only to a whole-byte read
-from an aligned position — byte order is not a property a four-bit field has.
+from an aligned position — byte order is not a property a four-bit field has,
+which is why inheriting one is harmless for a `bits: 4`.
 
 A sub-byte field cites the byte **containing** it, since `zpf` spans are byte
 offsets. Several fields citing the same byte is normal and legal: a flags word
@@ -99,8 +131,9 @@ does not recover it either.
 ### `bytes` and `string`
 
 ```yaml
-type: {bytes: {size: 4}}
-type: {string: {size: {terminated: {delimiter: "\r\n"}}, encoding: utf-8}}
+- {name: payload, bytes: 4}
+- {name: line, string: {delimiter: "\r\n"}}
+- {name: body, type: {bytes: {size: {expr: "length"}}}}   # the long form
 ```
 
 `bytes` and `string` both say their extent with `size`; `string` also takes
@@ -112,10 +145,10 @@ what makes the commonest thing a text protocol does shallow rather than deepest.
 have in the long form:
 
 ```yaml
-type: {string: {size: {terminated: {delimiter: "\r\n"}}}}      # long
-type: {string: {delimiter: "\r\n"}}                            # the same thing
+- {name: line, type: {string: {size: {terminated: {delimiter: "\r\n"}}}}}   # long
+- {name: line, string: {delimiter: "\r\n"}}                                # the same thing
 
-type: {string: {delimiter: ":", within: "\r\n", required: false}}
+- {name: key, string: {delimiter: ":", within: "\r\n", required: false}}
 ```
 
 A body says its extent **once**: `size` and `delimiter` together is an error, as
@@ -130,8 +163,9 @@ string is a fact about the input, not a fault in the decoder.
 ### `unit`
 
 ```yaml
-type: {unit: question}                          # no arguments
-type: {unit: {name: body, args: ["header.n"]}}  # with arguments
+- {name: q, unit: question}                                 # no arguments
+- {name: b, unit: {name: body, args: ["header.n"]}}         # with arguments
+- {name: q, type: {unit: question}}                         # the long form
 ```
 
 Arguments are bound to the unit's `params` positionally, and their types are
@@ -140,7 +174,7 @@ checked against the parameter types.
 ### `switch`
 
 ```yaml
-type:
+- name: body
   switch:
     dispatch: "kind"
     cases:
@@ -148,6 +182,10 @@ type:
       2: {bytes: {size: 2}}
     default: {bytes: {size: {remaining: true}}}
 ```
+
+A case's value is a **type**, so it is written as a tagged mapping and nothing
+lifts inside it: `{int: {bits: 8}}`, not `bits: 8`. Only a field has the three
+key sets that make lifting unambiguous.
 
 `dispatch` is the expression dispatched on, and must be an integer or a string.
 `cases` maps a value to the type to decode for it; case keys must match that
@@ -166,7 +204,8 @@ oversight.
 ### `computed`
 
 ```yaml
-type: {computed: "data_offset * 4"}
+- {name: header_bytes, computed: "data_offset * 4"}
+- {name: header_bytes, type: {computed: "data_offset * 4"}}   # the long form
 ```
 
 Consumes no input. Its type is its expression's type. It exists so a wire
@@ -179,11 +218,15 @@ own zero-width position would say nothing about where the value came from.
 ### `pointer`
 
 ```yaml
-type:
+- name: target
   pointer:
     at: "((hi & 63) << 8) | lo"
     type: {unit: name}
 ```
+
+Its target is spelled `type:` and always will be: that is a type inside a
+construct rather than a key on a field, so there is nothing for it to lift out
+of.
 
 A back-reference: *read `type` at `at`, and carry on where you were.* Both keys
 are required. Real DNS needs it — an answer record's owner name is usually two
@@ -211,7 +254,7 @@ constructed.
 ### `select`
 
 ```yaml
-type:
+- name: content_length
   select:
     from: headers
     where: "lower(headers.name) == 'content-length'"
@@ -255,6 +298,67 @@ An expression in `where` or `value` that cannot be evaluated — `to_int` on a
 value that is not a number, say — makes the field `undecodable`, exactly as an
 unevaluable size does. It is not quietly treated as "no match", because that
 would report the author's default as though it were read from the input.
+
+## `const`
+
+A value the decoded field must equal — the ordinary way a decoder refuses
+traffic that is not its own:
+
+```yaml
+- {name: magic, bits: 16, const: 0x5345}
+- {name: null, bits: 8, const: 0}          # reserved bits that must be zero
+- {name: verb, string: 3, const: "GET"}
+- {name: sig, bytes: 2, const: [137, 80]}  # or as byte values
+```
+
+It goes on `int`, `bytes` and `string` — the types that hold a value. A
+`bytes` constant may be written as text, which is encoded for you, so a magic
+number reads as what it is.
+
+**A field that disagrees is `undecodable`, and nothing is raised.** That is
+this format's vocabulary for *tried and could not*, and the same verdict a
+failing `confirm` produces. The bytes are still cited: they were read, they are
+real, and the coverage guarantee accounts for them.
+
+### Why not `confirm`
+
+A unit-level `confirm` can say the same thing, and it says it in the wrong
+place and at the wrong time:
+
+```yaml
+units:
+  message:
+    fields:
+      - {name: magic, bits: 16}
+      # … every other field …
+    confirm: "magic == 0x5345"
+```
+
+`confirm` and `reject` are evaluated **once the unit's fields are decoded**,
+which is right for a condition spanning several fields and wrong for a magic
+number. A run holds as many messages as fit and the driver decodes the entry
+unit again and again, so a message that reads the wrong number of bytes leaves
+every message behind it misaligned. A wrong guess caught at byte two ends one
+message; the same guess caught after the unit has decoded has already consumed
+an arbitrary and probably wrong number of bytes.
+
+`confirm` and `reject` stay, unchanged, for the conditions that span more than
+one field or that are not equality. `const` is not a general assertion and is
+not meant to grow into one — the moment it wants an expression, it is a
+`confirm`.
+
+### What `check` verifies
+
+Each of these is otherwise found by a decode that never matches anything, which
+looks like traffic that is not yours rather than like a spec that cannot match:
+
+- the field's type is one that holds a value — not a `unit` or a `switch`;
+- the constant's type matches the field's;
+- an integer constant fits the field's `bits`.
+
+A constant on a **repeated** field constrains every element, and the repetition
+stops at the first that disagrees. `kober show` prints the constant beside the
+field, since it is the most useful thing on that line.
 
 ## Sizes
 
@@ -357,11 +461,19 @@ larger than what remains is `truncated`.
 
 ## Repeats
 
-| Kind | Form | Meaning |
-| --- | --- | --- |
-| `count` | `{count: "n"}` | An integer expression giving the number of elements. |
-| `until` | `{until: "item.tag == 0"}` | Repeat until the condition holds, tested **after** each element. |
-| `to_end` | `{to_end: true}` | Repeat until the run is exhausted. |
+The kind lifts into the field, as a type kind does, so the short spelling is
+the ordinary one and `repeat:` is what an unusual case reaches for.
+
+| Kind | Written | Long form | Meaning |
+| --- | --- | --- | --- |
+| `count` | `count: n` | `repeat: {count: "n"}` | An integer expression giving the number of elements. |
+| `until` | `until: "item.tag == 0"` | `repeat: {until: "item.tag == 0"}` | Repeat until the condition holds, tested **after** each element. |
+| `to_end` | `to_end: true` | `repeat: {to_end: true}` | Repeat until the run is exhausted. |
+
+```yaml
+- {name: questions, unit: question, count: qdcount}
+- {name: answers, unit: rr, count: ancount}
+```
 
 An `until` expression sees the field it repeats, and there it means **the
 element just decoded** rather than the list. A [`select`](#select)'s `where`
@@ -374,10 +486,11 @@ element for the length of one expression.
 
 Under the rule above the same name means the repetition on one line and one
 element on the next, with nothing marking the change. `as:` names the element
-instead, on either construct:
+instead, on either construct — and a lifted `until:` takes the same body the
+wrapped one does, so it carries `as` unchanged:
 
 ```yaml
-repeat: {until: {expr: "label.length == 0", as: label}}
+until: {expr: "label.length == 0", as: label}
 
 select:
   from: headers
@@ -416,7 +529,7 @@ label or in a compression pointer:
     fields:
       - name: labels
         unit: label
-        repeat: {until: "labels.length == 0 or labels.length >= 192"}
+        until: "labels.length == 0 or labels.length >= 192"
 
   label:
     fields:

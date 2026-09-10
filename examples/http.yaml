@@ -29,7 +29,7 @@ units:
 
       - name: headers
         unit: header
-        repeat: {until: "headers.name == '' and headers.value == ''"}
+        until: "headers.name == '' and headers.value == ''"
         doc: >
           Header lines up to and including the blank line that ends them. The
           blank line is kept as the last element rather than dropped: it is
@@ -89,7 +89,7 @@ units:
       - name: chunks
         unit: chunk
         condition: "chunked"
-        repeat: {until: "chunks.length == 0"}
+        until: "chunks.length == 0"
         doc: >
           A chunk-framed body, read down to its terminating zero-size chunk.
 
@@ -171,7 +171,7 @@ units:
     fields:
       - name: fields
         unit: header
-        repeat: {until: "fields.name == '' and fields.value == ''"}
+        until: "fields.name == '' and fields.value == ''"
         doc: >
           Up to and including the blank line, exactly as the header block
           above is read. A body with no trailers is not a special case: the

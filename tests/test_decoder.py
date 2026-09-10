@@ -1176,3 +1176,69 @@ def test_a_bound_that_is_absent_lets_the_search_run_on():
         b"name: value with no line ending",
     )
     assert tree.find("a").value == "name"
+
+
+# --- const -----------------------------------------------------------------
+
+
+CONST_FIELDS = """\
+      - {name: magic, bits: 16, const: 21317}
+      - {name: rest, bits: 8}
+"""
+
+
+def test_a_constant_that_holds_decodes_normally():
+    tree = decode(CONST_FIELDS, bytes([0x53, 0x45, 0x07]))
+    assert tree.status is NodeStatus.OK
+    assert [node.value for node in tree.children] == [21317, 7]
+
+
+def test_a_disagreeing_constant_is_undecodable_and_does_not_raise():
+    tree = decode(CONST_FIELDS, bytes([0x99, 0x99, 0x07]))
+    assert tree.status is NodeStatus.UNDECODABLE
+
+
+def test_a_refused_field_is_kept_in_the_tree_with_what_it_read():
+    """The verdict is recorded *on the node*, not unwound past it.
+
+    A decode that threw the field away would leave the tree saying only that
+    the message failed, where what an author needs to see is which field
+    disagreed and what it actually read. It is also what the refused field's
+    bytes are cited by: the emitter marks the node's own range undecodable, so
+    losing the node would lose the region.
+    """
+    tree = decode(CONST_FIELDS, bytes([0x99, 0x99, 0x07]))
+    refused = tree.children[0]
+    assert refused.name == "magic"
+    assert refused.value == 0x9999
+    assert refused.status is NodeStatus.UNDECODABLE
+    assert (refused.off_start, refused.off_end) == (0, 2)
+    assert refused.detail == "expected 21317, read 39321"
+
+
+def test_the_fields_before_a_refused_one_are_kept_too():
+    fields = """\
+      - {name: version, bits: 8}
+      - {name: magic, bits: 16, const: 21317}
+"""
+    tree = decode(fields, bytes([0x01, 0x99, 0x99]))
+    assert [node.name for node in tree.children] == ["version", "magic"]
+    assert tree.children[0].status is NodeStatus.OK
+    assert tree.children[0].value == 1
+
+
+def test_a_constant_stops_a_repetition_at_the_element_that_disagrees():
+    fields = """\
+      - {name: n, bits: 8}
+      - {name: marks, bits: 8, const: 255, count: n}
+"""
+    tree = decode(fields, bytes([3, 0xFF, 0x01, 0xFF]))
+    marks = tree.children[1]
+    assert marks.status is NodeStatus.UNDECODABLE
+    assert [element.value for element in marks.children] == [0xFF, 0x01]
+
+
+def test_an_anonymous_constant_is_checked():
+    tree = decode("      - {name: null, bits: 8, const: 0}\n", bytes([0x01]))
+    assert tree.status is NodeStatus.UNDECODABLE
+    assert tree.children[0].detail == "expected 0, read 1"

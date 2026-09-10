@@ -308,3 +308,51 @@ def framing_cases(seed: int) -> list[bytes]:
     for index, base in enumerate(HTTP_FRAMINGS):
         out.extend(variants(base, seed * len(HTTP_FRAMINGS) + index, rounds=ROUNDS))
     return out
+
+
+#: A spec whose fields carry constants, and its seed input.
+#:
+#: No shipped example has a magic number — DNS has none, and forcing one into
+#: an example would be inventing a protocol. The construct is the one thing in
+#: this release that reaches a decode, and the invariant it is most likely to
+#: break is the one that cannot be tested by example: a disagreeing constant
+#: must make the region *undecodable* and must never raise.
+#:
+#: Every kind that can carry one is here, because each compares differently: an
+#: integer, text, and raw bytes. A constant on a repeated field is included
+#: because it constrains every element, so a mutation anywhere in the run has
+#: to end the repetition rather than spin or escape.
+CONST_SPEC = """
+name: const_probe
+version: "1.0"
+entry: message
+input: datagram
+units:
+  message:
+    fields:
+      - {name: magic, type: {int: {bits: 16}}, const: 21317}
+      - {name: null, type: {int: {bits: 8}}, const: 0}
+      - {name: verb, type: {string: {size: 3}}, const: "GET"}
+      - {name: sig, type: {bytes: {size: 2}}, const: [137, 80]}
+      - {name: count, type: {int: {bits: 8}}}
+      - {name: marks, type: {int: {bits: 8}}, const: 255, count: count}
+      - {name: rest, type: {bytes: {size: {remaining: true}}}}
+"""
+
+#: One well-formed message for :data:`CONST_SPEC`, with every constant held.
+CONST_MESSAGE = (
+    bytes([0x53, 0x45]) + bytes([0]) + b"GET" + bytes([137, 80]) + bytes([3, 255, 255, 255]) + b"xy"
+)
+
+
+def const_cases(seed: int) -> list[bytes]:
+    """Build one batch of variants of the constant-bearing message.
+
+    Args:
+        seed: Which batch.
+
+    Returns:
+        The batch.
+
+    """
+    return variants(CONST_MESSAGE, seed)

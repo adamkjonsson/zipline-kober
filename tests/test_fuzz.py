@@ -20,11 +20,13 @@ from typing import Any
 
 import pytest
 from fuzzing import (
+    CONST_SPEC,
     FILL_SPEC,
     FILL_TRAILING,
     SEEDS,
     SELECT_SPEC,
     cases,
+    const_cases,
     fill_cases,
     framing_cases,
     pointer_cases,
@@ -582,3 +584,66 @@ def test_the_framing_seeds_reach_every_arm():
         else:
             arms["neither"] += 1
     assert all(count > 0 for count in arms.values()), arms
+
+
+# --- constants -------------------------------------------------------------
+#
+# `const` is the one construct in 0.2.0 that reaches a decode, and what it does
+# on disagreement is a *verdict*, not an exception — which is exactly the
+# promise adversarial input is needed to hold it to. A mutation anywhere in the
+# seed lands on a constant sooner or later, and every one of those must come
+# back as `undecodable` rather than as anything escaping the decode.
+
+
+def const_spec() -> Spec:
+    return Spec.from_yaml(CONST_SPEC)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_disagreeing_constant_never_raises(seed: int):
+    decoder = Decoder(const_spec())
+    for data in const_cases(seed):
+        try:
+            tree = decoder.decode_bytes(data)
+        except Exception as exc:
+            exc.add_note(f"escaped a decode: const seed={seed} on {data!r}")
+            raise
+        check_tree(tree, data)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_disagreeing_constant_is_undecodable_and_not_some_other_reason(seed: int):
+    """`undecodable` is *tried and could not*, which is what a wrong magic is."""
+    decoder = Decoder(const_spec())
+    seen = False
+    for data in const_cases(seed):
+        tree = decoder.decode_bytes(data)
+        for node in tree.walk():
+            if node.detail is not None and node.detail.startswith("expected "):
+                assert node.status is NodeStatus.UNDECODABLE, (
+                    f"a disagreeing constant said {node.status.value} on {data!r}"
+                )
+                seen = True
+    assert seen, "no mutation disagreed with a constant; the corpus proves nothing"
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+@pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD])
+def test_a_constant_never_makes_a_byte_both_cited_and_undecoded(seed: int, emit: Emit):
+    """A refused field's bytes are real and were read; they must be accounted for once."""
+    spec = const_spec()
+    decoder = Decoder(spec)
+    for data in const_cases(seed):
+        tree = decoder.decode_bytes(data)
+        emissions, unclaimed = plan(spec, tree, data, emit=emit)
+        cited: set[int] = set()
+        for record in emissions:
+            cited.update(range(record.off_start, record.off_end))
+        named: set[int] = set()
+        for region in unclaimed:
+            named.update(range(region.off_start, region.off_end))
+        overlap = cited & named
+        assert not overlap, (
+            f"const {emit.value}: {len(overlap)} byte(s) both cited and marked "
+            f"undecoded on {data!r}"
+        )

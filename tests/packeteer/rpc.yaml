@@ -1,0 +1,55 @@
+# A small binary RPC over UDP, exercising the parts sensor.yaml does not:
+# bit fields, an enum, a switch whose arms differ, and a nested unit.
+#
+# Every message is one datagram.  A protocol whose messages span TCP segments
+# is out of scope — see docs/protocols/format.md.
+name: rpc
+version: "1.0"
+input: datagram
+entry: message
+over: udp
+ports: [9400]
+doc: A request/response RPC with a fixed header and a body chosen by opcode.
+
+enums:
+  opcode: {1: ping, 2: read, 3: write}
+
+units:
+  message:
+    doc: A four-byte header, then a body the opcode chooses.
+    fields:
+      - {name: magic, type: {int: {bits: 16}}, const: 0x5250}
+      - {name: header, type: {unit: header}}
+      - name: body
+        doc: Chosen by the opcode.  No default, so an unknown one is undecodable.
+        type:
+          switch:
+            on: "header.op"
+            cases:
+              1: {unit: ping}
+              2: {unit: read}
+              3: {unit: write}
+
+  header:
+    doc: One byte of flags and opcode, then a request id.
+    fields:
+      - {name: is_reply, type: {int: {bits: 1}}}
+      - {name: urgent,   type: {int: {bits: 1}}}
+      - {name: null,     type: {int: {bits: 2}}, doc: "Reserved, must be zero."}
+      - {name: op,       type: {int: {bits: 4, enum: opcode}}}
+      - {name: request_id, type: {int: {bits: 16}}}
+
+  ping:
+    fields:
+      - {name: nonce, type: {int: {bits: 32}}}
+
+  read:
+    fields:
+      - {name: offset, type: {int: {bits: 32}}}
+      - {name: length, type: {int: {bits: 16}}}
+
+  write:
+    fields:
+      - {name: offset, type: {int: {bits: 32}}}
+      - {name: length, type: {int: {bits: 16}}, derive: {size_of: data}}
+      - {name: data,   type: {bytes: {size: {expr: "length"}}}, sensitive: true}

@@ -382,11 +382,35 @@ class Field:
     repeat: Repeat | None = None
     emit: Emit | None = None            # see §4; None inherits from the unit
     doc: str | None = None
+    const: int | bytes | str | None = None   # a value it must equal
 ```
 
 `confirm`/`reject` survive from revision 1 and matter more here than they did
 in Spicy, because rejecting cleanly is how a wrong protocol guess becomes an
 honest `undecodable` region instead of a fabricated field tree.
+
+`const` is the same need one field wide, and the timing is why it is not just a
+`confirm`. A guard runs **once the unit's fields are decoded**; a run holds as
+many messages as fit and the driver decodes the entry unit again and again, so
+a message that read the wrong number of bytes leaves every message behind it
+misaligned. A wrong guess caught at byte two ends one message. The same guess
+caught by a guard has already consumed an arbitrary and probably wrong number
+of them.
+
+A field whose constant disagrees is `undecodable` and **nothing is raised** —
+the existing vocabulary for *tried and could not*. Its bytes are still cited: a
+constant is not a spec-side value that vanishes from the output. The compiled
+decoder raises `Undecodable` where the interpreter records the verdict, which
+is the split `errors.py` documents, and both name the same region: the refused
+field's own bytes, which no record claims because the record is never written.
+
+`Spec.foreign` holds the keys a document used that belong to **packeteer's**
+dialect of this format — `over`, `ports`, `derive`, `sensitive`. Recognised,
+unused, and reported by `check` as warnings naming the key and why it means
+nothing here. A side list rather than attributes on `Field`, because nothing in
+kober reads them and a diagnostic should not cost every downstream consumer a
+field. Warnings and not errors because ignoring them changes no decode, which
+is the whole basis of the claim that one dialect covers both projects.
 
 ### 3.2 Field types
 
@@ -754,6 +778,7 @@ from kober import Decoder, Spec
 spec = Spec.from_file("dns.yaml")       # dispatches on suffix
 spec = Spec.from_json(text)             # stdlib only
 spec = Spec.from_dict(mapping)
+spec = Spec.from_yaml(text, source="dns.yaml")  # name the file for messages
 
 decoder = Decoder(spec, emit=Emit.FIELD)
 
@@ -787,6 +812,20 @@ children, status). It is deliberately *not* written to the file — it is what
 `decode_bytes` returns and what `Emit.FIELD` walks to produce records. Keeping
 it out of the file is what avoids inventing a parallel representation
 alongside `zpf`'s.
+
+**A fault says where it is.** `SpecError` carries a `Location` — path, line,
+file — and `check.Finding.where` is one rather than the dotted string it was
+until `0.2.0`. The line comes off the YAML parser and travels on the mapping
+object itself, so nothing has to keep a side table alive to answer for it. The
+paths the loader raises at (`spec.units.message.fields[0]`) and the ones the
+checker reports at (`dns.message.id`) name the same constructs in different
+vocabularies, so the loader records the second kind in a `SourceMap` that
+travels on the `Spec` — **not compared**, since two spellings of one spec must
+stay equal and their lines differ.
+
+`json` reports no positions and a mapping built in memory has no file, so a
+line is `None` there and a message carries the path alone. That is the path the
+standard library alone supports, and it stays first-class.
 
 The compiler's half of the same surface, added in revision 7 (§14):
 

@@ -1,0 +1,26 @@
+name: sensor
+version: "1.0"
+input: datagram
+entry: reading
+over: udp
+ports: [9000]
+doc: Field telemetry from the shed sensors.
+
+enums:
+  kind: {0: temperature, 1: humidity, 2: pressure}
+
+units:
+  reading:
+    doc: One datagram — a header and a run of samples.
+    fields:
+      - {name: magic,   type: {int: {bits: 16}}, const: 0x5345}
+      - {name: version, type: {int: {bits: 8}}}
+      - {name: count,   type: {int: {bits: 8}}, derive: {count_of: samples}}
+      - {name: samples, type: {unit: sample}, repeat: {count: count}}
+
+  sample:
+    fields:
+      - {name: kind,   type: {int: {bits: 8, enum: kind}}}
+      - {name: length, type: {int: {bits: 8}}, derive: {size_of: value}}
+      - {name: value,  type: {bytes: {size: {expr: "length"}}}, sensitive: true}
+      - {name: reading, type: {int: {bits: 32, signed: true, endian: little}}}

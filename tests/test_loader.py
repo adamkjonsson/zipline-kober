@@ -870,3 +870,450 @@ def test_an_unknown_key_in_an_until_is_refused():
         sole_field(
             {"name": "a", "bits": 8, "repeat": {"until": {"expr": "a == 0", "az": "e"}}}
         )
+
+
+# --- source locations ------------------------------------------------------
+#
+# A spec is hand-written YAML, so a fault that names the construct and not the
+# line is a description rather than a way to find it. These check the line is
+# right, and that the paths without one still say everything they used to.
+
+SPEC_YAML = """\
+name: dns
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: id, bits: 16}
+      - name: flags
+        bits: 8
+      - {name: bad, bits: wide}
+"""
+
+
+def test_a_yaml_fault_carries_its_line():
+    with pytest.raises(SpecError) as caught:
+        from_yaml(SPEC_YAML, source="dns.yaml")
+    assert caught.value.loc is not None
+    assert caught.value.loc.line == 10
+    assert caught.value.loc.source == "dns.yaml"
+    assert str(caught.value).startswith("dns.yaml:10: spec.units.message.fields[2]")
+
+
+def test_the_line_is_of_the_construct_not_of_the_document():
+    """A fault in a block-style field reports that field, not the unit."""
+    text = SPEC_YAML.replace("        bits: 8", "        bits: wide")
+    with pytest.raises(SpecError) as caught:
+        from_yaml(text, source="dns.yaml")
+    assert caught.value.loc is not None
+    assert caught.value.loc.line == 8
+
+
+def test_a_fault_in_a_nested_unit_carries_the_nested_line():
+    text = """\
+name: dns
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: q, unit: question}
+  question:
+    fields:
+      - {name: qtype, bits: notanumber}
+"""
+    with pytest.raises(SpecError) as caught:
+        from_yaml(text, source="dns.yaml")
+    assert caught.value.loc is not None
+    assert caught.value.loc.line == 10
+
+
+def test_a_fault_under_a_block_scalar_reports_the_field_it_is_in():
+    text = """\
+name: dns
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - name: id
+        doc: >
+          A long description
+          spread over lines.
+        bits: wide
+"""
+    with pytest.raises(SpecError) as caught:
+        from_yaml(text, source="dns.yaml")
+    assert caught.value.loc is not None
+    assert caught.value.loc.line == 7
+
+
+def test_from_file_names_the_file(tmp_path: Path):
+    path = tmp_path / "broken.yaml"
+    path.write_text(SPEC_YAML, encoding="utf-8")
+    with pytest.raises(SpecError) as caught:
+        from_file(path)
+    assert caught.value.loc is not None
+    assert caught.value.loc.source == str(path)
+    assert f"{path}:10:" in str(caught.value)
+
+
+def test_json_degrades_to_the_path_alone():
+    """`json` reports no positions, so the message is exactly what it always was."""
+    document = dict(MINIMAL)
+    document["units"] = {"message": {"fields": [{"name": "a", "bits": "wide"}]}}
+    with pytest.raises(SpecError) as caught:
+        from_json(json.dumps(document), source="dns.json")
+    assert caught.value.loc is not None
+    assert caught.value.loc.line is None
+    assert str(caught.value).startswith("spec.units.message.fields[0]")
+
+
+def test_from_dict_has_no_source_at_all():
+    document = dict(MINIMAL)
+    document["units"] = {"message": {"fields": [{"name": "a", "bits": "wide"}]}}
+    with pytest.raises(SpecError) as caught:
+        from_dict(document)
+    assert caught.value.loc is not None
+    assert caught.value.loc.source is None
+    assert caught.value.loc.line is None
+
+
+def test_a_line_is_not_part_of_what_a_spec_is():
+    """Two spellings must stay equal, so the source cannot enter equality."""
+    from_file_spec = from_yaml(
+        "name: dns\nversion: '1.0'\nentry: m\nunits:\n  m:\n    fields: []\n",
+        source="dns.yaml",
+    )
+    from_memory = from_dict(
+        {"name": "dns", "version": "1.0", "entry": "m", "units": {"m": {"fields": []}}}
+    )
+    assert from_file_spec == from_memory
+    assert from_file_spec.sources.source == "dns.yaml"
+    assert from_memory.sources.source is None
+
+
+def test_the_source_map_speaks_the_checkers_vocabulary():
+    spec = from_yaml(SPEC_YAML.replace("bits: wide", "bits: 8"), source="dns.yaml")
+    assert spec.sources.locate("dns").line == 1
+    # The unit's body begins at its first key, which is where PyYAML marks a
+    # mapping — `fields:` rather than the `message:` naming it a line above.
+    assert spec.sources.locate("dns.message").line == 6
+    assert spec.sources.locate("dns.message.id").line == 7
+    assert spec.sources.locate("dns.message.flags").line == 8
+
+
+def test_an_unnamed_construct_falls_back_to_the_one_above_it():
+    """A guard has no line of its own; its unit's is the useful answer."""
+    spec = from_yaml(SPEC_YAML.replace("bits: wide", "bits: 8"), source="dns.yaml")
+    assert spec.sources.locate("dns.message.confirm").line == 6
+    assert spec.sources.locate("dns.message.confirm").path == "dns.message.confirm"
+
+
+# --- the repeat kind lifts into the field ----------------------------------
+#
+# The same rule as the type kind, applied to the construct beside it. Every
+# test here has a long-form twin above it; the ones that matter are the two
+# that say a lifted spelling builds the identical model.
+
+
+def test_the_three_key_sets_do_not_overlap():
+    """The rule rests on this, so it is asserted rather than assumed."""
+    from kober import loader
+
+    assert not loader._FIELD_KEYS & loader._TYPE_KEYS
+    assert not loader._FIELD_KEYS & loader._REPEAT_KINDS
+    assert not loader._TYPE_KEYS & loader._REPEAT_KINDS
+
+
+def test_a_lifted_count_repeats():
+    field = sole_field({"name": "a", "bits": 8, "count": "3"})
+    assert isinstance(field.repeat, Count)
+    assert unparse(field.repeat.expr) == "3"
+
+
+def test_a_lifted_until_repeats():
+    field = sole_field({"name": "a", "bits": 8, "until": "a == 0"})
+    assert isinstance(field.repeat, Until)
+    assert unparse(field.repeat.expr) == "a == 0"
+    assert field.repeat.alias is None
+
+
+def test_a_lifted_until_may_still_name_its_element():
+    field = sole_field({"name": "a", "bits": 8, "until": {"expr": "e == 0", "as": "e"}})
+    assert isinstance(field.repeat, Until)
+    assert field.repeat.alias == "e"
+
+
+def test_a_lifted_to_end_repeats():
+    field = sole_field({"name": "a", "bits": 8, "to_end": True})
+    assert isinstance(field.repeat, ToEnd)
+
+
+@pytest.mark.parametrize(
+    ("lifted", "wrapped"),
+    [
+        ({"count": "3"}, {"repeat": {"count": "3"}}),
+        ({"until": "a == 0"}, {"repeat": {"until": "a == 0"}}),
+        (
+            {"until": {"expr": "e == 0", "as": "e"}},
+            {"repeat": {"until": {"expr": "e == 0", "as": "e"}}},
+        ),
+        ({"to_end": True}, {"repeat": {"to_end": True}}),
+    ],
+)
+def test_both_repeat_spellings_build_the_same_field(
+    lifted: dict[str, Any], wrapped: dict[str, Any]
+):
+    """A shorthand nothing downstream can detect, which is what makes it one."""
+    assert sole_field({"name": "a", "bits": 8, **lifted}) == sole_field(
+        {"name": "a", "bits": 8, **wrapped}
+    )
+
+
+def test_a_field_repeats_one_way():
+    with pytest.raises(SpecError, match="repeats one way, and this names 'count', 'until'"):
+        sole_field({"name": "a", "bits": 8, "count": "3", "until": "a == 0"})
+
+
+def test_a_lifted_repeat_beside_its_wrapper_names_both():
+    with pytest.raises(SpecError, match="it has 'repeat' and also 'count'"):
+        sole_field({"name": "a", "bits": 8, "count": "3", "repeat": {"to_end": True}})
+
+
+def test_a_field_may_still_say_nothing_about_repeating():
+    assert sole_field({"name": "a", "bits": 8}).repeat is None
+
+
+def test_an_unknown_field_key_says_which_set_it_was_looked_for_in():
+    """Three sets listed as one alphabetical run would say nothing about why."""
+    with pytest.raises(SpecError) as caught:
+        sole_field({"name": "a", "bits": 8, "conditon": "x > 1"})
+    message = str(caught.value)
+    assert "allowed here: condition, const, doc, emit, name, repeat, type" in message
+    assert "a type kind: bits," in message
+    assert "a repeat kind: count, to_end, until" in message
+
+
+# --- a parameter is a single-key mapping too --------------------------------
+
+
+def param_spec(params: list[Any]) -> Spec:
+    return from_dict(
+        dict(
+            MINIMAL,
+            units={
+                "message": {"fields": [{"name": "a", "unit": {"name": "p", "args": ["1"]}}]},
+                "p": {"params": params, "fields": [{"name": "b", "bits": 8}]},
+            },
+        )
+    )
+
+
+def test_a_parameter_may_be_written_as_a_name_and_a_type():
+    param = param_spec([{"high": "int"}]).unit("p").params[0]
+    assert param.name == "high"
+    assert param.type is ExprType.INT
+
+
+def test_both_parameter_spellings_build_the_same_unit():
+    assert param_spec([{"high": "int"}]) == param_spec([{"name": "high", "type": "int"}])
+
+
+def test_an_entry_naming_two_parameters_is_refused():
+    """Arguments bind in order, so one entry cannot stand for two."""
+    with pytest.raises(SpecError, match="names one parameter, and this names 'high', 'low'"):
+        param_spec([{"high": "int", "low": "int"}])
+
+
+def test_an_entry_naming_name_is_read_as_the_long_form():
+    """`{name: high}` is a long form missing its type, not a parameter called 'name'."""
+    with pytest.raises(SpecError, match="missing required key 'type'"):
+        param_spec([{"name": "high"}])
+
+
+def test_a_short_parameter_checks_its_type():
+    with pytest.raises(SpecError, match="unknown value 'wide'"):
+        param_spec([{"high": "wide"}])
+
+
+def test_a_short_parameter_still_binds_positionally():
+    spec = param_spec([{"high": "int"}, {"low": "int"}])
+    assert [p.name for p in spec.unit("p").params] == ["high", "low"]
+
+
+# --- byte order inherits ---------------------------------------------------
+#
+# Invisible in both shipped examples, which are big-endian network protocols.
+# That is a property of the examples: anything not on a wire is little-endian
+# throughout, and before this every integer in such a spec had to write the
+# long form — so the format's principal shorthand was unusable on any of them.
+
+
+def endian_spec(**scopes: Any) -> Spec:
+    """Build a spec whose document and unit scopes come from the arguments."""
+    document = dict(MINIMAL)
+    unit: dict[str, Any] = {
+        "fields": [
+            {"name": "a", "bits": 16},
+            {"name": "b", "int": {"bits": 32}},
+            {"name": "c", "int": {"bits": 16, "endian": "big"}},
+        ]
+    }
+    if "unit" in scopes:
+        unit["endian"] = scopes["unit"]
+    if "document" in scopes:
+        document["endian"] = scopes["document"]
+    document["units"] = {"message": unit}
+    return from_dict(document)
+
+
+def endians(spec: Spec) -> list[str]:
+    return [field.type.endian.value for field in spec.unit("message").fields]
+
+
+def test_byte_order_defaults_to_big():
+    assert endians(endian_spec()) == ["big", "big", "big"]
+
+
+def test_a_document_declares_byte_order_for_everything_below_it():
+    assert endians(endian_spec(document="little")) == ["little", "little", "big"]
+
+
+def test_a_unit_overrides_the_document():
+    assert endians(endian_spec(document="little", unit="big")) == ["big", "big", "big"]
+    assert endians(endian_spec(document="big", unit="little")) == ["little", "little", "big"]
+
+
+def test_a_field_overrides_a_unit_overriding_a_document():
+    """The whole chain in one spec, which is the case each level alone misses."""
+    spec = endian_spec(document="big", unit="little")
+    assert endians(spec) == ["little", "little", "big"]
+
+
+def test_an_inherited_default_builds_the_identical_spec():
+    """What makes this a shorthand rather than a feature."""
+    inherited = from_dict(
+        dict(
+            MINIMAL,
+            endian="little",
+            units={"message": {"fields": [{"name": "a", "bits": 16}, {"name": "b", "bits": 8}]}},
+        )
+    )
+    written_out = from_dict(
+        dict(
+            MINIMAL,
+            units={
+                "message": {
+                    "fields": [
+                        {"name": "a", "int": {"bits": 16, "endian": "little"}},
+                        {"name": "b", "int": {"bits": 8, "endian": "little"}},
+                    ]
+                }
+            },
+        )
+    )
+    assert inherited == written_out
+
+
+def test_an_inherited_order_reaches_a_switch_case_and_a_pointer_target():
+    """Both reach an integer through _field_type rather than from a field."""
+    spec = from_dict(
+        dict(
+            MINIMAL,
+            endian="little",
+            units={
+                "message": {
+                    "fields": [
+                        {"name": "tag", "bits": 8},
+                        {
+                            "name": "body",
+                            "switch": {"dispatch": "tag", "cases": {1: {"bits": 16}}},
+                        },
+                        {"name": "ptr", "pointer": {"at": "tag", "type": {"int": {"bits": 16}}}},
+                    ]
+                }
+            },
+        )
+    )
+    fields = {field.name: field.type for field in spec.unit("message").fields}
+    assert fields["body"].cases[1].endian is Endian.LITTLE
+    assert fields["ptr"].type.endian is Endian.LITTLE
+
+
+def test_signedness_does_not_inherit():
+    """A protocol is little-endian; it is not *signed*."""
+    spec = endian_spec(document="little")
+    assert all(not field.type.signed for field in spec.unit("message").fields)
+
+
+def test_a_sub_byte_field_inherits_harmlessly():
+    """`endian` applies only to a whole-byte read, so a bits: 4 is unaffected."""
+    spec = from_dict(
+        dict(
+            MINIMAL,
+            endian="little",
+            units={"message": {"fields": [{"name": "nibble", "bits": 4}]}},
+        )
+    )
+    assert spec.unit("message").fields[0].type.endian is Endian.LITTLE
+
+
+def test_endian_beside_bits_at_field_level_is_still_an_unknown_key():
+    """The key is added to the spec and unit sets, not to the field's."""
+    with pytest.raises(SpecError, match="unknown key\\(s\\) 'endian'"):
+        sole_field({"name": "a", "bits": 16, "endian": "little"})
+
+
+def test_an_unknown_byte_order_is_refused():
+    with pytest.raises(SpecError, match="unknown value 'middle'"):
+        endian_spec(document="middle")
+
+
+# --- const ------------------------------------------------------------------
+#
+# The value is read in the spelling the field's own type gives it. Whether it
+# *fits* is the checker's; see tests/test_check.py.
+
+
+def test_an_integer_constant_is_a_number():
+    assert sole_field({"name": "magic", "bits": 16, "const": 0x5345}).const == 0x5345
+
+
+def test_a_string_constant_is_text():
+    assert sole_field({"name": "verb", "string": 3, "const": "GET"}).const == "GET"
+
+
+def test_a_bytes_constant_may_be_written_as_text():
+    """A magic number reads as what it is rather than as four numbers."""
+    assert sole_field({"name": "sig", "bytes": 3, "const": "GET"}).const == b"GET"
+
+
+def test_a_bytes_constant_may_be_written_as_byte_values():
+    assert sole_field({"name": "sig", "bytes": 2, "const": [137, 80]}).const == b"\x89P"
+
+
+def test_a_field_without_a_constant_has_none():
+    assert sole_field({"name": "a", "bits": 8}).const is None
+    assert sole_field({"name": "a", "bits": 8, "const": None}).const is None
+
+
+def test_an_anonymous_field_may_carry_a_constant():
+    """Reserved bits that must be zero need no name to be checked."""
+    assert sole_field({"name": None, "bits": 8, "const": 0}).const == 0
+
+
+def test_a_boolean_constant_is_refused_with_a_yaml_hint():
+    with pytest.raises(SpecError, match="on/off/yes/no"):
+        sole_field({"name": "a", "bits": 8, "const": True})
+
+
+def test_a_mapping_is_not_a_constant():
+    with pytest.raises(SpecError, match="a constant is a number, text, or a list"):
+        sole_field({"name": "a", "bits": 8, "const": {"nope": 1}})
+
+
+def test_a_byte_value_outside_a_byte_is_refused():
+    with pytest.raises(SpecError, match="must be 0..255"):
+        sole_field({"name": "a", "bytes": 2, "const": [137, 300]})

@@ -22,6 +22,234 @@ minor bump here too.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-10
+
+**The dialect release.** Nothing here changes what kober decodes: every change
+is about the surface an author writes and the messages they get back when they
+write it wrong.
+
+Three strands. A spec is **shorter to write** — the repeat kind and the
+parameter form join the shorthands, and byte order inherits, which is what
+makes a little-endian spec able to use `bits:` at all. A fault **says which
+line it is on**, which matters most in `check`, since it reports every fault
+rather than stopping at the first. And a spec written for
+[packeteer](https://github.com/adamkjonsson/packeteer) **loads here**, with the
+keys kober has no use for declined out loud rather than refused as typos —
+tested against that project's own shipped specs rather than claimed.
+
+`const` is the one construct that reaches a decode: a magic number, checked at
+the field that declares it rather than after a whole message has been read
+against the wrong protocol.
+
+Depends on `zpf` `0.3.x`, unchanged from `0.1.0`.
+
+Two breaking changes, both in diagnostics: `check.Finding.where` is a
+`Location` rather than a `str`, and `ExprError.where` is gone in favour of the
+inherited `SpecError.loc`. See **Changed** below.
+
+### Added
+
+- **A repeat kind may be written on the field**, as a type kind already could
+  ([#23](https://github.com/adamkjonsson/zipline-kober/issues/23)):
+
+  ```yaml
+  - {name: questions, unit: question, repeat: {count: "qdcount"}}   # still works
+  - {name: questions, unit: question, count: qdcount}               # and so does this
+  ```
+
+  `count`, `until` and `to_end` all lift, and a lifted `until` takes the same
+  body the wrapped one does, `as` included. Both spellings build the identical
+  spec.
+
+  The rule behind it is now stated once rather than as a list of special
+  cases: **a tagged construct's kind may lift into its parent where the key
+  sets do not overlap.** A field's keys come from three sets that share no
+  member — its own, the type kinds, the repeat kinds — and an unknown key is
+  refused with each set named separately.
+
+  `examples/dns.yaml` and `examples/http.yaml` are written the short way.
+
+- **A packeteer spec loads here, and says what it carried that kober does not**
+  ([#27](https://github.com/adamkjonsson/zipline-kober/issues/27)). The two
+  projects describe the same protocols with one dialect, and until now that was
+  a claim in two references rather than a property of two loaders: kober gave
+  packeteer's keys the same treatment as a misspelled `conditon:`.
+
+  Four keys are now recognised, not implemented, and declined out loud —
+  `over` and `ports` at the top level, `derive` and `sensitive` on a field:
+
+  ```console
+  $ kober check sensor.yaml
+  warning: sensor.yaml:1: sensor: 'over' is a packeteer key and has no meaning here; kober is handed a spec rather than choosing one by transport
+  warning: sensor.yaml:25: sensor.sample.value: 'sensitive' is a packeteer key and has no meaning here; kober writes decoded records and has no redaction step
+  sensor 1.0: 0 error(s), 5 warning(s)
+  ```
+
+  Warnings rather than errors, because ignoring any of them changes no decode.
+  `--strict` refuses them outright. **Strictness is untouched**: an unknown key
+  is still an error, and these four simply stopped being unknown.
+
+  New `Spec.foreign`, a sequence of `Foreign(key, where)` — a side list rather
+  than attributes on `Field`, so a diagnostic costs no consumer a field it
+  never reads.
+
+  `tests/test_packeteer.py` loads packeteer `0.12.0`'s own shipped specs, held
+  as copies under `tests/packeteer/`. `sensor.yaml` loads, checks, and decodes;
+  `rpc.yaml` is still refused by the one thing recognising keys cannot fix —
+  packeteer spells the switch dispatch key `on`, which kober renamed to
+  `dispatch` at `0.1.0` because YAML 1.1 reads it as a boolean. That test
+  asserts the refusal rather than skipping it, so it fails when packeteer
+  moves.
+
+- **`const` on a field**, the ordinary way a decoder refuses traffic that is
+  not its own ([#26](https://github.com/adamkjonsson/zipline-kober/issues/26)):
+
+  ```yaml
+  - {name: magic, bits: 16, const: 0x5345}
+  - {name: null, bits: 8, const: 0}          # reserved bits that must be zero
+  - {name: verb, string: 3, const: "GET"}
+  - {name: sig, bytes: 2, const: [137, 80]}  # or as byte values
+  ```
+
+  It took two places to say before — the constant in a unit-level `confirm`,
+  away from the field it constrains — and a guard is evaluated **once the
+  unit's fields are decoded**. A run holds as many messages as fit, so a
+  message that read the wrong number of bytes leaves every message behind it
+  misaligned: a wrong guess caught at byte two ends one message, where the same
+  guess caught by a guard has already consumed an arbitrary number of them.
+
+  **A field that disagrees is `undecodable`, and nothing is raised** — this
+  project's existing vocabulary for *tried and could not*, and the verdict a
+  failing `confirm` already produces. Its bytes are still cited. A constant on
+  a repeated field constrains every element.
+
+  `check` verifies that the field's type holds a value at all, that the
+  constant's type matches it, and that an integer constant fits the field's
+  `bits` — each otherwise found only by a decode that never matches anything.
+  `kober show` prints the constant beside the field.
+
+  `confirm` and `reject` are unchanged, and remain what a condition spanning
+  more than one field is written as.
+
+- **`endian` on the document and on the unit**, so a little-endian spec can use
+  the format's principal shorthand
+  ([#22](https://github.com/adamkjonsson/zipline-kober/issues/22)). Byte order
+  resolves **field → unit → document → `big`**:
+
+  ```yaml
+  endian: little          # every integer below, unless it says otherwise
+
+  units:
+    header:
+      fields:
+        - {name: magic, bits: 32}
+        - {name: version, bits: 16}
+        - {name: crc, int: {bits: 32, endian: big}}   # the exception, stated
+  ```
+
+  The cost this removes is not the word. A field needing `endian` had to write
+  `int: {bits: 32, endian: little}`, so **no integer field in a little-endian
+  spec could use `bits:` at all** — invisible in both shipped examples, which
+  are big-endian network protocols, and unavoidable in anything not on a wire.
+
+  Resolved **when the spec loads** and folded into each field, so nothing
+  downstream can tell which spelling was used: a spec written with an inherited
+  default builds a `Spec` equal to one with `endian` on every integer. `kober
+  show` prints the resolved byte order, which is where to look when a field's
+  own line no longer says.
+
+  `signed` does **not** inherit: a protocol is little-endian, it is not
+  *signed*. `endian` beside `bits:` at field level remains an unknown-key
+  error.
+
+- **A unit parameter may be written as a single-key mapping of name to type**
+  ([#24](https://github.com/adamkjonsson/zipline-kober/issues/24)), like every
+  other tagged construct in the schema:
+
+  ```yaml
+  params: [{name: high, type: int}]   # still works
+  params: [{high: int}]               # and so does this
+  ```
+
+  An entry naming `name` or `type` is read as the long form, so `{name: high}`
+  stays a long form missing its type rather than becoming a parameter called
+  `name`. `params` remains a **list**: arguments bind positionally, and YAML
+  does not promise the order of a mapping's keys.
+
+- **A spec fault says which file and line it is on**
+  ([#25](https://github.com/adamkjonsson/zipline-kober/issues/25)). A spec is
+  written by hand in YAML, and until now a fault named the construct and never
+  the place: `spec.units.message.fields[0]` means counting field entries by
+  hand, over the *loaded* document, so a commented-out field shifts the count
+  away from anything visible. It now reads
+
+  ```console
+  $ kober check bad.yaml
+  error: bad.yaml:7: dns.message.body: size: 'later' is declared later in unit 'message'; a field may only reference fields decoded before it
+  ```
+
+  It matters most in `check`, which deliberately reports every fault rather
+  than stopping at the first — a dozen faults with no line numbers is a dozen
+  things to go hunting for.
+
+  New `kober.source` module: `Location` (path, line, source) is what a fault
+  carries, and `SourceMap` is what a returned finding looks one up in.
+  `Spec.sources` holds the map, and is **not compared** — it says where a spec
+  was read from, not what it is.
+
+- **`from_dict`, `from_json`, `from_yaml` take `source=`**, naming the file a
+  document came from so a message can lead with it. `from_file` passes the
+  path it was given. The same keyword is on the `Spec` classmethods.
+
+### Changed
+
+- **Breaking: `check.Finding.where` is a `Location`, not a `str`.** The dotted
+  path is still there, as `finding.where.path`; `str(finding)` renders
+  `file:line: path: message` when it has a file and a line, and exactly what it
+  printed before when it does not. Callers comparing `finding.where` to a
+  string must compare `finding.where.path` instead.
+- **Breaking: `ExprError.where` is gone**; the location is `ExprError.loc`,
+  inherited from `SpecError`, and it is a `Location`. One name for one thing:
+  an expression fault is in a place, and the parent class already had the
+  attribute for it. The constructor argument is still spelled `where`.
+  `SpecError` gains `.message` and `.loc`.
+- `ExprError`'s rendered message leads with the location like every other
+  fault — `dns.yaml:41: dns.message.size: cannot parse (…): 'a +'` — rather
+  than putting it between the message and the quoted source.
+
+### Documentation
+
+- **The format reference is written in the dialect the examples use**
+  ([#21](https://github.com/adamkjonsson/zipline-kober/issues/21)). It taught
+  the long form on the two pages an author reads first, while
+  `examples/dns.yaml` never once used that spelling — so an author learned one
+  language, wrote it, and could not read this project's own example in it.
+  Worse, they kept writing it, because nothing said the long form was the
+  fallback rather than the norm.
+
+  | Page | `type: {` before | after |
+  | --- | --- | --- |
+  | `docs/format/concepts.md` | 6 | 1 |
+  | `docs/format/document.md` | 3 | 1 |
+  | `docs/format/types.md` | 19 | 10 |
+
+  The presentation is inverted rather than the format changed: `concepts.md`
+  and `document.md` are written short, `types.md` leads with *how a field is
+  written* and keeps the tagged mapping underneath as **the three rules**, each
+  kind's entry leads with its short spelling, and a new section says when the
+  long form is actually needed — a body with a second key, a type inside a
+  construct such as a `pointer`'s target, or readability.
+
+  What is left in each page is the spelling that has no shorthand, which is
+  now the only reason to see one.
+
+  `tests/test_docs.py` holds the pages and the examples to it, since both
+  spellings are valid and nothing else would notice the drift returning.
+
+- The `check` transcript in the README, the error examples in
+  `docs/format/index.md` and `docs/format/expressions.md`, and `DESIGN.md` §6
+  all show the line, and say that JSON and `from_dict` carry the path alone.
+
 ## [0.1.0] - 2026-09-07
 
 The first release.
@@ -1476,5 +1704,6 @@ installed from a checkout (see the README).
   parses `comment` back. Whether to follow `zpf` 0.3 (#58, #59) is recorded as
   an open question rather than settled.
 
-[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/adamkjonsson/zipline-kober/releases/tag/v0.1.0

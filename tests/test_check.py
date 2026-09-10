@@ -6,6 +6,7 @@ import pytest
 
 from kober.check import Severity, check, trailing_width
 from kober.expr import ExprType, parse
+from kober.loader import from_yaml
 from kober.spec import (
     BytesType,
     Computed,
@@ -1406,3 +1407,114 @@ def test_a_selects_default_sees_no_element_under_either_name():
         ]
     )
     assert any("unknown name" in message for message in errors(spec))
+
+
+# --- findings say where they are -------------------------------------------
+#
+# `check` reports every fault rather than stopping at the first, so a dozen
+# faults with no line numbers is a dozen things to go hunting for.
+
+BAD_SPEC_YAML = """\
+name: dns
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: id, bits: 16}
+      - {name: body, bytes: {size: {expr: "later"}}}
+      - {name: later, bits: 8}
+"""
+
+
+def test_a_finding_carries_the_line_it_is_about():
+    spec = from_yaml(BAD_SPEC_YAML, source="dns.yaml")
+    findings = check(spec)
+    assert findings
+    assert findings[0].where.source == "dns.yaml"
+    assert findings[0].where.line == 8
+    assert findings[0].where.path == "dns.message.body"
+
+
+def test_a_finding_renders_file_line_path_then_message():
+    spec = from_yaml(BAD_SPEC_YAML, source="dns.yaml")
+    rendered = str(check(spec)[0])
+    assert rendered.startswith("error: dns.yaml:8: dns.message.body: ")
+
+
+def test_a_finding_from_a_mapping_reads_as_it_always_did():
+    """`from_dict` has no source, and the message must not degrade beyond that."""
+    spec = Spec.from_dict(
+        {
+            "name": "dns",
+            "version": "1.0",
+            "entry": "message",
+            "units": {
+                "message": {
+                    "fields": [
+                        {"name": "body", "bytes": {"size": {"expr": "later"}}},
+                        {"name": "later", "bits": 8},
+                    ]
+                }
+            },
+        }
+    )
+    finding = check(spec)[0]
+    assert finding.where.line is None
+    assert str(finding).startswith("error: dns.message.body: ")
+
+
+# --- const ------------------------------------------------------------------
+#
+# Each of these is otherwise found by a decode that never matches anything,
+# which looks like traffic that is not ours rather than a spec that cannot
+# match — so they are worth catching before any data exists.
+
+
+def const_spec(kind: FieldType, const: object) -> Spec:
+    return build([Unit(name="message", fields=[Field(name="f", type=kind, const=const)])])
+
+
+def test_a_constant_needs_a_field_that_holds_a_value():
+    kind = Switch(dispatch=parse("1"), cases={1: IntType(bits=8)})
+    assert "a constant needs a field that holds a value" in only_error(const_spec(kind, 1))
+
+
+def test_a_constant_on_a_unit_is_refused():
+    spec = build(
+        [
+            Unit(name="message", fields=[Field(name="f", type=UnitRef("other"), const=1)]),
+            Unit(name="other", fields=[Field(name="g", type=IntType(bits=8))]),
+        ]
+    )
+    assert "a constant needs a field that holds a value" in only_error(spec)
+
+
+@pytest.mark.parametrize(
+    ("kind", "const"),
+    [
+        (IntType(bits=8), "GET"),
+        (StringType(size=Fixed(3)), 7),
+        (BytesType(size=Fixed(2)), "no"),
+    ],
+)
+def test_a_constant_must_be_the_type_the_field_decodes(kind: FieldType, const: object):
+    assert "and the field decodes" in only_error(const_spec(kind, const))
+
+
+@pytest.mark.parametrize("const", [256, -1])
+def test_an_integer_constant_must_fit_the_field(const: int):
+    assert "does not fit 8 bits" in only_error(const_spec(IntType(bits=8), const))
+
+
+def test_a_signed_field_holds_a_negative_constant():
+    assert not errors(const_spec(IntType(bits=8, signed=True), -1))
+    assert "does not fit 8 signed bits" in only_error(
+        const_spec(IntType(bits=8, signed=True), 128)
+    )
+
+
+def test_a_constant_that_fits_is_no_finding():
+    assert not errors(const_spec(IntType(bits=16), 0x5345))
+    assert not errors(const_spec(StringType(size=Fixed(3)), "GET"))
+    assert not errors(const_spec(BytesType(size=Fixed(2)), b"\x89P"))

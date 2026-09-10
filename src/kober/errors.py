@@ -20,6 +20,13 @@ Every error kober raises is a :class:`KoberError`. Below that the split is by
 - :class:`CompileError` — a valid spec cannot be expressed in the language
   being generated. Not a spec fault either: what collides differs by target.
 
+**A spec fault says where it is.** :class:`SpecError` carries a
+:class:`~kober.source.Location`, so a message names the file and the line as
+well as the construct — the difference between a description of a problem and a
+way to find it, on a format whose whole surface is hand-written. A source that
+reports no positions leaves the line ``None`` and the message reads as it
+always did; see :mod:`kober.source`.
+
 :func:`kober.check.check` deliberately does **not** raise. A validator that
 stops at the first fault makes an author fix a spec one line per run, so it
 returns every :class:`~kober.check.Finding` it can see instead. Raising is for
@@ -36,6 +43,11 @@ the region and continue. Letting one out of a decode is a bug.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kober.source import Location
+
 
 class KoberError(Exception):
     """Base class for all errors raised by the kober package."""
@@ -48,7 +60,26 @@ class SpecError(KoberError):
     fault — an unknown key, a wrong value type, a reference to a unit that
     does not exist — and by :func:`kober.check.check` for the faults that need the
     whole spec in view, such as a cycle in the unit graph.
+
+    Carries a :class:`~kober.source.Location` when the raiser knows one, which
+    the loader always does and the model rarely does. The rendered message
+    leads with whatever the location has: ``dns.yaml:27: path: message`` from a
+    file, and ``path: message`` from JSON or a mapping, which is what was
+    printed before locations existed.
+
+    Attributes:
+        message: What is wrong, without the location.
+        loc: Where it is, when that is known.
+
     """
+
+    message: str
+    loc: Location | None
+
+    def __init__(self, message: str, loc: Location | None = None) -> None:
+        self.message = message
+        self.loc = loc
+        super().__init__(message if loc is None else f"{loc}: {message}")
 
 
 class ExprError(SpecError):
@@ -58,20 +89,24 @@ class ExprError(SpecError):
     expression is authored as a string and the string is what the author
     will look for.
 
+    Its location is :attr:`~kober.errors.SpecError.loc`, inherited rather than
+    a second attribute of its own: an expression fault is in a place, and one
+    name for that is enough. The constructor still spells the argument
+    ``where``, because that is what it is at a call site.
+
     Attributes:
-        message: What is wrong.
+        message: What is wrong, without the location or the quoted source.
         source: The expression text as authored.
-        where: Dotted path to the field or unit the expression belongs to,
-            when the raiser knows it.
 
     """
 
-    def __init__(self, message: str, source: str, where: str | None = None) -> None:
+    def __init__(self, message: str, source: str, where: Location | None = None) -> None:
+        super().__init__(f"{message}: {source!r}", where)
+        # Restated bare: `message` is what a caller reports on its own terms —
+        # `check` puts it in a Finding — where the rendered form quotes the
+        # source, which is the whole reason this class exists.
         self.message = message
         self.source = source
-        self.where = where
-        location = f" at {where}" if where else ""
-        super().__init__(f"{message}{location}: {source!r}")
 
 
 class Stopped(KoberError):

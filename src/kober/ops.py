@@ -195,6 +195,9 @@ class FieldPlan:
             and then whatever granularity the decoder was asked for.
         doc: The spec's own description, verbatim. Author-supplied text, and
             the reason a backend must escape rather than interpolate.
+        const: A value the field must equal, or ``None``. A backend has to
+            compare what it read against this and refuse the input when they
+            disagree, which is why it is carried rather than left in the spec.
 
     """
 
@@ -206,6 +209,7 @@ class FieldPlan:
     condition: Expr | None = None
     emit: Emit | None = None
     doc: str | None = None
+    const: int | bytes | str | None = None
 
     @property
     def exhaustive(self) -> bool:
@@ -738,6 +742,7 @@ def _field(spec: Spec, unit: str, index: int, item: Field) -> FieldPlan:
         condition=item.condition,
         emit=item.emit,
         doc=item.doc,
+        const=item.const,
     )
 
 

@@ -22,6 +22,7 @@ from kober.expr import (
     references,
     unparse,
 )
+from kober.source import Location
 
 
 class FakeScope:
@@ -134,11 +135,20 @@ def test_refused_constructs(source: str, fragment: str):
 
 
 def test_error_carries_source_and_location():
+    where = Location("dns.message.size")
     with pytest.raises(ExprError) as caught:
-        parse("len(x)", where="dns.message.size")
+        parse("len(x)", where=where)
     assert caught.value.source == "len(x)"
-    assert caught.value.where == "dns.message.size"
+    assert caught.value.loc == where
     assert "dns.message.size" in str(caught.value)
+
+
+def test_the_location_puts_the_line_in_front_of_the_message():
+    """An expression fault reads like every other one: file, line, path, why."""
+    where = Location("dns.message.size", line=27, source="dns.yaml")
+    with pytest.raises(ExprError) as caught:
+        parse("len(x)", where=where)
+    assert str(caught.value).startswith("dns.yaml:27: dns.message.size: ")
 
 
 # --- typing ----------------------------------------------------------------

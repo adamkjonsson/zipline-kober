@@ -34,10 +34,59 @@ units:
 | `units` | **yes** | Every unit, by name. |
 | `enums` | no | Named values for integer fields. |
 | `input` | no | `stream`, `datagram`, or `either` (the default). |
+| `endian` | no | Byte order for every integer below, unless it says otherwise. |
 | `doc` | no | Free text. |
 
 Anything else is an error. That is deliberate: a misspelled key that loads and
 does nothing is a decoder silently doing the wrong thing.
+
+### `endian`
+
+Byte order resolves **field → unit → document → `big`**, and network order is
+the default because the protocols this was written for are on a wire.
+
+```yaml
+name: some_container
+version: "1.0"
+entry: header
+endian: little          # every integer below, unless it says otherwise
+
+units:
+  header:
+    fields:
+      - {name: magic, bits: 32}
+      - {name: version, bits: 16}
+      - {name: crc, int: {bits: 32, endian: big}}   # the exception, stated
+```
+
+It exists because of what the alternative costs: a field needing `endian` must
+write `int: {bits: 32, endian: little}`, so **a little-endian spec could not use
+`bits:` on any integer field at all**. That is most formats not on a wire — a
+filesystem structure, a USB descriptor, a capture container.
+
+Resolution happens **when the spec loads**, so the byte order is folded into
+each field and nothing downstream can tell which spelling was used. It is a
+shorthand, not a feature.
+
+The cost is that a field's meaning depends on a distant line: `bits: 32` no
+longer says how it is read. `kober show` prints the resolved answer, so the
+question has a one-command answer that does not involve scrolling:
+
+```console
+$ kober show container.yaml
+header
+├── magic: u32 little-endian
+├── version: u16 little-endian
+└── crc: u32
+```
+
+Note what does **not** inherit: `signed`. Signedness is a property of what an
+individual field means, where byte order is a property of the format as a
+whole. A protocol is little-endian; it is not *signed*.
+
+`endian` beside `bits:` at field level is an unknown-key error, as it was
+before — the key is on the document and the unit, and an individual integer
+still says it inside `int: {…}`.
 
 ### `input`
 
@@ -58,8 +107,8 @@ units:
   message:
     doc: One DNS message.
     fields:
-      - {name: id, type: {int: {bits: 16}}}
-    params: [{name: size, type: int}]
+      - {name: id, bits: 16}
+    params: [{size: int}]
     confirm: "id != 0"
     reject: "id == 0"
     emit: field
@@ -72,33 +121,78 @@ units:
 | `confirm` | no | Boolean. The unit is abandoned unless this holds. |
 | `reject` | no | Boolean. The unit is abandoned if this holds. |
 | `emit` | no | Default granularity inside this unit. |
+| `endian` | no | Byte order for this unit's integers, overriding the document's. |
 | `doc` | no | Free text. |
 
 `confirm` and `reject` are how a wrong protocol guess becomes an honest
 `undecodable` region rather than a fabricated field tree. Both are evaluated
 once the unit's fields are decoded, so both see all of them.
 
-A parameter's `type` is one of `int`, `bool`, `str`, `bytes`.
+Each `params` entry is a **single-key mapping of name to type**, like every
+other tagged construct in the schema, and a parameter's type is one of `int`,
+`bool`, `str`, `bytes`:
+
+```yaml
+params: [{name: size, type: int}]   # long
+params: [{size: int}]               # the same thing
+```
+
+An entry naming `name` or `type` is read as the long form, so `{name: size}` is
+a long form missing its type rather than a parameter called `name`. A parameter
+actually called `name` or `type` is written out in full, which is what the long
+form is for.
+
+**`params` is a list and not a mapping**, deliberately: arguments bind
+positionally, so the order is load-bearing, and YAML does not promise the order
+of a mapping's keys. Every other mapping in this schema — `units`, `enums`, a
+switch's `cases` — may be reordered without changing meaning, and there is no
+precedent here to lean on.
 
 ## Fields
 
 ```yaml
 - name: qdcount
-  type: {int: {bits: 16}}
+  bits: 16
   condition: "flags.qr == 0"
-  repeat: {count: "n"}
+  count: n
   emit: none
   doc: Number of entries in the question section.
 ```
 
+A field's keys come from **three sets that share no member**, which is what
+lets the type and the repetition be written directly on it:
+
+| | Keys |
+| --- | --- |
+| **Its own** | `name`, `condition`, `const`, `emit`, `doc`, and the two wrappers below |
+| **A type kind** | `bits`, `int`, `bytes`, `string`, `unit`, `switch`, `computed`, `pointer`, `select` |
+| **A repeat kind** | `count`, `until`, `to_end` |
+
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `name` | **yes** | The field's name, or `null` for an anonymous region. |
-| `type` | **yes** | What to decode. See [Types](types.md). |
+| *a type kind* | **yes** | What to decode. See [Types](types.md). |
 | `condition` | no | Boolean. The field is decoded only if it holds. |
-| `repeat` | no | Decode it repeatedly. |
+| *a repeat kind* | no | Decode it repeatedly. |
+| `const` | no | A value the decoded field must equal. See [`const`](types.md#const). |
 | `emit` | no | Granularity for this field. |
 | `doc` | no | Free text. |
+
+Exactly one key must name a type kind, and at most one a repeat kind.
+
+`type:` and `repeat:` are the **long forms** of those two, and they take the
+same bodies:
+
+```yaml
+- {name: questions, unit: question, count: qdcount}                # the same
+- {name: questions, type: {unit: question}, repeat: {count: "qdcount"}}
+```
+
+Both build the identical spec. Reach for the long form where a wrapper is
+clearer to read than a lifted key — and note the one place there is no choice:
+a `pointer`'s target is written `type:`, since it is a type inside a construct
+rather than on a field. See [The three rules](types.md#the-three-rules) for the rule
+and what it refuses.
 
 `name` is required even when it is `null`, so that an anonymous field is a
 choice rather than an omission. Anonymous fields are decoded and cited like any
@@ -119,6 +213,18 @@ over the unit holding it.
 - `field` — one record per leaf, each citing the exact bytes it came from.
 - `none` — decode for control flow and write nothing. The bytes are marked
   `skipped`, which says the spec deliberately passed over them.
+
+Two chains, resolved differently, and the difference is the point:
+
+| | Chain | Resolved |
+| --- | --- | --- |
+| [`endian`](#endian) | field → unit → document → `big` | when the spec **loads** |
+| `emit` | field → unit → enclosing unit → decoder | while it **decodes** |
+
+`emit`'s hop through the *enclosing* unit is dynamic: granularity depends on
+where a unit was referenced from, so the same unit can emit differently at two
+sites. Byte order cannot — a unit's integers are read the same way wherever it
+is referenced from — so it is folded in at load time and leaves no trace.
 
 ## Enums
 
@@ -161,7 +267,7 @@ rename, in either spelling — the bare word and the quoted `"on"`.
 out, because it is about values rather than keys:
 
 ```yaml
-- {name: qr, type: {int: {bits: 1}}, doc: 0 query, 1 response}
+- {name: qr, bits: 1, doc: 0 query, 1 response}
 ```
 
 parses `doc: 0 query` and then `1 response` as a second key, and fails with an
@@ -170,3 +276,72 @@ unknown-key error. Quote any `doc:` containing a comma, or use the block form.
 The same class of trap catches `version: 1.10`, which YAML reads as the number
 `1.1`. Scalars are checked by type and refused with a message saying to quote
 them.
+
+## packeteer's dialect
+
+[packeteer](https://github.com/adamkjonsson/packeteer) generates and inspects
+traffic for the same kind of protocol, and describes one with a dialect of this
+format. Its reference calls that dialect a **superset of kober's**. The two
+projects are meant to read each other's specs, and
+[`tests/test_packeteer.py`](https://github.com/adamkjonsson/zipline-kober/blob/main/tests/test_packeteer.py)
+is what keeps that from being a sentence nobody checks: it loads packeteer's own
+shipped specs and asserts what happens to each.
+
+### Four keys, recognised and declined
+
+packeteer has keys kober has no use for, and they are **not** treated as typos:
+
+| Key | Where | Why it has no meaning here |
+| --- | --- | --- |
+| `over` | top level | kober is handed a spec rather than choosing one by transport |
+| `ports` | top level | kober is handed a spec rather than choosing one by port |
+| `derive` | field | kober decodes and does not encode, so there is nothing to compute |
+| `sensitive` | field | kober writes decoded records and has no redaction step |
+
+Each is a `check` **warning** naming the key and the reason:
+
+```console
+$ kober check sensor.yaml
+warning: sensor.yaml:1: sensor: 'over' is a packeteer key and has no meaning here; kober is handed a spec rather than choosing one by transport
+warning: sensor.yaml:1: sensor: 'ports' is a packeteer key and has no meaning here; kober is handed a spec rather than choosing one by port
+warning: sensor.yaml:18: sensor.reading.count: 'derive' is a packeteer key and has no meaning here; kober decodes and does not encode, so there is nothing to compute
+warning: sensor.yaml:24: sensor.sample.length: 'derive' is a packeteer key and has no meaning here; kober decodes and does not encode, so there is nothing to compute
+warning: sensor.yaml:25: sensor.sample.value: 'sensitive' is a packeteer key and has no meaning here; kober writes decoded records and has no redaction step
+sensor 1.0: 0 error(s), 5 warning(s)
+```
+
+A key on the document is reported at the document, so the two top-level ones
+say line 1 rather than the line each is written on: a mapping knows where it
+began and not where each of its keys is. The field-level ones are exact,
+because a field *is* a mapping.
+
+A warning rather than an error because **ignoring any of them changes no
+decode** — the spec describes the same messages either way, which is the whole
+basis of the superset claim. `--strict` turns them into failures for a project
+that wants them refused outright.
+
+This does not weaken strictness. An unknown key is still an error, and the
+reason for that rule is unchanged: a misspelled `conditon:` must not load and
+quietly do nothing. What changed is that these four stopped being *unknown* —
+known, declined, and reported is strictly more informative than either
+accepting them silently or rejecting them as typos.
+
+They are kept on the spec as {class}`kober.spec.Foreign` records rather than as
+attributes on {class}`kober.spec.Field`, so a diagnostic costs no downstream
+consumer a field it never reads.
+
+`const` was packeteer's key too, and is [kober's now](types.md#const) — which
+is why it is not in the table above.
+
+### What still does not transfer
+
+**The switch dispatch key.** kober renamed `on` to `dispatch` at 0.1.0 and
+deleted the boolean repair, because YAML 1.1 reads an unquoted `on:` as `true`;
+packeteer still requires `on`. That is one construct with two spellings rather
+than a key one side lacks, so no amount of recognising keys helps, and it is
+packeteer's to move.
+
+**kober's shorthands, going the other way.** `bits:`, the lifted kind keys and
+the bare scalars are not implemented there, so a spec from this repository
+fails on the first field. That is the other project's side of the same
+transfer.
