@@ -506,6 +506,31 @@ class Param:
 
 
 @dataclass(frozen=True)
+class Foreign:
+    """A key from packeteer's dialect that this spec used and kober does not.
+
+    [packeteer](https://github.com/adamkjonsson/packeteer) describes the same
+    kind of protocol with a dialect of this format, and has keys kober has no
+    use for: dispatch metadata for a tool that *chooses* a decoder, and
+    encode-direction and redaction keys for a tool that also writes traffic.
+
+    They are recognised and declined out loud rather than refused as typos.
+    Kept in a side list on the :class:`Spec` rather than as attributes on
+    :class:`Field` — nothing here reads them, and a diagnostic should not make
+    every downstream consumer carry a field for it.
+
+    Attributes:
+        key: The key as the document spells it.
+        where: Dotted path to the construct carrying it, in the vocabulary
+            :func:`kober.check.check` reports in.
+
+    """
+
+    key: str
+    where: str
+
+
+@dataclass(frozen=True)
 class EnumDef:
     """Named values for an integer field.
 
@@ -637,6 +662,10 @@ class Spec:
             **Not compared**: it says where a spec came from, not what it is,
             and two spellings of the same spec must stay equal even though
             their lines differ. See :mod:`kober.source`.
+        foreign: Keys the document used that belong to packeteer's dialect of
+            this format. Recognised, unused, and reported by
+            :func:`kober.check.check` as warnings. Compared, unlike
+            :attr:`sources`: they are something the document *said*.
 
     """
 
@@ -648,6 +677,7 @@ class Spec:
     input: InputShape = InputShape.EITHER
     doc: str | None = None
     sources: SourceMap = field(default_factory=SourceMap, compare=False, repr=False)
+    foreign: Sequence[Foreign] = ()
 
     def __post_init__(self) -> None:
         for label, value in (("name", self.name), ("version", self.version)):
@@ -664,6 +694,7 @@ class Spec:
             raise SpecError(msg)
         object.__setattr__(self, "units", MappingProxyType(dict(self.units)))
         object.__setattr__(self, "enums", MappingProxyType(dict(self.enums)))
+        object.__setattr__(self, "foreign", tuple(self.foreign))
 
     # The loader imports this module, so these import it back lazily. Keeping
     # the constructors here is worth that: `Spec.from_file` is the API

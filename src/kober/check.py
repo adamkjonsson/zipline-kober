@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING
 
 from kober.errors import ExprError, SpecError
 from kober.expr import ExprType, IntLiteral, infer_type, unparse
+from kober.loader import FOREIGN_KEYS
 from kober.spec import (
     BytesType,
     Computed,
@@ -477,7 +478,25 @@ class _Checker:
             self._check_unit(unit)
         self._check_reachability()
         self._check_left_recursion()
+        self._check_foreign()
         return tuple(self.findings)
+
+    def _check_foreign(self) -> None:
+        """Report every packeteer key the spec used, and why it means nothing here.
+
+        A **warning**, because ignoring any of them changes no decode: the spec
+        describes the same messages either way, which is the whole basis of the
+        claim that one dialect covers both projects. ``--strict`` turns them
+        into failures for a project that wants them refused outright.
+        """
+        for item in self.spec.foreign:
+            reason = FOREIGN_KEYS.get(item.key)
+            if reason is None:  # pragma: no cover - the loader collects no others
+                continue
+            self.warn(
+                item.where,
+                f"{item.key!r} is a packeteer key and has no meaning here; {reason}",
+            )
 
     # --- structure ---------------------------------------------------------
 

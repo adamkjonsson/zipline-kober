@@ -266,3 +266,72 @@ unknown-key error. Quote any `doc:` containing a comma, or use the block form.
 The same class of trap catches `version: 1.10`, which YAML reads as the number
 `1.1`. Scalars are checked by type and refused with a message saying to quote
 them.
+
+## packeteer's dialect
+
+[packeteer](https://github.com/adamkjonsson/packeteer) generates and inspects
+traffic for the same kind of protocol, and describes one with a dialect of this
+format. Its reference calls that dialect a **superset of kober's**. The two
+projects are meant to read each other's specs, and
+[`tests/test_packeteer.py`](https://github.com/adamkjonsson/zipline-kober/blob/main/tests/test_packeteer.py)
+is what keeps that from being a sentence nobody checks: it loads packeteer's own
+shipped specs and asserts what happens to each.
+
+### Four keys, recognised and declined
+
+packeteer has keys kober has no use for, and they are **not** treated as typos:
+
+| Key | Where | Why it has no meaning here |
+| --- | --- | --- |
+| `over` | top level | kober is handed a spec rather than choosing one by transport |
+| `ports` | top level | kober is handed a spec rather than choosing one by port |
+| `derive` | field | kober decodes and does not encode, so there is nothing to compute |
+| `sensitive` | field | kober writes decoded records and has no redaction step |
+
+Each is a `check` **warning** naming the key and the reason:
+
+```console
+$ kober check sensor.yaml
+warning: sensor.yaml:1: sensor: 'over' is a packeteer key and has no meaning here; kober is handed a spec rather than choosing one by transport
+warning: sensor.yaml:1: sensor: 'ports' is a packeteer key and has no meaning here; kober is handed a spec rather than choosing one by port
+warning: sensor.yaml:18: sensor.reading.count: 'derive' is a packeteer key and has no meaning here; kober decodes and does not encode, so there is nothing to compute
+warning: sensor.yaml:24: sensor.sample.length: 'derive' is a packeteer key and has no meaning here; kober decodes and does not encode, so there is nothing to compute
+warning: sensor.yaml:25: sensor.sample.value: 'sensitive' is a packeteer key and has no meaning here; kober writes decoded records and has no redaction step
+sensor 1.0: 0 error(s), 5 warning(s)
+```
+
+A key on the document is reported at the document, so the two top-level ones
+say line 1 rather than the line each is written on: a mapping knows where it
+began and not where each of its keys is. The field-level ones are exact,
+because a field *is* a mapping.
+
+A warning rather than an error because **ignoring any of them changes no
+decode** — the spec describes the same messages either way, which is the whole
+basis of the superset claim. `--strict` turns them into failures for a project
+that wants them refused outright.
+
+This does not weaken strictness. An unknown key is still an error, and the
+reason for that rule is unchanged: a misspelled `conditon:` must not load and
+quietly do nothing. What changed is that these four stopped being *unknown* —
+known, declined, and reported is strictly more informative than either
+accepting them silently or rejecting them as typos.
+
+They are kept on the spec as {class}`kober.spec.Foreign` records rather than as
+attributes on {class}`kober.spec.Field`, so a diagnostic costs no downstream
+consumer a field it never reads.
+
+`const` was packeteer's key too, and is [kober's now](types.md#const) — which
+is why it is not in the table above.
+
+### What still does not transfer
+
+**The switch dispatch key.** kober renamed `on` to `dispatch` at 0.1.0 and
+deleted the boolean repair, because YAML 1.1 reads an unquoted `on:` as `true`;
+packeteer still requires `on`. That is one construct with two spellings rather
+than a key one side lacks, so no amount of recognising keys helps, and it is
+packeteer's to move.
+
+**kober's shorthands, going the other way.** `bits:`, the lifted kind keys and
+the bare scalars are not implemented there, so a spec from this repository
+fails on the first field. That is the other project's side of the same
+transfer.

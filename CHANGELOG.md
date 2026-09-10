@@ -44,6 +44,38 @@ minor bump here too.
 
   `examples/dns.yaml` and `examples/http.yaml` are written the short way.
 
+- **A packeteer spec loads here, and says what it carried that kober does not**
+  ([#27](https://github.com/adamkjonsson/zipline-kober/issues/27)). The two
+  projects describe the same protocols with one dialect, and until now that was
+  a claim in two references rather than a property of two loaders: kober gave
+  packeteer's keys the same treatment as a misspelled `conditon:`.
+
+  Four keys are now recognised, not implemented, and declined out loud —
+  `over` and `ports` at the top level, `derive` and `sensitive` on a field:
+
+  ```console
+  $ kober check sensor.yaml
+  warning: sensor.yaml:1: sensor: 'over' is a packeteer key and has no meaning here; kober is handed a spec rather than choosing one by transport
+  warning: sensor.yaml:25: sensor.sample.value: 'sensitive' is a packeteer key and has no meaning here; kober writes decoded records and has no redaction step
+  sensor 1.0: 0 error(s), 5 warning(s)
+  ```
+
+  Warnings rather than errors, because ignoring any of them changes no decode.
+  `--strict` refuses them outright. **Strictness is untouched**: an unknown key
+  is still an error, and these four simply stopped being unknown.
+
+  New `Spec.foreign`, a sequence of `Foreign(key, where)` — a side list rather
+  than attributes on `Field`, so a diagnostic costs no consumer a field it
+  never reads.
+
+  `tests/test_packeteer.py` loads packeteer `0.12.0`'s own shipped specs, held
+  as copies under `tests/packeteer/`. `sensor.yaml` loads, checks, and decodes;
+  `rpc.yaml` is still refused by the one thing recognising keys cannot fix —
+  packeteer spells the switch dispatch key `on`, which kober renamed to
+  `dispatch` at `0.1.0` because YAML 1.1 reads it as a boolean. That test
+  asserts the refusal rather than skipping it, so it fails when packeteer
+  moves.
+
 - **`const` on a field**, the ordinary way a decoder refuses traffic that is
   not its own ([#26](https://github.com/adamkjonsson/zipline-kober/issues/26)):
 

@@ -93,6 +93,7 @@ from kober.spec import (
     Field,
     Fill,
     Fixed,
+    Foreign,
     FromExpr,
     InputShape,
     IntType,
@@ -141,6 +142,31 @@ _POINTER_KEYS = frozenset({"at", "type"})
 _PARAM_KEYS = frozenset({"name", "type"})
 _ENUM_KEYS = frozenset({"members", "doc"})
 
+#: Keys belonging to [packeteer](https://github.com/adamkjonsson/packeteer)'s
+#: dialect of this format, and why each has no meaning here. Mapped to the
+#: reason so the warning explains itself rather than only naming the key.
+#:
+#: **Recognised, not implemented, and said out loud.** packeteer reads the
+#: kober constructs it cannot implement and reports them through its checker as
+#: "not supported yet", naming the construct; this is the mirror of that, and
+#: without it a spec written for the sibling project is refused the way a
+#: misspelled ``conditon:`` is. Ignoring any of these changes no decode, which
+#: is why they are warnings and why the superset claim survives them.
+#:
+#: Strictness is untouched. An unknown key is still an error — the rule exists
+#: so a misspelling cannot load and quietly do nothing. What changes is that
+#: these four stop being *unknown*.
+_FOREIGN_SPEC_KEYS: Mapping[str, str] = {
+    "over": "kober is handed a spec rather than choosing one by transport",
+    "ports": "kober is handed a spec rather than choosing one by port",
+}
+_FOREIGN_FIELD_KEYS: Mapping[str, str] = {
+    "derive": "kober decodes and does not encode, so there is nothing to compute",
+    "sensitive": "kober writes decoded records and has no redaction step",
+}
+#: Every one of them, for a message that has to name the whole set.
+FOREIGN_KEYS: Mapping[str, str] = {**_FOREIGN_SPEC_KEYS, **_FOREIGN_FIELD_KEYS}
+
 
 # --- where we are ----------------------------------------------------------
 
@@ -164,17 +190,19 @@ class _At:
     Attributes:
         loc: Path, line and file of the construct being read.
         lines: The map being filled in, shared by every position in one load.
+        found: Foreign keys seen so far, shared the same way.
         endian: Byte order an integer here takes unless it says otherwise.
 
     """
 
     loc: Location
     lines: dict[str, int]
+    found: list[Foreign]
     endian: Endian = Endian.BIG
 
     def child(self, step: object) -> _At:
         """Return the position of a step below this one."""
-        return _At(self.loc.child(step), self.lines, self.endian)
+        return _At(self.loc.child(step), self.lines, self.found, self.endian)
 
     def within(self, document: object) -> _At:
         """Return this position carrying ``document``'s own line, if it has one.
@@ -185,7 +213,7 @@ class _At:
         line = getattr(document, "line", None)
         if not isinstance(line, int):
             return self
-        return _At(self.loc.at_line(line), self.lines, self.endian)
+        return _At(self.loc.at_line(line), self.lines, self.found, self.endian)
 
     def defaulting(self, mapping: Mapping[str, Any]) -> _At:
         """Return this position with any lexical default ``mapping`` declares.
@@ -208,7 +236,7 @@ class _At:
         if declared is None:
             return self
         endian = _member(Endian, declared, self.child("endian"))
-        return _At(self.loc, self.lines, endian)
+        return _At(self.loc, self.lines, self.found, endian)
 
     def record(self, path: str) -> None:
         """Note this position's line under a path in the checker's vocabulary.
@@ -221,10 +249,19 @@ class _At:
         if self.loc.line is not None:
             self.lines[path] = self.loc.line
 
+    def note_foreign(self, mapping: Mapping[str, Any], keys: Mapping[str, str], path: str) -> None:
+        """Note every key of ``keys`` that ``mapping`` carries, under ``path``.
+
+        Collected here rather than reported here: the loader raises at the
+        first fault, and these are not faults. :func:`kober.check.check` sees
+        the whole spec and reports every one of them at once.
+        """
+        self.found.extend(Foreign(key=key, where=path) for key in sorted(keys) if key in mapping)
+
 
 def _root(document: object, source: str | None) -> _At:
     """Return the position of the whole document."""
-    return _At(Location("spec", source=source), {}).within(document)
+    return _At(Location("spec", source=source), {}, []).within(document)
 
 
 class _LinedDict(dict[Any, Any]):
@@ -547,7 +584,7 @@ def _expr(value: object, at: _At) -> Expr:
 def _spec(document: Mapping[str, Any], at: _At) -> Spec:
     """Build the top-level spec, recording where its named parts are."""
     mapping = _require_mapping(document, at)
-    _reject_unknown(mapping, _SPEC_KEYS, at)
+    _reject_unknown(mapping, _SPEC_KEYS, at, ("a packeteer key", frozenset(_FOREIGN_SPEC_KEYS)))
     for required in ("name", "version", "entry", "units"):
         if required not in mapping:
             msg = f"missing required key {required!r}"
@@ -560,6 +597,7 @@ def _spec(document: Mapping[str, Any], at: _At) -> Spec:
     declared = mapping["name"]
     owner = declared if isinstance(declared, str) else "spec"
     at.record(owner)
+    at.note_foreign(mapping, _FOREIGN_SPEC_KEYS, owner)
     at = at.defaulting(mapping)
 
     units_doc = _require_mapping(mapping["units"], at.child("units"))
@@ -585,6 +623,7 @@ def _spec(document: Mapping[str, Any], at: _At) -> Spec:
         input=shape,
         doc=_optional_str(mapping, "doc", at),
         sources=SourceMap(source=at.loc.source, lines=dict(at.lines)),
+        foreign=tuple(at.found),
     )
 
 
@@ -656,7 +695,7 @@ def _unit(name: str, document: object, at: _At, owner: str) -> Unit:
         msg = "missing required key 'fields'"
         raise SpecError(msg, at.loc)
     fields = [
-        _field(item, at.child("fields").child(f"[{index}]"), path)
+        _field(item, at.child("fields").child(f"[{index}]"), path, index)
         for index, item in enumerate(_require_list(mapping["fields"], at.child("fields")))
     ]
     params = [
@@ -753,7 +792,7 @@ def _short_param(mapping: Mapping[str, Any], at: _At) -> Param:
     return Param(name=name, type=_member(ExprType, declared, at.child(name)))
 
 
-def _field(document: object, at: _At, owner: str) -> Field:
+def _field(document: object, at: _At, owner: str, index: int) -> Field:
     """Build one field, from either spelling of its type and its repetition.
 
     Both tagged constructs a field carries may be **lifted into it**, under the
@@ -771,6 +810,8 @@ def _field(document: object, at: _At, owner: str) -> Field:
         document: The field's mapping.
         at: Where in the document this is.
         owner: The unit's path, which the checker reports this field under.
+        index: Its position in the unit, which names it when it is anonymous —
+            the same label the checker uses.
 
     Returns:
         The field.
@@ -787,16 +828,19 @@ def _field(document: object, at: _At, owner: str) -> Field:
         at,
         ("a type kind", _TYPE_KEYS),
         ("a repeat kind", _REPEAT_KINDS),
+        ("a packeteer key", frozenset(_FOREIGN_FIELD_KEYS)),
     )
     if "name" not in mapping:
         msg = "missing required key 'name'; use 'name: null' for an anonymous field"
         raise SpecError(msg, at.loc)
     raw_name = mapping["name"]
     name = None if raw_name is None else _require_str(raw_name, at.child("name"))
+    label = name if name is not None else f"<anonymous {index}>"
     if name is not None:
         # An anonymous field is recorded under nothing: the checker has no name
         # to report it by either, so there is no path to key it on.
         at.record(f"{owner}.{name}")
+    at.note_foreign(mapping, _FOREIGN_FIELD_KEYS, f"{owner}.{label}")
     kind = _declared_type(mapping, at)
     return Field(
         name=name,

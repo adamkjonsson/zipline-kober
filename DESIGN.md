@@ -404,6 +404,14 @@ decoder raises `Undecodable` where the interpreter records the verdict, which
 is the split `errors.py` documents, and both name the same region: the refused
 field's own bytes, which no record claims because the record is never written.
 
+`Spec.foreign` holds the keys a document used that belong to **packeteer's**
+dialect of this format — `over`, `ports`, `derive`, `sensitive`. Recognised,
+unused, and reported by `check` as warnings naming the key and why it means
+nothing here. A side list rather than attributes on `Field`, because nothing in
+kober reads them and a diagnostic should not cost every downstream consumer a
+field. Warnings and not errors because ignoring them changes no decode, which
+is the whole basis of the claim that one dialect covers both projects.
+
 ### 3.2 Field types
 
 ```python
