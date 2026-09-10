@@ -22,6 +22,31 @@ minor bump here too.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-10
+
+**The dialect release.** Nothing here changes what kober decodes: every change
+is about the surface an author writes and the messages they get back when they
+write it wrong.
+
+Three strands. A spec is **shorter to write** — the repeat kind and the
+parameter form join the shorthands, and byte order inherits, which is what
+makes a little-endian spec able to use `bits:` at all. A fault **says which
+line it is on**, which matters most in `check`, since it reports every fault
+rather than stopping at the first. And a spec written for
+[packeteer](https://github.com/adamkjonsson/packeteer) **loads here**, with the
+keys kober has no use for declined out loud rather than refused as typos —
+tested against that project's own shipped specs rather than claimed.
+
+`const` is the one construct that reaches a decode: a magic number, checked at
+the field that declares it rather than after a whole message has been read
+against the wrong protocol.
+
+Depends on `zpf` `0.3.x`, unchanged from `0.1.0`.
+
+Two breaking changes, both in diagnostics: `check.Finding.where` is a
+`Location` rather than a `str`, and `ExprError.where` is gone in favour of the
+inherited `SpecError.loc`. See **Changed** below.
+
 ### Added
 
 - **A repeat kind may be written on the field**, as a type kind already could
@@ -1679,5 +1704,6 @@ installed from a checkout (see the README).
   parses `comment` back. Whether to follow `zpf` 0.3 (#58, #59) is recorded as
   an open question rather than settled.
 
-[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/adamkjonsson/zipline-kober/releases/tag/v0.1.0
