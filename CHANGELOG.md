@@ -194,6 +194,33 @@ minor bump here too.
 
 ### Documentation
 
+- **The format reference is written in the dialect the examples use**
+  ([#21](https://github.com/adamkjonsson/zipline-kober/issues/21)). It taught
+  the long form on the two pages an author reads first, while
+  `examples/dns.yaml` never once used that spelling — so an author learned one
+  language, wrote it, and could not read this project's own example in it.
+  Worse, they kept writing it, because nothing said the long form was the
+  fallback rather than the norm.
+
+  | Page | `type: {` before | after |
+  | --- | --- | --- |
+  | `docs/format/concepts.md` | 6 | 1 |
+  | `docs/format/document.md` | 3 | 1 |
+  | `docs/format/types.md` | 19 | 10 |
+
+  The presentation is inverted rather than the format changed: `concepts.md`
+  and `document.md` are written short, `types.md` leads with *how a field is
+  written* and keeps the tagged mapping underneath as **the three rules**, each
+  kind's entry leads with its short spelling, and a new section says when the
+  long form is actually needed — a body with a second key, a type inside a
+  construct such as a `pointer`'s target, or readability.
+
+  What is left in each page is the spelling that has no shorthand, which is
+  now the only reason to see one.
+
+  `tests/test_docs.py` holds the pages and the examples to it, since both
+  spellings are valid and nothing else would notice the drift returning.
+
 - The `check` transcript in the README, the error examples in
   `docs/format/index.md` and `docs/format/expressions.md`, and `DESIGN.md` §6
   all show the line, and say that JSON and `from_dict` carry the path alone.

@@ -8,11 +8,25 @@ these pages describe what an author actually types.
   becomes of one in the decoded tree, in a generated decoder and in the output
   file, and what a spec deliberately cannot say.
 - [The document](document.md) — the top level, units, fields, enums, emission
-  granularity, and two YAML traps that have already caught this project.
+  granularity, two YAML traps that have already caught this project, and the
+  relationship to packeteer's dialect of this format.
 - [Types, sizes, and repeats](types.md) — every field type and what each does
   when it does not match, since that answer is half of what a construct means.
 - [Expressions](expressions.md) — the small total language, its scoping rules,
   and what it deliberately cannot do.
+
+**A field says what it decodes on the field itself**, which is the dialect
+these pages teach and the one the shipped examples are written in:
+
+```yaml
+- {name: qdcount, bits: 16}
+- {name: questions, unit: question, count: qdcount}
+```
+
+Underneath is a uniform convention — a tagged mapping naming the kind —
+reachable as `type: {int: {bits: 16}}` and needed where a body carries a second
+key. Both build the identical spec; see
+[the three rules](types.md#the-three-rules).
 
 The schema is **strict**: an unknown key is an error rather than something
 ignored, because a misspelled key that loads and does nothing is a decoder

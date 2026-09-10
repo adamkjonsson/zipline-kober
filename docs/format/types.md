@@ -1,7 +1,17 @@
 # Types, sizes, and repeats
 
-Types, sizes, and repeats all follow one convention: **a single-key mapping
-naming the kind**.
+**A field says what it decodes on the field itself**, with the kind as one of
+its keys:
+
+```yaml
+- {name: qdcount, bits: 16}
+- {name: questions, unit: question, count: qdcount}
+- {name: body, bytes: {size: {expr: "length"}}}
+```
+
+That is the dialect this project's own examples are written in, and the one to
+write. Underneath it every construct follows a single convention — **a tagged
+mapping naming the kind** — and the spellings above are three rules over it:
 
 ```yaml
 type: {int: {bits: 16}}
@@ -9,7 +19,7 @@ size: {expr: "header.length"}
 repeat: {count: "qdcount"}
 ```
 
-Two keys in one of these mappings is an error, not a merge — which is why
+Two keys in one of those mappings is an error, not a merge — which is why
 `{int: {bits: 4}, enum: opcode}` does not work and `{int: {bits: 4, enum:
 opcode}}` does.
 
@@ -19,31 +29,14 @@ happened — `undecodable`, `truncated`, `gap`, `skipped` — and the difference
 between them is the difference between "we tried and could not" and "we chose
 not to".
 
-## Shorthands
+## The three rules
 
-The convention above is uniform, and uniformity has a cost: an integer field is
-four levels deep to say *count is eight bits*. Three rules shorten it. Each
-builds the **identical** spec — nothing downstream can tell which spelling was
-used — so a spec may mix them freely.
+Each builds the **identical** spec — nothing downstream can tell which spelling
+was used — so a spec may mix them freely.
 
-**A scalar where a mapping is expected fills in the one key that matters.**
-
-```yaml
-type: {bytes: {size: {fixed: 4}}}      # long
-type: {bytes: {size: 4}}               # a bare size is `fixed`
-type: {bytes: 4}                       # a bare bytes/string body is its size
-type: {int: 8}                         # a bare int body is its width
-type: {unit: question}                 # a bare unit body is its name
-until: {expr: "n == 0"}                # long
-until: "n == 0"                        # a bare until body is its expression
-```
-
-Anything carrying a second key writes the long form: `{int: {bits: 4, enum:
-opcode}}`, not `{int: 4, enum: opcode}`.
-
-**A tagged construct's kind may lift into its parent** where the key sets do
-not overlap. That is one rule covering both constructs a field carries — its
-type, and its repetition:
+**1. A tagged construct's kind lifts into its parent** where the key sets do
+not overlap. That covers both constructs a field carries, its type and its
+repetition:
 
 ```yaml
 - {name: count, type: {int: {bits: 8}}}
@@ -54,8 +47,8 @@ type, and its repetition:
 ```
 
 A field's keys therefore come from three sets that share no member: its own
-(`name`, `type`, `condition`, `repeat`, `emit`, `doc`), the type kinds, and the
-repeat kinds (`count`, `until`, `to_end`).
+(`name`, `condition`, `const`, `emit`, `doc`, and the `type`/`repeat`
+wrappers), the type kinds, and the repeat kinds (`count`, `until`, `to_end`).
 
 Exactly one key must name a type kind, and at most one a repeat kind — a
 repetition is optional where a type is not. Two kinds of the same construct is
@@ -63,7 +56,19 @@ an error, a kind beside its own wrapper (`count:` and `repeat:`) is an error,
 and a key in none of the three sets is still an error, which names the set each
 allowed key belongs to.
 
-**`bits` names the integer kind**, because the word says what the number counts:
+**2. A scalar where a mapping is expected fills in the one key that matters.**
+
+```yaml
+- {name: body, bytes: {size: {fixed: 4}}}   # long
+- {name: body, bytes: {size: 4}}            # a bare size is `fixed`
+- {name: body, bytes: 4}                    # a bare bytes/string body is its size
+- {name: n, int: 8}                         # a bare int body is its width
+- {name: q, unit: question}                 # a bare unit body is its name
+- {name: ls, unit: label, until: "ls.length == 0"}   # a bare until is its expression
+```
+
+**3. `bits` names the integer kind**, because the word says what the number
+counts:
 
 ```yaml
 - {name: qr, bits: 1}
@@ -71,16 +76,32 @@ allowed key belongs to.
 
 `int: 8` is one character shorter and cannot say whether the 8 is bits or bytes
 — Kaitai's `u8` means eight *bytes* — and sub-byte fields are the ordinary case
-here rather than the exotic one. The moment a field needs `enum`, `signed` or
-`endian` it writes `int: {bits: …, …}`; putting one of those beside `bits:` at
-field level is an unknown-key error, which is loud rather than quiet.
+here rather than the exotic one.
+
+## When the long form is needed
+
+It is the fallback rather than the norm, and there are three occasions for it:
+
+- **A body carrying a second key.** `int: {bits: 4, enum: opcode}`, not
+  `{int: 4, enum: opcode}`; putting `enum`, `signed` or `endian` beside `bits:`
+  at field level is an unknown-key error, which is loud rather than quiet.
+- **A type inside a construct rather than on a field.** A `pointer`'s target
+  and a `switch`'s cases are written `type:`-style because they are not field
+  keys and nothing lifts there.
+- **Readability**, where a wrapper says more than a lifted key does. Both
+  spellings are equally valid and the checker cannot tell them apart.
+
+Each entry below leads with the short spelling and gives the long one beside
+it.
 
 ## Field types
 
 ### `int`
 
 ```yaml
-type: {int: {bits: 16, signed: false, endian: big, enum: opcode}}
+- {name: qr, bits: 1}                                     # the common case
+- {name: opcode, int: {bits: 4, enum: opcode}}            # a second key
+- {name: id, type: {int: {bits: 16, signed: false}}}      # the long form
 ```
 
 | Key | Default | Meaning |
@@ -110,8 +131,9 @@ does not recover it either.
 ### `bytes` and `string`
 
 ```yaml
-type: {bytes: {size: 4}}
-type: {string: {size: {terminated: {delimiter: "\r\n"}}, encoding: utf-8}}
+- {name: payload, bytes: 4}
+- {name: line, string: {delimiter: "\r\n"}}
+- {name: body, type: {bytes: {size: {expr: "length"}}}}   # the long form
 ```
 
 `bytes` and `string` both say their extent with `size`; `string` also takes
@@ -123,10 +145,10 @@ what makes the commonest thing a text protocol does shallow rather than deepest.
 have in the long form:
 
 ```yaml
-type: {string: {size: {terminated: {delimiter: "\r\n"}}}}      # long
-type: {string: {delimiter: "\r\n"}}                            # the same thing
+- {name: line, type: {string: {size: {terminated: {delimiter: "\r\n"}}}}}   # long
+- {name: line, string: {delimiter: "\r\n"}}                                # the same thing
 
-type: {string: {delimiter: ":", within: "\r\n", required: false}}
+- {name: key, string: {delimiter: ":", within: "\r\n", required: false}}
 ```
 
 A body says its extent **once**: `size` and `delimiter` together is an error, as
@@ -141,8 +163,9 @@ string is a fact about the input, not a fault in the decoder.
 ### `unit`
 
 ```yaml
-type: {unit: question}                          # no arguments
-type: {unit: {name: body, args: ["header.n"]}}  # with arguments
+- {name: q, unit: question}                                 # no arguments
+- {name: b, unit: {name: body, args: ["header.n"]}}         # with arguments
+- {name: q, type: {unit: question}}                         # the long form
 ```
 
 Arguments are bound to the unit's `params` positionally, and their types are
@@ -151,7 +174,7 @@ checked against the parameter types.
 ### `switch`
 
 ```yaml
-type:
+- name: body
   switch:
     dispatch: "kind"
     cases:
@@ -159,6 +182,10 @@ type:
       2: {bytes: {size: 2}}
     default: {bytes: {size: {remaining: true}}}
 ```
+
+A case's value is a **type**, so it is written as a tagged mapping and nothing
+lifts inside it: `{int: {bits: 8}}`, not `bits: 8`. Only a field has the three
+key sets that make lifting unambiguous.
 
 `dispatch` is the expression dispatched on, and must be an integer or a string.
 `cases` maps a value to the type to decode for it; case keys must match that
@@ -177,7 +204,8 @@ oversight.
 ### `computed`
 
 ```yaml
-type: {computed: "data_offset * 4"}
+- {name: header_bytes, computed: "data_offset * 4"}
+- {name: header_bytes, type: {computed: "data_offset * 4"}}   # the long form
 ```
 
 Consumes no input. Its type is its expression's type. It exists so a wire
@@ -190,11 +218,15 @@ own zero-width position would say nothing about where the value came from.
 ### `pointer`
 
 ```yaml
-type:
+- name: target
   pointer:
     at: "((hi & 63) << 8) | lo"
     type: {unit: name}
 ```
+
+Its target is spelled `type:` and always will be: that is a type inside a
+construct rather than a key on a field, so there is nothing for it to lift out
+of.
 
 A back-reference: *read `type` at `at`, and carry on where you were.* Both keys
 are required. Real DNS needs it — an answer record's owner name is usually two
@@ -222,7 +254,7 @@ constructed.
 ### `select`
 
 ```yaml
-type:
+- name: content_length
   select:
     from: headers
     where: "lower(headers.name) == 'content-length'"

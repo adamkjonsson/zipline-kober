@@ -107,7 +107,7 @@ units:
   message:
     doc: One DNS message.
     fields:
-      - {name: id, type: {int: {bits: 16}}}
+      - {name: id, bits: 16}
     params: [{size: int}]
     confirm: "id != 0"
     reject: "id == 0"
@@ -152,37 +152,47 @@ precedent here to lean on.
 
 ```yaml
 - name: qdcount
-  type: {int: {bits: 16}}
+  bits: 16
   condition: "flags.qr == 0"
-  repeat: {count: "n"}
+  count: n
   emit: none
   doc: Number of entries in the question section.
 ```
 
+A field's keys come from **three sets that share no member**, which is what
+lets the type and the repetition be written directly on it:
+
+| | Keys |
+| --- | --- |
+| **Its own** | `name`, `condition`, `const`, `emit`, `doc`, and the two wrappers below |
+| **A type kind** | `bits`, `int`, `bytes`, `string`, `unit`, `switch`, `computed`, `pointer`, `select` |
+| **A repeat kind** | `count`, `until`, `to_end` |
+
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `name` | **yes** | The field's name, or `null` for an anonymous region. |
-| `type` | **yes** | What to decode. See [Types](types.md). |
+| *a type kind* | **yes** | What to decode. See [Types](types.md). |
 | `condition` | no | Boolean. The field is decoded only if it holds. |
-| `repeat` | no | Decode it repeatedly. |
+| *a repeat kind* | no | Decode it repeatedly. |
 | `const` | no | A value the decoded field must equal. See [`const`](types.md#const). |
 | `emit` | no | Granularity for this field. |
 | `doc` | no | Free text. |
 
-Two of those are usually written **without their wrapper**, because a tagged
-construct's kind may lift into the field where the key sets do not overlap:
+Exactly one key must name a type kind, and at most one a repeat kind.
 
-| Instead of | Write | Which set |
-| --- | --- | --- |
-| `type: {int: {bits: 8}}` | `bits: 8`, `int: …`, `unit: …`, `bytes: …`, `string: …`, `switch: …`, `computed: …`, `pointer: …`, `select: …` | a type kind |
-| `repeat: {count: "n"}` | `count: n`, `until: …`, `to_end: true` | a repeat kind |
+`type:` and `repeat:` are the **long forms** of those two, and they take the
+same bodies:
 
 ```yaml
-- {name: questions, unit: question, count: qdcount}
+- {name: questions, unit: question, count: qdcount}                # the same
+- {name: questions, type: {unit: question}, repeat: {count: "qdcount"}}
 ```
 
-Both spellings build the identical spec. See
-[Shorthands](types.md#shorthands) for the rule and what it refuses.
+Both build the identical spec. Reach for the long form where a wrapper is
+clearer to read than a lifted key — and note the one place there is no choice:
+a `pointer`'s target is written `type:`, since it is a type inside a construct
+rather than on a field. See [The three rules](types.md#the-three-rules) for the rule
+and what it refuses.
 
 `name` is required even when it is `null`, so that an anonymous field is a
 choice rather than an omission. Anonymous fields are decoded and cited like any
@@ -257,7 +267,7 @@ rename, in either spelling — the bare word and the quoted `"on"`.
 out, because it is about values rather than keys:
 
 ```yaml
-- {name: qr, type: {int: {bits: 1}}, doc: 0 query, 1 response}
+- {name: qr, bits: 1, doc: 0 query, 1 response}
 ```
 
 parses `doc: 0 query` and then `1 response` as a second key, and fails with an

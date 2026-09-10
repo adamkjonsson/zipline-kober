@@ -361,3 +361,58 @@ def test_the_api_design_names_only_things_that_exist():
         and not hasattr(owners[node.func.value.id], node.func.attr)
     )
     assert not missing, f"DESIGN.md §6 calls methods that do not exist: {missing}"
+
+
+# --- the dialect the pages teach -------------------------------------------
+#
+# The reference used to be written in a dialect the examples did not use, so an
+# author learned one language, wrote it, and could not read this project's own
+# example in it. Nothing caught that, because both spellings are valid — which
+# is exactly why it needs a test rather than a review.
+
+
+def test_the_first_two_pages_teach_the_short_dialect():
+    """`concepts.md` and `document.md` are what an author reads first.
+
+    A `type:` on either is either a regression or a deliberate long-form
+    example, and the two are told apart by counting: the reference shows the
+    long form where it must, and these pages show it once, beside its short
+    twin.
+    """
+    for name, allowed in (("concepts.md", 1), ("document.md", 2)):
+        text = (FORMAT / name).read_text()
+        assert declared_types(text) <= allowed, (
+            f"{name} has more `type: {{` than the {allowed} it is allowed; the "
+            "short form is the dialect these pages teach"
+        )
+
+
+def declared_types(text: str) -> int:
+    """Count long-form `type:` keys, ignoring one an enum's *name* ends with.
+
+    `rrtype: {1: a, …}` is an enum called `rrtype`, and a naive substring count
+    reads the tail of its name as the key. The lookbehind is the whole fix, and
+    the reason it is worth a helper is that the first version of this test
+    failed on `examples/dns.yaml` for exactly that.
+    """
+    return len(re.findall(r"(?<![\w-])type: \{", text))
+
+
+def test_the_shipped_examples_are_written_the_short_way():
+    """An example not using the short form argues the short form is not wanted."""
+    examples = DOCS.parent / "examples"
+    for path in sorted(examples.glob("*.yaml")):
+        text = path.read_text()
+        # The only `type:` with no shorthand is a pointer's target, which is a
+        # type inside a construct rather than a key on a field.
+        outside_pointers = declared_types(text) - text.count("pointer: {at:")
+        assert outside_pointers == 0, f"{path.name} still spells a field type the long way"
+        assert "repeat: {" not in text, f"{path.name} still wraps a repeat"
+        assert "params: [{name:" not in text, f"{path.name} still spells a param the long way"
+
+
+def test_the_long_form_is_documented_as_the_fallback():
+    """Both forms must stay reachable: a spec in the wild uses either."""
+    text = (FORMAT / "types.md").read_text()
+    assert "## When the long form is needed" in text
+    assert "type: {int: {bits: 16}}" in text
