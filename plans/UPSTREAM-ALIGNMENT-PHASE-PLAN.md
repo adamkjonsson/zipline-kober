@@ -1,14 +1,17 @@
 # The upstream-alignment phase — `0.3.0`
 
-**State: planned.** Written 2026-09-19 against `0.2.0` and the seven issues on
-the [`0.3.0` milestone](https://github.com/adamkjonsson/zipline-kober/milestone/2),
-whose statement is *alignment with zipline 0.21, python-zipline 0.5.0 and
-packeteer 0.16.0* — plus #31, added to the milestone the same day on this
-plan's argument (§3.4). Nothing below has landed. As with the `0.2.0` plan, this
-decides an order, settles the decisions the issues leave open where they
-interact, and records what the milestone does not contain. When the work is
-done a final section records what the plan got wrong, and the rest is left as
-written.
+**State: done.** All eight issues landed on `plan_0_3_0` and shipped in
+`v0.3.0` (2026-09-19), in the order §2 argues for. A final section recording
+what the plan got right and wrong is owed, as the `0.2.0` plan's §9 was; the
+rest is left as written on 2026-09-19.
+
+> **Written 2026-09-19** against `0.2.0` and the seven issues on
+> the [`0.3.0` milestone](https://github.com/adamkjonsson/zipline-kober/milestone/2),
+> whose statement is *alignment with zipline 0.21, python-zipline 0.5.0 and
+> packeteer 0.16.0* — plus #31, added to the milestone the same day on this
+> plan's argument (§3.4). It decides an order, settles the decisions the
+> issues leave open where they interact, and records what the milestone does
+> not contain.
 
 > The upstream state this was checked against: `../python-zipline` at `v0.5.0`
 > (spec `0.21`), `../packeteer` at `v0.16.0`, `../python-zipline-wire` at

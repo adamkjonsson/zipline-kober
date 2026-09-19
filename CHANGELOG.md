@@ -22,6 +22,20 @@ minor bump here too.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-19
+
+**The alignment release.** Nothing here changes what kober decodes; the
+records, spans and regions a stage writes are byte-identical to 0.2.0's. What
+changes is what the file *says about itself* and what `check` refuses. The
+three upstream projects moved — `zpf` to 0.5.0 (spec 0.21), packeteer to
+0.16.0 — and this release follows them: field-granularity output declares
+itself the unit sequence spec 0.21 added for exactly its shape, generated
+modules record their granularity so the compiled driver can say the same, the
+vendored packeteer specs and the reference catch up four releases, and
+`remaining`/`fill` gain the reference-site rule packeteer states for its
+dialect. Two changes are breaking: the `zpf` pin, and `run_compiled`
+requiring modules compiled by this version.
+
 ### Added
 
 - A generated module exports `EMIT`, the granularity it was compiled at, as
@@ -1789,6 +1803,7 @@ installed from a checkout (see the README).
   parses `comment` back. Whether to follow `zpf` 0.3 (#58, #59) is recorded as
   an open question rather than settled.
 
-[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/adamkjonsson/zipline-kober/releases/tag/v0.1.0
