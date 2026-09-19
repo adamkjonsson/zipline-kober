@@ -7,12 +7,15 @@ found it false in both directions — and §5.3 records why nobody noticed: the
 claim was a sentence in two references with no test behind it.
 
 This is that test, from this side. It loads packeteer's own shipped specs and
-asserts what happens to each: **loaded, or declined by name**. Silence is what
-it exists to prevent — either project's dialect drifting without the other
-finding out.
+asserts what happens to each: **loaded, and decoded**, with every key kober has
+no meaning for **declined by name**. Silence is what it exists to prevent —
+either project's dialect drifting without the other finding out.
 
 The specs are copies in ``tests/packeteer/``, not paths into a sibling
-checkout; see the README beside them.
+checkout; see the README beside them. Both are in the short form packeteer
+adopted at its 0.13.0 — the release that took kober's shorthands and renamed
+its switch key to ``dispatch`` — so loading them *is* the test that the
+shorthands transfer.
 """
 
 from __future__ import annotations
@@ -23,7 +26,6 @@ import pytest
 
 from kober.check import Severity, check
 from kober.decoder import Decoder
-from kober.errors import SpecError
 from kober.loader import FOREIGN_KEYS, from_file
 from kober.node import NodeStatus
 from kober.spec import Foreign
@@ -117,25 +119,71 @@ def test_its_const_still_refuses_the_wrong_traffic():
     assert tree.status is NodeStatus.UNDECODABLE
 
 
-# --- rpc.yaml: declined by name ------------------------------------------
+# --- rpc.yaml: the construct that was blocked -------------------------------
+#
+# Until packeteer 0.13.0 this spec was refused on its switch key: kober had
+# renamed ``on`` to ``dispatch`` at 0.1.0 (YAML 1.1 reads an unquoted ``on:``
+# as ``true``) and packeteer still required ``on``. The test here asserted the
+# refusal "so that it fails when packeteer moves" — and could not, since a
+# vendored copy only moves when someone re-copies it. packeteer moved on
+# 2026-09-10 (packeteer#143); the copy moved on 2026-09-19. So the test now
+# exercises the construct that was blocked, as ``sensor.yaml``'s does its
+# ``const``: the drift detector is the README's version pin, kept by hand.
+
+#: One ``rpc`` read request: magic, a header byte whose low nibble is the
+#: opcode, a request id, then the ``read`` body the opcode selects.
+RPC_READ = (
+    bytes([0x52, 0x50])  # magic
+    + bytes([0b0000_0010])  # is_reply=0 urgent=0 reserved=0 op=2 (read)
+    + bytes([0x00, 0x07])  # request_id
+    + bytes([0x00, 0x00, 0x10, 0x00])  # read.offset
+    + bytes([0x00, 0x04])  # read.length
+)
 
 
-def test_the_other_spec_is_still_blocked_by_the_dispatch_key():
-    """The one disagreement recognising keys cannot fix.
+def test_the_other_spec_loads_now():
+    spec = from_file(SPECS / "rpc.yaml")
+    assert spec.name == "rpc"
+    assert set(spec.units) == {"message", "header", "ping", "read", "write"}
 
-    kober renamed the switch dispatch key from ``on`` to ``dispatch`` at
-    ``0.1.0`` and deleted the boolean repair, because YAML 1.1 reads an
-    unquoted ``on:`` as ``true``. packeteer still requires ``on``. That is one
-    construct with two spellings rather than a key one side lacks, so it is
-    packeteer's to move — see `plans/PACKETEER-ALIGNMENT.md` §5.1.
 
-    Asserted rather than skipped, so that this **fails when packeteer moves**
-    and the remaining half of the claim can be turned on.
-    """
-    with pytest.raises(SpecError) as caught:
-        from_file(SPECS / "rpc.yaml")
-    assert "the switch dispatch key is 'dispatch'" in str(caught.value)
-    assert "rpc.yaml:27" in str(caught.value)
+def test_it_reports_exactly_the_foreign_keys_and_the_switch_without_a_default():
+    """Four keys declined by name, and one warning that is kober's own."""
+    spec = from_file(SPECS / "rpc.yaml")
+    findings = check(spec)
+    assert all(f.severity is Severity.WARNING for f in findings)
+    assert list(spec.foreign) == [
+        Foreign(key="over", where="rpc"),
+        Foreign(key="ports", where="rpc"),
+        Foreign(key="derive", where="rpc.write.length"),
+        Foreign(key="sensitive", where="rpc.write.data"),
+    ]
+    own = [f for f in findings if "packeteer key" not in f.message]
+    assert [(f.where.path, f.where.line) for f in own] == [("rpc.message.body", 23)]
+    assert "switch has no default" in own[0].message
+
+
+def test_it_decodes_a_switch_dispatched_message():
+    """The construct that was blocked, exercised: `dispatch` chooses the body."""
+    spec = from_file(SPECS / "rpc.yaml")
+    tree = Decoder(spec).decode_bytes(RPC_READ)
+    assert tree.status is NodeStatus.OK
+    assert tree.off_end == len(RPC_READ)
+    values = {node.name: node.value for node in tree.walk() if node.value is not None}
+    assert values["magic"] == 0x5250
+    assert values["op"] == 2
+    assert values["request_id"] == 7
+    assert (values["offset"], values["length"]) == (0x1000, 4)
+    body = next(node for node in tree.walk() if node.name == "body")
+    assert body.unit == "read"
+
+
+def test_an_opcode_with_no_arm_is_undecodable_not_an_error():
+    """No default, so an unknown opcode is a region the spec declines to read."""
+    spec = from_file(SPECS / "rpc.yaml")
+    unknown = RPC_READ[:2] + bytes([0b0000_1111]) + RPC_READ[3:]
+    tree = Decoder(spec).decode_bytes(unknown)
+    assert tree.status is NodeStatus.UNDECODABLE
 
 
 # --- the table itself ------------------------------------------------------
