@@ -10,10 +10,13 @@ It is a CLI backed by a Python API, and everything the CLI does is reachable
 from the API.
 
 ```{note}
-**Early, and not released.** The spec model, checker, decode engine, emitter,
-stage driver, all five CLI verbs and the compiler work, and are exercised
-against real captures and adversarial input. Nothing is tagged, and `zpf` itself
-is `0.x` where every minor is a break. Interfaces will move.
+**Early: `0.x`, tagged but not on PyPI.** The spec model, checker, decode
+engine, emitter, stage driver, all five CLI verbs and the compiler work, and
+are exercised against real captures, generated impaired traffic and
+adversarial input. `zpf` itself is `0.x`, where every minor is a break, and
+each kober minor pins one of them. Interfaces will move; the
+[changelog](https://github.com/adamkjonsson/zipline-kober/blob/main/CHANGELOG.md)
+says how.
 ```
 
 ## What it is for

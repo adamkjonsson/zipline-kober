@@ -191,3 +191,30 @@ def test_a_decoded_file_can_be_chained(dns_files: tuple[Path, Path]):
         ]
     assert shapes
     assert not any(shapes), "a decoded file is packet-oriented"
+
+
+def test_sub_byte_fields_are_a_conformant_unit_sequence(tmp_path: Path):
+    """The shape spec 0.21's `adjacency=units` exists for, through the real driver.
+
+    `dns.flags.qr`, `.opcode` and the rest all cite the byte that holds them,
+    so no two of them join — they are *inside* one another's bytes. A file
+    that declares `units` says exactly that, and the checker and the coverage
+    rule (at-least-once, containment allowed) accept it with no findings.
+    """
+    source, sink = tmp_path / "transport.zpf", tmp_path / "fields.zpf"
+    write_transport(source, DNS_QUERY)
+    Decoder(Spec.from_yaml(DNS_SPEC), emit=Emit.FIELD).run(
+        source, sink, produced_by="kober test", produced_at=1_700_000_000
+    )
+    assert_conformant(sink, source)
+    with zpf.open(sink) as handle:
+        sessions = list(handle.sessions())
+        adjacency = [zpf.Adjacency(p.adjacency) for s in sessions for p in s.participants]
+        spans = [
+            (r.spans[0].off_start, r.spans[0].off_end)
+            for s in sessions
+            for r in s.records()
+            if r.role is not None and r.role.startswith("dns.flags.")
+        ]
+    assert adjacency == [zpf.Adjacency.UNITS]
+    assert spans == [(2, 3), (2, 3), (2, 3), (3, 4)], "three fields share one byte"

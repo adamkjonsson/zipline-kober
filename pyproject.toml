@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "kober"
 # The single source of truth for the version; `kober.__version__`
 # reads it back out of the installed metadata.
-version = "0.2.0"
+version = "0.3.0"
 description = "Decode network protocols from a declarative specification into Zipline decode stages"
 readme = "README.md"
 license = "MIT"
@@ -30,13 +30,15 @@ classifiers = [
 # minor is a break with no upgrade path promised, so a range spanning two of
 # them would be a promise neither project can keep.
 #
-# The floor is 0.3.0, which implements Zipline Payload Format v0.19. Two things
-# this project is built on landed *in* it: `role=` on `DecodeStage.record()`,
-# which is where a field path belongs now that the format has somewhere to put
-# one, and a `ts` derived from `cites`, which is the specification's own
-# timestamp rule rather than the run-wide approximation that preceded it. A
-# build predating either satisfies no useful floor.
-dependencies = ["zpf>=0.3.0,<0.4"]
+# The floor is 0.5.0, which implements Zipline Payload Format v0.21. What this
+# project needs landed *in* it: `adjacency=` on `decode_stage`, the Participant
+# Descriptor field that lets field-granularity output say its records are a
+# unit sequence rather than leaving a consumer to assume they join. The earlier
+# floor's reasons still hold — `role=` on `DecodeStage.record()` and a `ts`
+# derived from `cites`, both 0.3.0 — but a 0.3 or 0.4 build cannot read a file
+# written at 0.21 at all, so the version gate would refuse it before any of
+# that mattered.
+dependencies = ["zpf>=0.5.0,<0.6"]
 
 [project.optional-dependencies]
 # YAML is the authoring format for specs, and comments are the reason: a
@@ -50,7 +52,7 @@ yaml = ["PyYAML>=6.0"]
 kober = "kober.cli:main"
 
 [project.urls]
-Specification = "https://github.com/adamkjonsson/zipline/blob/v0.19/docs/zipline-payload-format.md"
+Specification = "https://github.com/adamkjonsson/zipline/blob/v0.21/docs/zipline-payload-format.md"
 Changelog = "https://github.com/adamkjonsson/zipline-kober/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]

@@ -22,6 +22,105 @@ minor bump here too.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-19
+
+**The alignment release.** Nothing here changes what kober decodes; the
+records, spans and regions a stage writes are byte-identical to 0.2.0's. What
+changes is what the file *says about itself* and what `check` refuses. The
+three upstream projects moved — `zpf` to 0.5.0 (spec 0.21), packeteer to
+0.16.0 — and this release follows them: field-granularity output declares
+itself the unit sequence spec 0.21 added for exactly its shape, generated
+modules record their granularity so the compiled driver can say the same, the
+vendored packeteer specs and the reference catch up four releases, and
+`remaining`/`fill` gain the reference-site rule packeteer states for its
+dialect. Two changes are breaking: the `zpf` pin, and `run_compiled`
+requiring modules compiled by this version.
+
+### Added
+
+- A generated module exports `EMIT`, the granularity it was compiled at, as
+  the `Emit` value's string (`"message"`, `"field"` or `"none"`) beside `NAME`
+  and `VERSION`. It records the compile-time choice rather than making one —
+  a message module still builds no field paths — and is what
+  `kober.stage.run_compiled` reads to declare the output's adjacency exactly
+  as the interpreter does.
+
+### Changed
+
+- **Breaking:** `run_compiled` requires the module to export `EMIT` and
+  raises `TypeError` naming the constant otherwise. Every module compiled by
+  an earlier kober must be regenerated with `kober compile` — which is the
+  honest advice regardless, since a module compiled against `zpf 0.3`
+  semantics was never tested against `0.5`.
+- **Breaking:** the required `zpf` is now `>=0.5.0,<0.6` (Zipline Payload
+  Format 0.21), up from `>=0.3.0,<0.4` (0.19). A caller on `zpf 0.3` must
+  upgrade. Under `zpf`'s `0.x` rule every minor is a version gate, so a `.zpf`
+  kept from an earlier kober should be regenerated, not transcoded — `0.5.0`
+  refuses `0.3.0`'s files at the gate, and the reverse. Nothing kober calls
+  changed across the two minors; `0.5.0` adds the `adjacency=` keyword on
+  `decode_stage`, which is what the floor is for.
+- Field-granularity output now declares itself a **unit sequence**
+  (`adjacency=units` on every participant), the Participant Descriptor field
+  spec 0.21 added in answer to zipline#106 — the question kober's own files
+  raised. Its records are adjacent because they are consecutive leaves of a
+  tree walk, not because content runs from one into the next: sub-byte fields
+  cite the byte that holds them, a `computed` cites what it read, a `pointer`
+  target cites bytes behind the cursor. Message granularity declares nothing,
+  so a stage chained over a unit sequence carries `units` forward rather than
+  contradicting its input. The value is derived from the root granularity and
+  cannot be supplied. Not breaking for a reader — the format defines the bit,
+  and a `zpf` 0.5.0 consumer that flushes on every `Break` already handles it
+  — but a test elsewhere comparing projected JSONL will see
+  `"adjacency":"units"` on those participant lines. The `Seam` after a hole
+  is still written under `units`. `pressure_test.py` gains Q6 for it.
+
+### Fixed
+
+- `check` refuses a `remaining` or `fill` that anything is decoded after,
+  measured against the *message*: a `remaining` not last among the fields
+  that read input in its unit, a switch with such an arm in that position,
+  and — the case a per-unit check cannot see — a unit containing either, at
+  any depth, referenced from anywhere but the last position of its parent,
+  transitively (#31, #39). Such a spec passed `check` and decoded no input
+  correctly: the field took the bytes the later one needed and cited them as
+  its own, and the later one reported `truncated` — a hole-class verdict
+  about the data — for a message that was complete. The error is at the
+  reference site and names the chain: *`'body' is unit 'inner', which reads
+  to the end of the message through 'data', but 'trailer' is decoded after it
+  and would have no bytes left`*. A `remaining` under a `repeat` is refused
+  outright, as a repeating `fill` already was. A `computed`, `select` or
+  `pointer` after one is allowed, since it reads nothing where it stands, and
+  a `remaining` inside a `pointer` target starves nothing. The same rule
+  packeteer states since its 0.13.0. `kober.check.terminal_units()` is the
+  new public helper. What the decoder reports for such a spec run with
+  `check=False` is unchanged.
+
+### Documentation
+
+- The reference's section on packeteer's dialect no longer warns readers off
+  a transfer that works. Its two claims — that packeteer still required the
+  `on` switch key, and that kober's shorthands failed there on the first
+  field — stopped being true at packeteer 0.13.0 (2026-09-10, the day of
+  kober 0.2.0). The section now records what actually does not cross,
+  checked against packeteer 0.16.0: the kober constructs it declines by name
+  (`pointer`, `select`, `computed`, delimiter framing, `until` and `to_end`,
+  unit `params`/`args` and `confirm`/`reject`, `emit`, recursive units), when
+  `input: stream` is refused, and the three places the same key is accepted
+  differently (sub-byte runs, `fill` before a `switch`, and the `input`
+  default). The vendored copies under `tests/packeteer/` and the test over
+  them now track packeteer 0.16.0; the test that asserted `rpc.yaml` was
+  refused is replaced by one that decodes it.
+- A sweep for what the project's own development had made untrue. The README
+  and the docs landing page said "not released" two tags after `v0.1.0`;
+  `DESIGN.md` §9 called two upstream bugs open that `zpf` 0.3.0 fixed, its
+  status line and revision header were two revisions behind, and the decisions
+  index listed "when to follow `zpf` 0.3" as an open question that §11 had
+  struck through. The README, the reference's *Emission granularity* section,
+  the architecture and compiler guides and the test map now describe what a
+  file declares and what a generated module exports; the testing guide records
+  the 0.3.0 run of the deeper pipeline; the release checklist says to do this
+  sweep.
+
 ## [0.2.0] - 2026-09-10
 
 **The dialect release.** Nothing here changes what kober decodes: every change
@@ -1704,6 +1803,7 @@ installed from a checkout (see the README).
   parses `comment` back. Whether to follow `zpf` 0.3 (#58, #59) is recorded as
   an open question rather than settled.
 
-[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/adamkjonsson/zipline-kober/releases/tag/v0.1.0

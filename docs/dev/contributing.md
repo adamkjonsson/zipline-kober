@@ -12,10 +12,10 @@ python3 -m venv .venv
 .venv/bin/pip install -e . -r requirements.txt
 ```
 
-**Why `zpf` comes from a checkout.** This project requires `zpf>=0.3.0,<0.4` —
-it is built on `zpf.decode_stage`, on the per-record `role=` label, and on a
-record timestamp derived from `cites`, all `0.3.0` work — and at the time of
-writing PyPI does not publish it. Once it lands there the checkout becomes a
+**Why `zpf` comes from a checkout.** This project requires `zpf>=0.5.0,<0.6` —
+it is built on `zpf.decode_stage` and its `adjacency=` keyword, which is
+`0.5.0` work, on the per-record `role=` label, and on a record timestamp
+derived from `cites` — and at the time of writing PyPI publishes only `0.1.0`. Once it lands there the checkout becomes a
 convenience rather than a requirement.
 
 The pin covers a single `zpf` minor deliberately: that library is in `0.x`,
@@ -137,5 +137,14 @@ was written down first.
 
 - `pressure_test.py` green.
 - The deeper fuzzing pipeline in [Testing](testing.md) run against a real
-  capture — it is the only thing that exercises `stage.py`.
-- The docs build clean under `-W`.
+  capture — it is the only thing that exercises `stage.py` — through **both**
+  drivers, with the two files compared block for block. A release that moved
+  the `zpf` pin needs the sibling checkouts (`python-zipline-wire`, and the
+  `zpf` their venvs import) at versions that write the same spec version.
+- The docs build clean under `-W`, and a sweep of `README.md`, `DESIGN.md` and
+  `docs/` for anything the release made untrue — a version, a pin, a claim
+  that something is open or unreleased. The changelog records what changed;
+  the rest of the documentation has to stop describing the world before it.
+- Then the steps in `CLAUDE.md`, in order: changelog heading, version suffix,
+  link definitions, the three-part tag, and the issues closed at release
+  rather than at merge.

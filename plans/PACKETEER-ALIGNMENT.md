@@ -1,5 +1,19 @@
 # What kober can take from packeteer's dialect
 
+**State: discharged, on both sides.** Every item below has happened. §3.1–3.3
+landed in kober `0.2.0` (2026-09-10): source locations on findings, `const` on a
+field, and foreign keys recorded and declined by name. §5.1–5.3 landed in
+packeteer `0.13.0` the same day: it renamed `on:` to `dispatch:`
+(packeteer#143), took the three shorthands, `endian` inheritance and `fill`
+(#141, #142, #146), rewrote its examples in the short form, and vendored
+kober's `dns.yaml` and `http.yaml` with a test asserting the outcome of each —
+the test §5.3 asks for, from its side. kober's side of §5.3 is
+`tests/test_packeteer.py`, which since 2026-09-19 loads *and decodes* both of
+packeteer's examples as `0.16.0` ships them, including the switch-dispatched
+one that §5.1 said was blocked. What still does not transfer is now the mirror
+image of §2 — kober constructs packeteer declines by name — and is recorded in
+`docs/format/document.md` rather than here. The text below is left as written.
+
 > **Assessment, not a plan.** Written 2026-09-09 against
 > [packeteer](https://github.com/adamkjonsson/packeteer) `0.12.0` and kober
 > `0.1.0`. Both projects describe application protocols with a YAML dialect,

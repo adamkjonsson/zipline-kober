@@ -144,6 +144,34 @@ def resolve_emit(node: Node, spec: Spec, default: Emit) -> Emit:
     return default
 
 
+def root_emit(spec: Spec, default: Emit) -> Emit:
+    """Return the granularity in force at the entry unit.
+
+    What :func:`resolve_emit` answers for the root of any tree this spec
+    produces — the entry unit's own ``emit`` if it has one, else the
+    decoder's — but decidable from the spec alone, before anything is decoded.
+    :func:`plan` branches on this value once, at the root, and the branch
+    decides what the output *can* contain: ``MESSAGE`` writes one whole-message
+    record or nothing, ``FIELD`` walks to the leaves and only that walk honours
+    the overrides below, and ``NONE`` writes no record at all. So whether a file
+    holds any field record is known here, which is what the stage driver needs
+    in order to declare what the file's records assert about one another
+    (``DESIGN.md`` §5).
+
+    Args:
+        spec: The spec.
+        default: The decoder's granularity.
+
+    Returns:
+        The granularity :func:`plan` will resolve at the root.
+
+    """
+    entry = spec.units.get(spec.entry)
+    if entry is not None and entry.emit is not None:
+        return entry.emit
+    return default
+
+
 def plan(
     spec: Spec,
     tree: Node,

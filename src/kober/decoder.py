@@ -305,6 +305,13 @@ class Decoder:
     ) -> None:
         """Decode one file into another: the main entry point of §6.
 
+        The output says what its records assert about one another, and the
+        value is derived rather than chosen: at field granularity every
+        participant is declared a **unit sequence** (``adjacency=units``),
+        because consecutive leaves of a tree walk do not join; at message
+        granularity nothing is declared, so a chained stage carries its
+        input's adjacency forward. See :mod:`kober.stage`.
+
         Args:
             source: The input ``.zpf`` file.
             sink: The output ``.zpf`` file.

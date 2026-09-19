@@ -29,7 +29,7 @@ The live records stay in the project root:
 | [`CODEGEN-ANALYSIS.md`](CODEGEN-ANALYSIS.md) | Measured comparison of interpreting a spec against compiling it, and a sizing of the work. The evidence behind the compiler phase. |
 | [`SIMPLIFICATION-IMPACT.md`](SIMPLIFICATION-IMPACT.md) | What the spec repository's `0.18` simplification analysis would do to this project, proposal by proposal, and which `zpf` port to take next. |
 | [`FORMAT-ERGONOMICS.md`](FORMAT-ERGONOMICS.md) | Why writing a spec still costs too much typing after `0.1.0`'s shorthands: the dialect the docs teach, the four constructs that carry the remaining verbosity, what each is worth, and whether YAML is the culprit. |
-| [`PACKETEER-ALIGNMENT.md`](PACKETEER-ALIGNMENT.md) | What kober should take from packeteer's dialect of the same format, what it should decline, and the finding that neither project currently loads the other's examples. |
+| [`PACKETEER-ALIGNMENT.md`](PACKETEER-ALIGNMENT.md) | What kober should take from packeteer's dialect of the same format, what it should decline, and the finding that neither project loaded the other's examples. Discharged on both sides by kober 0.2.0 and packeteer 0.13.0; the header records how. |
 
 ## Phases
 
@@ -43,3 +43,4 @@ The live records stay in the project root:
 | [`POINTER-PHASE-PLAN.md`](POINTER-PHASE-PLAN.md) | The two things real captures asked for and the language could not say: the `Pointer` construct, and the expression language's first functions. | **Done** — landed on `pointer_phase`. |
 | [`REPETITION-PHASE-PLAN.md`](REPETITION-PHASE-PLAN.md) | A way for a spec to ask a question about a repeated field, so HTTP can choose its own body framing instead of assuming one. | **Done** — landed on `repetition_language_phase`. |
 | [`DIALECT-PHASE-PLAN.md`](DIALECT-PHASE-PLAN.md) | The `0.2.0` milestone: the remaining shorthands, source locations on faults, and the packeteer keys kober should recognise rather than refuse. | **Done** — landed on `implement_v0.2.0`, shipped in `v0.2.0`. §9 records what the plan got wrong. |
+| [`UPSTREAM-ALIGNMENT-PHASE-PLAN.md`](UPSTREAM-ALIGNMENT-PHASE-PLAN.md) | The `0.3.0` milestone: `zpf` 0.5.0 / spec 0.21 (`adjacency=units` for field-granularity output, from both drivers), packeteer 0.16.0 (vendored specs, the reference's transfer section), and the terminal-unit rule for `fill` and `remaining`. | **Done** — landed on `plan_0_3_0`, shipped in `v0.3.0`. |

@@ -18,6 +18,19 @@ it.
 packet-oriented, whatever transport it started on, so a spec's declared
 :class:`~kober.spec.InputShape` cannot decide the iterator — see
 ``DESIGN.md`` §9.2.
+
+**Field-granularity output is a unit sequence, and the file says so.** Its
+records are adjacent because they are consecutive leaves of a tree walk, not
+because content ran from one into the next: sub-byte fields all cite the byte
+that holds them, a ``computed`` field cites the fields its expression read, a
+``pointer`` target cites bytes behind the cursor, and every payload is created
+rather than copied. So the participant is declared
+:attr:`~zpf.Adjacency.UNITS` — no two adjacent records may be assumed to join,
+and no seam is owed at any seam — which is the shape spec 0.21 added the field
+for. Message granularity declares nothing: its records do join, the
+:class:`~zpf.Seam` after a hole is the honest per-seam form, and leaving the
+value unset lets a stage chained over a unit sequence carry that forward
+instead of contradicting its input. See ``_adjacency``.
 """
 
 from __future__ import annotations
@@ -29,10 +42,10 @@ from zpf.blocks import UNDECODED_REASONS
 from zpf.reassembly import Gap
 
 from kober.cursor import Cursor
-from kober.emit import plan
+from kober.emit import plan, root_emit
 from kober.errors import EvalError, SpecError, TruncatedRead, Undecodable
 from kober.node import NodeStatus
-from kober.spec import InputShape
+from kober.spec import Emit, InputShape
 
 if TYPE_CHECKING:
     import os
@@ -82,6 +95,40 @@ def _seam_for(reason: str) -> zpf.Seam | None:
     # Width stays absent: zpf defines it in the output's offset space, and how
     # many decoded units a hole cost is not recoverable from its byte count.
     return zpf.Seam(reason=SEAM_REASON if reason == GAP_REASON else reason)
+
+
+def _adjacency(emit: Emit) -> zpf.Adjacency | None:
+    """Return what the output's participants declare about their neighbours.
+
+    Decided by the granularity in force at the root and nothing else, because
+    that is what decides whether the file can hold a field record at all
+    (:func:`kober.emit.root_emit`). One function for both drivers: the
+    interpreter resolves the root from the spec and the decoder, a generated
+    module records the value it was compiled at, and both hand it here — so
+    the two cannot write participant lines that disagree.
+
+    ``UNITS`` for field granularity, for the reasons in the module docstring.
+    It asserts less than ``contiguous`` and is never wrong, even for a flat
+    spec whose leaves happen to abut — a walk order is not a continuity claim,
+    and deciding per spec whether the tree "has containment" would be a
+    fragile predicate for a distinction no consumer can use.
+
+    ``None`` — not ``CONTIGUOUS`` — for the other two. The difference is what
+    a chained stage does: ``None`` carries the *input's* effective adjacency
+    forward, while an explicit ``CONTIGUOUS`` overrides it. A message-
+    granularity stage reading a unit sequence therefore keeps saying ``units``,
+    which the specification requires of a stage reading one, and the datagram
+    driver never joins two input units anyway. ``NONE`` writes no record, so
+    the value is moot and the same rule costs nothing.
+
+    Args:
+        emit: The granularity in force at the entry unit.
+
+    Returns:
+        The ``adjacency=`` to pass to :func:`zpf.decode_stage`.
+
+    """
+    return zpf.Adjacency.UNITS if emit is Emit.FIELD else None
 
 
 def decode_stream(decoder: Decoder, stage: zpf.DecodeStage, stream: object) -> None:
@@ -152,6 +199,10 @@ class _Writer:
     Adjacent regions sharing a reason are coalesced, which
     :func:`kober.emit.plan` also does within one message; doing it here as well
     joins the tail of one message to the head of the next when they agree.
+    The seam is written whatever the participant's adjacency: under a unit
+    sequence it is redundant — nothing joins anyway — but the format keeps the
+    block permitted there, both drivers share this writer, and a branch to
+    suppress it would be a second path through the one place seams are decided.
 
     **A timestamp is passed only where none can be derived.** Omitting ``ts``
     lets `zpf` take it from ``cites``, which is the specification's rule: a
@@ -354,6 +405,11 @@ def run(
 ) -> None:
     """Decode one file into another.
 
+    What the output declares about its records is derived from the decoder,
+    not passed: field granularity writes a unit sequence, message granularity
+    carries the input's adjacency forward (``_adjacency``). A caller-
+    supplied value would be a way to state something false about the file.
+
     Args:
         decoder: The decoder to drive.
         source: The input ``.zpf`` file.
@@ -370,6 +426,7 @@ def run(
         produced_by=produced_by,
         produced_at=produced_at,
         comment=comment,
+        adjacency=_adjacency(root_emit(decoder.spec, decoder.emit)),
     ) as stage:
         for stream in stage.streams():
             decode_stream(decoder, stage, stream)
@@ -386,24 +443,44 @@ def run_compiled(
 ) -> None:
     """Decode one file into another with a generated module.
 
-    What :func:`run` is for the interpreter. The module names itself: a
+    What :func:`run` is for the interpreter. The module says what it is: a
     generated decoder carries the spec's name and version, so the output says
-    which specification produced it exactly as the interpreter's output does.
+    which specification produced it exactly as the interpreter's output does,
+    and the granularity it was compiled at, so the output declares what its
+    records assert about one another exactly as the interpreter's would
+    (``_adjacency``). A module from before ``EMIT`` existed is refused rather
+    than defaulted: a stale field module writing ``contiguous`` over sub-byte
+    fields is precisely the silent wrong statement the field exists to
+    prevent, and a module compiled against an older `zpf` was never tested
+    against this one anyway.
 
     Args:
         module: A module produced by :func:`kober.pygen.render` — anything with
-            ``NAME``, ``VERSION`` and ``decode_from``.
+            ``NAME``, ``VERSION``, ``EMIT`` and ``decode_from``.
         source: The input ``.zpf`` file.
         sink: The output ``.zpf`` file.
         produced_by: What to record as the producer.
         produced_at: When, as ticks or a datetime.
         comment: Free-text note for the output's File Header.
 
+    Raises:
+        TypeError: If the module has no ``EMIT`` — it was generated by a kober
+            before 0.3.0 and must be compiled again.
+
     Example:
         >>> import dns
         >>> run_compiled(dns, "in.zpf", "out.zpf", produced_by="me", produced_at=0)
 
     """
+    emit = getattr(module, "EMIT", None)
+    if emit is None:
+        msg = (
+            f"module {getattr(module, 'NAME', module)!r} has no EMIT: it was "
+            "generated by a kober before 0.3.0, which did not record the "
+            "granularity a module was compiled at, so the output's adjacency "
+            "cannot be declared. Compile the spec again with `kober compile`."
+        )
+        raise TypeError(msg)
     with zpf.decode_stage(
         source,
         sink,
@@ -411,6 +488,7 @@ def run_compiled(
         produced_by=produced_by,
         produced_at=produced_at,
         comment=comment,
+        adjacency=_adjacency(Emit(emit)),
     ) as stage:
         for stream in stage.streams():
             decode_stream_compiled(module, stage, stream)

@@ -1,6 +1,7 @@
 # kober — design
 
-**Status:** implemented and exercised against real captures, not released.
+**Status:** implemented, exercised against real captures, and released as
+`0.x` — `v0.1.0`, `v0.2.0`, and now `0.3.0`, each pinning one `zpf` minor.
 The spec model, expression language, checker, decode engine, emitter, stage
 driver, all five CLI verbs, the **compiler** (§14), and the `Pointer` construct
 (§3.2) exist, in both implementations. What is *not* built is marked as such:
@@ -10,7 +11,7 @@ everything in §11 that is still a question.
 `zpf` by [`pressure_test.py`](pressure_test.py), and since revision 6 against
 real captures too.
 
-Revision 8. Revision 1 was written blind and got the layer wrong — it invented
+Revision 10. Revision 1 was written blind and got the layer wrong — it invented
 reassembly, gaps, and provenance that `zpf` already provides. Revision 2 fixed
 that against the source. Revision 3 added the results of an executable pressure
 test (§10) and treated this project as what it is: **a load test of `zpf`, where
@@ -73,6 +74,19 @@ delimited read stop at one boundary without running past another — between the
 `examples/http.yaml` chooses its framing instead of assuming it, and the
 capture that had never been run decodes 2000 messages with no undecoded region
 where it used to leave 405 421 of its 414 460 bytes `undecodable`.
+
+Revision 10 follows the upstream projects, for `0.3.0`. Spec 0.21 answered the
+format-level question this project's own files raised — whether a stream of
+records that cite one another's bytes is a stream at all — with `adjacency`
+on the Participant Descriptor, and §5 gains its **wholesale form**: field
+granularity declares a unit sequence and message granularity declares nothing,
+which is not the same as `contiguous`. §14.3 lets a generated module say which
+granularity it was built at, since the driver now needs to know. §9 and §13.4
+stop calling fixed things open. And the checker gained the rule packeteer
+states for its dialect, that `remaining` and `fill` are measured against the
+message — a fault that passed `check`, cited the wrong bytes, and reported a
+hole the stream never had, invisible to every fixture because every fixture
+put the field last.
 
 The revision's real content is the same shape as revision 8's, one level in.
 Aggregation went into the **model** rather than into the expression language,
@@ -770,6 +784,42 @@ know how many decoded units they would have become. Reporting the input count
 in a field defined as an output measurement would be misleading rather than
 merely imprecise, so it is omitted, which still says the two do not join.
 
+**The rule above is the message-granularity rule. Field granularity takes the
+wholesale form instead: the participant is declared a unit sequence.** Spec
+0.21 added `adjacency` to the Participant Descriptor, answering the question
+kober's own files raised as [zipline#106](https://github.com/adamkjonsson/zipline/issues/106):
+`contiguous` (what every file ever written held in that byte) means stored
+neighbours join unless a Seam says otherwise; `units` means *no two adjacent
+records may be assumed to join*, every record is still citable, and no Seam
+is owed at any seam. At field granularity kober's records are adjacent because
+they are consecutive leaves of a tree walk, not because content ran from one
+into the next — three shapes in `emit.py` say so outright:
+
+- **Sub-byte fields** cite the byte that holds them: `dns.flags.qr`,
+  `dns.flags.opcode` and `dns.flags.aa` all cite `[2, 3)` of a message, since
+  the cursor rounds a bit range out to its byte and `prim_token` widens the
+  value to `u8`. `flags.qr` is not continuous with `flags`; it is *inside* it.
+- **Computed fields** cite the fields their expression read (§3.2) — bytes
+  already cited, possibly much earlier in the stream.
+- **Pointer targets** cite bytes behind the cursor (§11), and a pointer owes
+  no seam — but the neighbours do not join either.
+
+Every payload is also *created*, not copied, so the output's own offset space
+is not a splice of anything. Under `contiguous` none of this was a conformance
+failure, because the seam predicate declines to test a pair whose citations
+overlap or run backwards; but "untested" is not "stated". So field granularity
+passes `adjacency=UNITS` and message granularity passes **nothing** — `None`,
+which is not `CONTIGUOUS`: `None` carries the input's effective adjacency
+forward, an explicit `CONTIGUOUS` overrides it, and a stage reading a unit
+sequence is required to keep saying so. The value is derived from the root
+granularity (`emit.root_emit`), which is what decides whether the file can
+hold a field record at all, and a caller cannot supply one — that would be a
+way to state something false about the file. `UNITS` asserts less and is never
+wrong, even for a flat spec whose leaves happen to abut, so no per-spec
+"containment" predicate is attempted. The Seam after a hole is still written
+under `units`: redundant, but permitted by the format, and both drivers share
+the one writer. Q6 of `pressure_test.py` is the **[verified]** claim.
+
 ## 6. Public API
 
 ```python
@@ -930,8 +980,10 @@ The pressure test produced three findings, all filed against `python-zipline`,
 all fixed, and all released in `zpf` 0.2.0. Kept here because the reasoning
 still constrains our design, not as an open list.
 
-Real captures later produced two more, both **open**, in §13.4 — this section
-is the pressure test's three, not the project's total.
+Real captures later produced two more, in §13.4, both fixed in `zpf` 0.3.0 —
+this section is the pressure test's three, not the project's total. The one
+question kober's files raised against the *format* rather than the library,
+zipline#106, is §5's: answered in spec 0.21 with `adjacency`.
 
 ### 9.1 A per-record name for decoded fields — fixed, and still argued
 
@@ -964,9 +1016,10 @@ work, and every `zpf` minor is a break.
 became `role` (`0x0092`), a per-record label read in the namespace of the
 decoder that wrote it — independent of `content_type`, so a field record carries
 `prim:u32` *and* `dns.header.id` at once rather than choosing. #59 reshaped
-`SessionWriter.record()`, which this project does not call. The pin is
-`zpf>=0.3.0,<0.4`, and §4.1's single emit site made the switch the one-line
-change it was kept that way to be.
+`SessionWriter.record()`, which this project does not call. The pin became
+`zpf>=0.3.0,<0.4` — it is `>=0.5.0,<0.6` since kober 0.3.0, two minors that
+changed nothing this tree calls except to add `adjacency=` — and §4.1's single
+emit site made the switch the one-line change it was kept that way to be.
 
 ### 9.2 Smaller findings
 
@@ -1281,7 +1334,7 @@ absent, seven `truncated` regions where a hole cut a line in half, no message
 spanning a hole, conformance clean. §5's rule and §2's vocabulary both work at
 a scale no fixture reached. **[verified]**
 
-### 13.4 Two upstream bugs
+### 13.4 Two upstream bugs — both fixed
 
 - **[#62](https://github.com/adamkjonsson/python-zipline/issues/62)** — which
   timestamp a message inside a multi-message run should carry. `zpf`'s own
@@ -1297,7 +1350,9 @@ a scale no fixture reached. **[verified]**
   `stream_extent` takes the maximum. `chunks()` skips empty records and
   `record_ranges` does not. It makes `check_coverage` report false violations
   on any capture including its handshake — the tool a decode stage proves
-  itself with.
+  itself with. **Fixed in `zpf` 0.3.0**; `0.5.0` then reworked placement
+  altogether (offsets unwrap along stored order, so a stream past 2 GiB
+  places), which only widens what kober can read.
 
 ### 13.5 Two of our own, and why no test could have caught them
 
@@ -1394,7 +1449,14 @@ argument for keeping both.
 
 **Granularity is a compile-time choice**, because it is a difference in the
 code and not in a flag: at `message` a decoder builds no field paths at all,
-and at `field` the path is threaded through every unit function.
+and at `field` the path is threaded through every unit function. The module
+*records* the choice in `EMIT` — the `Emit` value's string, beside `NAME` and
+`VERSION` — but cannot change it; what the constant is for is the stage driver,
+which reads it to declare what the output's records assert about one another
+(§5), exactly as it derives the same thing from a `Decoder`. `run_compiled`
+refuses a module without it rather than guessing, since a stale field module
+writing `contiguous` over sub-byte fields is the silent wrong statement
+`adjacency` exists to prevent.
 
 ### 14.4 Names, and refusing rather than renaming
 

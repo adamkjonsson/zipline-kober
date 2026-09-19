@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from kober.check import Severity, check, trailing_width
+from kober.check import Severity, check, terminal_units, trailing_width
 from kober.expr import ExprType, parse
 from kober.loader import from_yaml
 from kober.spec import (
@@ -1518,3 +1518,250 @@ def test_a_constant_that_fits_is_no_finding():
     assert not errors(const_spec(IntType(bits=16), 0x5345))
     assert not errors(const_spec(StringType(size=Fixed(3)), "GET"))
     assert not errors(const_spec(BytesType(size=Fixed(2)), b"\x89P"))
+
+
+# --- remaining and fill are measured against the message --------------------
+#
+# A field sized `remaining` or `fill` reads to the end of the message, so it
+# may stand only in the last position of its unit — transitively: a unit that
+# contains one, at any depth, may be referenced only from the last position of
+# *its* parent. A spec that breaks the rule decodes no input at all: the field
+# takes the bytes a later one needs, cites them as its own, and the later one
+# reports `truncated` for a message that was complete. That is #31 for
+# `remaining` and #39 for `fill`; one check, so the two cannot disagree.
+
+
+def bits(name: str, width: int = 8) -> Field:
+    return Field(name=name, type=IntType(bits=width))
+
+
+def to_end(name: str, size: Remaining | Fill) -> Field:
+    return Field(name=name, type=BytesType(size=size))
+
+
+def inner(*fields: Field, name: str = "inner") -> Unit:
+    return Unit(name=name, fields=list(fields))
+
+
+def test_a_remaining_not_last_in_its_unit_is_refused():
+    """#31: `data` takes `trailer`'s four bytes for every input there will be."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[bits("count"), to_end("data", Remaining()), bits("trailer", 32)],
+            )
+        ]
+    )
+    assert only_error(spec) == (
+        "'data' reads to the end of the message, but 'trailer' is decoded after "
+        "it and would have no bytes left"
+    )
+
+
+def test_a_fill_in_a_unit_referenced_before_a_trailer_is_refused():
+    """#39: `inner` is correct on its own; only the reference site shows the fault."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[Field(name="body", type=UnitRef(unit="inner")), bits("trailer", 32)],
+            ),
+            inner(bits("count"), to_end("data", Fill())),
+        ]
+    )
+    assert only_error(spec) == (
+        "'body' is unit 'inner', which reads to the end of the message through "
+        "'data', but 'trailer' is decoded after it and would have no bytes left"
+    )
+
+
+def test_a_remaining_in_a_unit_referenced_before_a_trailer_is_refused():
+    """The nested case #31 says will be the one hit: last in its unit, not in the message."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[Field(name="body", type=UnitRef(unit="inner")), bits("trailer", 32)],
+            ),
+            inner(to_end("data", Remaining())),
+        ]
+    )
+    assert "'body' is unit 'inner'" in only_error(spec)
+
+
+@pytest.mark.parametrize("size", [Remaining(), Fill()], ids=["remaining", "fill"])
+def test_the_rule_is_transitive_two_levels_down(size: Remaining | Fill):
+    """The path names every hop, so the author can follow it to the field."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[Field(name="body", type=UnitRef(unit="middle")), bits("trailer", 32)],
+            ),
+            inner(bits("kind"), Field(name="deep", type=UnitRef(unit="inner")), name="middle"),
+            inner(to_end("data", size)),
+        ]
+    )
+    assert terminal_units(spec) == {
+        "inner": "data",
+        "middle": "deep.data",
+        "message": "body.deep.data",
+    }
+    assert only_error(spec) == (
+        "'body' is unit 'middle', which reads to the end of the message through "
+        "'deep.data', but 'trailer' is decoded after it and would have no bytes left"
+    )
+
+
+def test_the_fault_is_reported_at_the_reference_site():
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[Field(name="body", type=UnitRef(unit="inner")), bits("trailer", 32)],
+            ),
+            inner(to_end("data", Fill())),
+        ]
+    )
+    [finding] = check(spec)
+    assert finding.where.path == "dns.message.body"
+
+
+def test_a_switch_arm_that_reads_to_the_end_makes_the_switch_terminal():
+    """One arm is enough: every input taking it starves the field after."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    bits("kind"),
+                    Field(
+                        name="body",
+                        type=Switch(
+                            dispatch=parse("kind"),
+                            cases={1: IntType(bits=8)},
+                            default=BytesType(size=Remaining()),
+                        ),
+                    ),
+                    bits("after"),
+                ],
+            )
+        ]
+    )
+    assert "'body' reads to the end of the message, but 'after'" in only_error(spec)
+
+
+def test_a_remaining_under_a_repeat_is_refused():
+    """The first element consumes the run, and no later one can be met."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(
+                        name="data", type=BytesType(size=Remaining()), repeat=Count(expr=parse("2"))
+                    )
+                ],
+            )
+        ]
+    )
+    assert "cannot repeat" in only_error(spec)
+
+
+def test_a_reference_to_a_terminal_unit_under_a_repeat_is_refused():
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(
+                        name="items", type=UnitRef(unit="inner"), repeat=Until(expr=parse("false"))
+                    )
+                ],
+            ),
+            inner(to_end("data", Remaining())),
+        ]
+    )
+    assert "cannot repeat" in only_error(spec)
+
+
+def test_the_rule_holds_under_input_stream():
+    """A `remaining` takes the rest of the run, so what follows is unreachable.
+
+    However many messages the run holds.
+    """
+    spec = build(
+        [Unit(name="message", fields=[to_end("data", Remaining()), bits("trailer")])],
+        input=InputShape.STREAM,
+    )
+    assert "'data' reads to the end of the message" in only_error(spec)
+
+
+# The uses that must keep passing: the ordinary and correct ones.
+
+
+def test_a_fill_referenced_from_the_last_position_is_the_ordinary_use():
+    """A body-before-a-trailer inside a unit, with nothing after the unit."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[bits("kind"), Field(name="body", type=UnitRef(unit="inner"))],
+            ),
+            inner(bits("count"), to_end("data", Fill()), bits("trailer", 32)),
+        ]
+    )
+    assert check(spec) == ()
+    assert terminal_units(spec) == {"inner": "data", "message": "body.data"}
+
+
+def test_a_remaining_last_in_the_message_is_fine():
+    spec = build([Unit(name="message", fields=[bits("count"), to_end("data", Remaining())])])
+    assert check(spec) == ()
+
+
+def test_a_fills_own_trailer_is_not_decoded_after_it_in_the_sense_that_matters():
+    """Sizing against a trailer is what `fill` is for; that is `_check_fills`' job."""
+    spec = build([Unit(name="message", fields=[to_end("data", Fill()), bits("trailer", 32)])])
+    assert check(spec) == ()
+
+
+def test_a_field_that_reads_nothing_may_follow_a_remaining():
+    """A `computed` over the data, a `select`, a `pointer` — none consumes bytes where it stands."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    bits("count"),
+                    to_end("data", Remaining()),
+                    Field(name="doubled", type=Computed(expr=parse("count * 2"))),
+                    Field(name="first", type=Pointer(at=parse("0"), type=IntType(bits=8))),
+                ],
+            )
+        ]
+    )
+    assert check(spec) == ()
+
+
+def test_a_remaining_inside_a_pointer_target_starves_nothing():
+    """The target is read on its own cursor at another offset.
+
+    So the field after the pointer is unaffected.
+    """
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    bits("pos"),
+                    Field(name="seen", type=Pointer(at=parse("pos"), type=UnitRef(unit="inner"))),
+                    bits("after"),
+                ],
+            ),
+            inner(to_end("data", Remaining())),
+        ]
+    )
+    assert check(spec) == ()
+    assert "message" not in terminal_units(spec)

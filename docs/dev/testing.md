@@ -17,15 +17,16 @@ itself came from the second kind, and none of them needed a clever test.
 | `test_eval.py` | Evaluation, and the cross-check that inferred type and evaluated value agree — if those two halves disagreed, everything `check` proves would be void. |
 | `test_spec.py` | The model's local invariants: integer widths, blank names, duplicate fields, normalization to tuples and read-only mappings. |
 | `test_loader.py` | The YAML/JSON schema: strictness, path-carrying errors, the tagged-mapping forms, and YAML's implicit-typing traps. |
-| `test_check.py` | Whole-spec validation: scoping, ordering, `parent`/`root` resolution, argument matching, recursion. |
+| `test_check.py` | Whole-spec validation: scoping, ordering, `parent`/`root` resolution, argument matching, recursion, and the rule that `remaining` and `fill` are measured against the message. |
 | `test_cursor.py` | The bit-level cursor: MSB-first reads, sub-byte spans rounding outward, alignment refusal, truncation. |
 | `test_node.py` | The tree: walking, statuses, rendering. |
 | `test_decoder.py` | The engine: every field type, size, and repeat, plus guards, truncation, and the bounded loops. |
 | `test_emit.py` | What the emitter *decides*, with no file involved: granularity resolution, `prim:` widening, field paths, coverage arithmetic. |
 | `test_emit_conformance.py` | What `zpf` *accepts*: real files written through a decode stage and put past `ConformanceChecker` and `check_coverage`. |
-| `test_stage.py` | The driver: gaps, seams, shape dispatch, chaining, timestamps, `content_registry`. |
+| `test_stage.py` | The driver: gaps, seams, shape dispatch, chaining, timestamps, `content_registry`, and what the output declares — a unit sequence at field granularity, the input's adjacency carried forward otherwise. |
 | `test_cli.py` | All five verbs, driving `main()` directly. |
 | `test_examples.py` | The shipped `examples/` specs — they must check clean, carry documentation, and still decode. |
+| `test_packeteer.py` | packeteer's shipped specs, vendored under `tests/packeteer/` at a stated version: they load, decode, and have every key kober has no meaning for declined by name. |
 | `test_ops.py` | The compiler's neutral plan: what it carries about a format, and what it deliberately does not carry about a target. |
 | `test_pygen.py` | The Python backend: names and the refusals, expression rendering, and that its output passes `ruff` and is the module checked into `tests/compiled_dns.py`. |
 | `test_compiled_dns.py` | That checked-in module from a consumer's side: typed fields, byte ranges, enum labels. |
@@ -131,7 +132,8 @@ Then put the output past `zpf.ConformanceChecker` and `zpf.check_coverage`.
 **Run this before a release, or after touching `stage.py`.**
 
 The compiled path is worth running over the same file, since both drive the same
-`stage.py` and should write the same one:
+`stage.py` and should write the same one — compare the two files block for
+block, participant lines included, as `tests/test_compiled.py::blocks` does:
 
 ```bash
 .venv/bin/kober compile examples/dns.yaml -o /tmp/dns.py --emit field
@@ -141,9 +143,24 @@ The compiled path is worth running over the same file, since both drive the same
                  produced_by='kober', produced_at=0)"
 ```
 
+Compile the module fresh each time. `run_compiled` reads the granularity from
+the module's `EMIT` and refuses one that has none — a module left over from a
+kober before 0.3.0 — rather than write a participant line it cannot vouch for.
+
+The `0.3.0` run of this pipeline, on `zpf` 0.5.0, took seven inputs — the
+fuzzed DNS capture above, a generated DNS stream carrying a compressed
+response, the impaired chunked HTTP stream below, and four real captures
+(`packet_loss`, `http_stream_1`, `tcp_lossy_ts`, `tcp_reorder_ts`) — through
+both drivers at both granularities: 28 files, every one conformant with full
+coverage, every interpreter/compiled pair identical block for block, every
+field file declaring `units` and every message file `contiguous`. The shapes
+held too: 60 start lines for 30 requests, 36 chunk sizes and 26 trailer fields
+in the chunked stream, 1932 pointer targets in the fuzzed DNS.
+
 - [`python-zipline-wire`](https://github.com/adamkjonsson/python-zipline-wire)
-  converts real captures to `.zpf`. Its `tests/captures/` holds sixteen,
-  including DNS, HTTP, and packet loss.
+  converts real captures to `.zpf`. Its `tests/captures/` holds twenty-two at
+  its 0.3.0 (sixteen when this was first measured), including DNS, HTTP, and
+  packet loss.
 - [`packeteer`](https://github.com/adamkjonsson/packeteer) generates synthetic
   traffic and adversarial variants, and can produce impairments directly
   (`packeteer stream --packet-loss --gap-jitter …`) — a better source of gap

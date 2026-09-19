@@ -21,6 +21,11 @@ if TYPE_CHECKING:
 NAME = "dns"
 VERSION = "1.0"
 
+#: The granularity this module was generated at: one record per message,
+#: one per leaf field, or none. The stage driver reads it to declare what
+#: the output's records assert about one another.
+EMIT = "field"
+
 #: How a text field's payload is labelled. Not ``prim:`` — that scheme
 #: has no text token — so the format's other fully specified one is used.
 TEXT_CONTENT_TYPE = "mime:text/plain; charset=utf-8"
