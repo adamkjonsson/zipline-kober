@@ -398,6 +398,44 @@ itself `expr`, `terminated`, `remaining` or `fill`, a second `fill` in the same
 unit, a `fill` that repeats, and a trailer that is not a whole number of bytes.
 Each is an error naming the field responsible.
 
+### `remaining` and `fill` are measured against the message
+
+Both read to the end of the message — `remaining` all of it, `fill` all of it
+less its own unit's trailer — and neither knows what its *parent* still needs.
+So a unit containing either, at any depth, may only be referenced from the last
+position of its own unit, and so on up; and a `remaining` may only be the last
+field that reads anything in its unit. A spec that breaks this decodes no
+input: the field takes the bytes a later one needs and cites them as its own,
+and the later one reports `truncated` for a message that was complete.
+
+```yaml
+units:
+  m:
+    fields:
+      - {name: body, unit: inner}     # refused: 'trailer' is decoded after it
+      - {name: trailer, bits: 32}
+  inner:
+    fields:
+      - {name: count, bits: 8}
+      - {name: data, bytes: {size: {fill: true}}}
+```
+
+`inner` is correct on its own. The error is at the reference, which is the
+only place the fault is visible, and it names the whole chain:
+
+```text
+error: m.yaml:7: m.m.body: 'body' is unit 'inner', which reads to the end of
+the message through 'data', but 'trailer' is decoded after it and would have
+no bytes left
+```
+
+A field that reads nothing where it stands — a `computed`, `select` or
+`pointer` — may follow, since nothing starves it. A `remaining` inside a
+`pointer`'s target counts for nothing either: the target is read on its own
+cursor at another offset. A `remaining` under a `repeat` is refused outright,
+as a repeating `fill` is. The rule is the same under `input: stream`, and the
+same one packeteer states for its dialect.
+
 ```{warning}
 **A run is not a packet.** Under `input: datagram` the two coincide and a fill
 is exact. Under `input: stream` a run holds as many messages as fit, so a fill

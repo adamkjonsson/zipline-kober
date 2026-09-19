@@ -66,6 +66,7 @@ from kober.spec import (
     InputShape,
     IntType,
     Pointer,
+    Remaining,
     Select,
     StringType,
     Switch,
@@ -292,6 +293,86 @@ def fill_widths(spec: Spec) -> dict[tuple[str, int], int | None]:
     return widths
 
 
+def terminal_units(spec: Spec) -> dict[str, str]:
+    """Return every unit that reads to the end of the message, and through what.
+
+    A unit is **terminal** if one of its fields is sized ``remaining`` or
+    ``fill``, at any depth of ``switch``, or references a terminal unit — the
+    property is transitive, and that is the whole point of computing it here
+    rather than inside ``_Checker._check_fills``, which sees one unit at a
+    time. Both keys are measured against the *message*: a ``remaining`` takes
+    everything left in the run, and a ``fill`` everything left less the
+    trailing fields of its **own** unit. So a unit containing either is correct
+    on its own and wrong wherever something is decoded after it, one level
+    up — a fault no per-unit check can see, and the one
+    ``_Checker._check_terminal`` refuses at the reference site.
+
+    A ``pointer``'s target does not count. It is read at another offset on a
+    cursor of its own and moves nothing where it stands, so a ``remaining``
+    inside one starves no field after the pointer.
+
+    Args:
+        spec: The spec.
+
+    Returns:
+        For each terminal unit, the dotted path (relative to that unit) of the
+        field through which it reaches the end — the name an error should
+        cite. Non-terminal units are absent.
+
+    Example:
+        >>> terminal_units(spec)
+        {'inner': 'data', 'outer': 'body.data'}
+
+    """
+    found: dict[str, str] = {}
+    changed = True
+    while changed:
+        changed = False
+        for unit in spec.units.values():
+            if unit.name in found:
+                continue
+            for item in unit.fields:
+                path = _reaches_end(item, found)
+                if path is not None:
+                    found[unit.name] = path
+                    changed = True
+                    break
+    return found
+
+
+def _reaches_end(item: Field, terminal: dict[str, str]) -> str | None:
+    """Return the path through which ``item`` reads to the end, if it does."""
+    label = item.name or "<anonymous>"
+    for kind in _walk_types_read(item.type):
+        if isinstance(_size_of(kind), (Remaining, Fill)):
+            return label
+        if isinstance(kind, UnitRef) and kind.unit in terminal:
+            return f"{label}.{terminal[kind.unit]}"
+    return None
+
+
+def _walk_types_read(kind: FieldType) -> Iterator[FieldType]:
+    """Yield a field type and every type it may read *where it stands*.
+
+    :func:`_walk_types` with the pointer branch left out: a target is read
+    elsewhere, on its own cursor, and consumes nothing here.
+    """
+    yield kind
+    if isinstance(kind, Switch):
+        for case in kind.cases.values():
+            yield from _walk_types_read(case)
+        if kind.default is not None:
+            yield from _walk_types_read(kind.default)
+
+
+def _reads_input(kind: FieldType) -> bool:
+    """Whether a field of this type consumes bytes where it stands."""
+    return any(
+        isinstance(inner, (IntType, BytesType, StringType, UnitRef))
+        for inner in _walk_types_read(kind)
+    )
+
+
 def _trailing_bits(spec: Spec, unit: Unit, index: int, seen: tuple[str, ...]) -> int:
     """Sum the widths of ``unit``'s fields after ``index``, in bits."""
     total = 0
@@ -476,6 +557,7 @@ class _Checker:
         self._check_entry()
         for unit in self.spec.units.values():
             self._check_unit(unit)
+        self._check_terminal()
         self._check_reachability()
         self._check_left_recursion()
         self._check_foreign()
@@ -664,6 +746,84 @@ class _Checker:
                     "rest of the message; every message after this one in the same "
                     "segment would be swallowed by this field",
                 )
+
+    def _check_terminal(self) -> None:
+        """Refuse anything decoded after a field that reads to the end.
+
+        ``remaining`` and ``fill`` are measured against the message, so a field
+        that reads to the end may stand only in the last position of its unit,
+        transitively: a unit containing one, at any depth, may be referenced
+        only from the last position of *its* parent, and so on up. A spec that
+        breaks the rule decodes no input at all — the field takes the bytes
+        the later one needs, cites them as its own, and the later one reports
+        ``truncated`` for a message that was complete — so this is an error,
+        not a warning, and it holds under ``input: stream`` for the same
+        reason.
+
+        A ``fill``'s own trailer is the exception in the same unit, since
+        sizing against a trailer is what ``fill`` is for; the unit is still
+        terminal from outside. A field after it that reads nothing where it
+        stands — a ``computed``, ``select`` or ``pointer`` — is not "decoded
+        after it" in the sense that matters and is allowed.
+
+        Whole-spec rather than per-unit because the fault is at the reference
+        site, which is in a different unit from the field that causes it.
+        """
+        terminal = terminal_units(self.spec)
+        for unit in self.spec.units.values():
+            for index, item in enumerate(unit.fields):
+                self._check_terminal_field(unit, index, item, terminal)
+
+    def _check_terminal_field(
+        self, unit: Unit, index: int, item: Field, terminal: dict[str, str]
+    ) -> None:
+        """Apply the terminal rule to one field, at its position in ``unit``."""
+        label = item.name or f"<anonymous {index}>"
+        where = f"{self.spec.name}.{unit.name}.{label}"
+        own = any(
+            isinstance(_size_of(kind), Remaining) for kind in _walk_types_read(item.type)
+        )
+        through = next(
+            (
+                (kind.unit, terminal[kind.unit])
+                for kind in _walk_types_read(item.type)
+                if isinstance(kind, UnitRef) and kind.unit in terminal
+            ),
+            None,
+        )
+        if not own and through is None:
+            return
+        if item.repeat is not None:
+            self.error(
+                where,
+                "a field that reads to the end of the message cannot repeat: the "
+                "first element would take everything, leaving the rest nothing",
+            )
+            return
+        starved = next(
+            (
+                later.name or f"<anonymous {position}>"
+                for position, later in enumerate(unit.fields)
+                if position > index and _reads_input(later.type)
+            ),
+            None,
+        )
+        if starved is None:
+            return
+        if own:
+            self.error(
+                where,
+                f"{label!r} reads to the end of the message, but {starved!r} is "
+                "decoded after it and would have no bytes left",
+            )
+            return
+        target, path = through
+        self.error(
+            where,
+            f"{label!r} is unit {target!r}, which reads to the end of the message "
+            f"through {path!r}, but {starved!r} is decoded after it and would have "
+            "no bytes left",
+        )
 
     def _check_field(self, unit: Unit, index: int, item: Field) -> None:
         """Check one field's type, guards, size, and repetition."""

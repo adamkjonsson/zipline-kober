@@ -1077,7 +1077,10 @@ AWKWARD: dict[str, str] = {
                       2: {int: {bits: 32}}
                       3: {bytes: {size: {fixed: 3}}}
                       4: {unit: inner}
-                    default: {bytes: {size: {remaining: true}}}
+                    # `fill`, not `remaining`: `after` is decoded after the
+                    # switch, and a `remaining` arm would starve it — which
+                    # `check` refuses at the field, since 0.3.0.
+                    default: {bytes: {size: {fill: true}}}
               - {name: after, type: {int: {bits: 8}}}
           inner:
             fields:

@@ -60,6 +60,27 @@ minor bump here too.
   `"adjacency":"units"` on those participant lines. The `Seam` after a hole
   is still written under `units`. `pressure_test.py` gains Q6 for it.
 
+### Fixed
+
+- `check` refuses a `remaining` or `fill` that anything is decoded after,
+  measured against the *message*: a `remaining` not last among the fields
+  that read input in its unit, a switch with such an arm in that position,
+  and — the case a per-unit check cannot see — a unit containing either, at
+  any depth, referenced from anywhere but the last position of its parent,
+  transitively (#31, #39). Such a spec passed `check` and decoded no input
+  correctly: the field took the bytes the later one needed and cited them as
+  its own, and the later one reported `truncated` — a hole-class verdict
+  about the data — for a message that was complete. The error is at the
+  reference site and names the chain: *`'body' is unit 'inner', which reads
+  to the end of the message through 'data', but 'trailer' is decoded after it
+  and would have no bytes left`*. A `remaining` under a `repeat` is refused
+  outright, as a repeating `fill` already was. A `computed`, `select` or
+  `pointer` after one is allowed, since it reads nothing where it stands, and
+  a `remaining` inside a `pointer` target starves nothing. The same rule
+  packeteer states since its 0.13.0. `kober.check.terminal_units()` is the
+  new public helper. What the decoder reports for such a spec run with
+  `check=False` is unchanged.
+
 ## [0.2.0] - 2026-09-10
 
 **The dialect release.** Nothing here changes what kober decodes: every change
