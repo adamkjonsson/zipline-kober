@@ -333,15 +333,49 @@ consumer a field it never reads.
 `const` was packeteer's key too, and is [kober's now](types.md#const) — which
 is why it is not in the table above.
 
-### What still does not transfer
+### What does not transfer, and what transfers differently
 
-**The switch dispatch key.** kober renamed `on` to `dispatch` at 0.1.0 and
-deleted the boolean repair, because YAML 1.1 reads an unquoted `on:` as `true`;
-packeteer still requires `on`. That is one construct with two spellings rather
-than a key one side lacks, so no amount of recognising keys helps, and it is
-packeteer's to move.
+Since packeteer 0.13.0 the two dialects share one spelling: it renamed its
+switch key to `dispatch` and took kober's shorthands, so a spec from either
+repository loads in the other. What does *not* cross is now the mirror image
+of the table above — constructs of kober's that packeteer reads and declines by
+name, since it builds messages as well as reads them and several of these have
+no encoding — and two places where the same key is accepted differently.
+Checked against packeteer 0.16.0; `tests/test_packeteer.py` covers the other
+direction.
 
-**kober's shorthands, going the other way.** `bits:`, the lifted kind keys and
-the bare scalars are not implemented there, so a spec from this repository
-fails on the first field. That is the other project's side of the same
-transfer.
+**Declined by packeteer, each reported as *not supported yet* at its line:**
+`pointer`, `select`, `computed`, delimiter framing in either spelling
+(`{terminated: …}` and `{string: {delimiter: …}}`), the `until` and `to_end`
+repeats, unit `params` and `args`, unit `confirm` and `reject`, `emit` at every
+level, and a recursive unit. On `examples/dns.yaml` that is four named errors;
+on `examples/http.yaml` it is every one of the fourteen fields, plus type
+errors where a condition reads a `select` result, since a construct it does
+not model has no type there.
+
+**`input: stream` is refused unless the entry unit has exactly one field
+deriving `size_of`** — packeteer decodes one packet at a time and needs the
+spec to say where a message ends. No kober spec carries `derive`, so in
+practice a stream spec from here is refused there, and `either` is the shape
+to write when one spec is meant to serve both.
+
+**Accepted differently:**
+
+- **Sub-byte runs.** packeteer's reference requires consecutive sub-byte fields
+  to add up to whole bytes; its `check` does not enforce it, and its generated
+  decoder reads across the boundary exactly as kober does — `{bits: 3}` then
+  `{bits: 8}` over `a0 42` is `a=5, b=2` in both. The difference is that kober
+  *defines* it, and cites the containing byte for each field
+  (`plans/PACKETEER-ALIGNMENT.md` §4 — the permissiveness is load-bearing for
+  the coverage model), while there it is undefined by the reference and works
+  by accident of the implementation.
+- **`fill` before a `switch`.** kober's `check` accepts a trailing `switch`
+  when every case and a present `default` agree on a width
+  ([types.md](types.md#fill)); packeteer refuses any `switch` after a `fill`.
+  A kober spec using this loads here and is refused there.
+- **`input` omitted.** The default is `datagram` there and `either` here, so a
+  spec that says nothing means different things in the two tools. Say it.
+
+`remaining` and `fill` are [measured against the message](types.md#remaining-and-fill-are-measured-against-the-message)
+in both, with the same refusal at the reference site — packeteer's rule since
+its 0.13.0, kober's since 0.3.0.

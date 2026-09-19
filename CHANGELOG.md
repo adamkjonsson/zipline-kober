@@ -81,6 +81,22 @@ minor bump here too.
   new public helper. What the decoder reports for such a spec run with
   `check=False` is unchanged.
 
+### Documentation
+
+- The reference's section on packeteer's dialect no longer warns readers off
+  a transfer that works. Its two claims — that packeteer still required the
+  `on` switch key, and that kober's shorthands failed there on the first
+  field — stopped being true at packeteer 0.13.0 (2026-09-10, the day of
+  kober 0.2.0). The section now records what actually does not cross,
+  checked against packeteer 0.16.0: the kober constructs it declines by name
+  (`pointer`, `select`, `computed`, delimiter framing, `until` and `to_end`,
+  unit `params`/`args` and `confirm`/`reject`, `emit`, recursive units), when
+  `input: stream` is refused, and the three places the same key is accepted
+  differently (sub-byte runs, `fill` before a `switch`, and the `input`
+  default). The vendored copies under `tests/packeteer/` and the test over
+  them now track packeteer 0.16.0; the test that asserted `rpc.yaml` was
+  refused is replaced by one that decodes it.
+
 ## [0.2.0] - 2026-09-10
 
 **The dialect release.** Nothing here changes what kober decodes: every change
