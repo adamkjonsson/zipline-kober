@@ -1,9 +1,10 @@
 # The upstream-alignment phase — `0.3.0`
 
 **State: done.** All eight issues landed on `plan_0_3_0` and shipped in
-`v0.3.0` (2026-09-19), in the order §2 argues for. A final section recording
-what the plan got right and wrong is owed, as the `0.2.0` plan's §9 was; the
-rest is left as written on 2026-09-19.
+[`v0.3.0`](https://github.com/adamkjonsson/zipline-kober/releases/tag/v0.3.0)
+(2026-09-19), in the order §2 argues for. What the plan got right and wrong is
+recorded in §8, which is the only section written after the fact — the rest is
+left as it was on 2026-09-19.
 
 > **Written 2026-09-19** against `0.2.0` and the seven issues on
 > the [`0.3.0` milestone](https://github.com/adamkjonsson/zipline-kober/milestone/2),
@@ -438,3 +439,93 @@ note that the vendored copies and the test now track packeteer 0.16.0.
   children. #35 notes kober does not produce it (`_walk` never emits a
   container) and that the case for `units` does not depend on it. Nothing
   here asks for it.
+
+---
+
+## 8. What this plan got right and wrong
+
+Written after the release. The rest of this document is left as it was on
+2026-09-19, because the point of keeping a plan is to know what was believed
+at the time.
+
+### 8.1 §3.1's "the root is decisive" was right about the emitter's branch and wrong about its walk
+
+The section argued, from `emit.plan()`, that whether a file can hold a field
+record is decided once at the root — and it is. `root_emit()` was written on
+that argument and the adjacency it derives is correct for every file the
+release writes. But writing it meant reading how each backend resolves the
+entry, and they do not agree with each other, nor the interpreter with itself.
+`plan()` resolves the root with `resolve_emit` — which reads the entry unit's
+own `emit` — and branches on that, then hands the *decoder's* default into
+`_walk`, where every nested container hands its own resolved value down. The
+compiler's `_granularities` seeds the entry with `--emit` and reads a unit's
+own `emit` only for referenced units. So a spec with `emit: field` on its
+entry unit gets field records from the interpreter and a message record from
+the compiler at `--emit message`, and nothing from either at `--emit none`.
+
+The plan did not see it because nothing in the suite puts `emit` on an entry
+unit; every fixture with a per-unit `emit` puts it on a nested one. It is
+[#40](https://github.com/adamkjonsson/zipline-kober/issues/40), left out of
+the release on purpose, and §3.1's rule stands: once both backends resolve the
+entry the same way, the derivation needs no change.
+
+### 8.2 §4's "the differential is `tests/test_compiled.py::blocks()`" was the plan's most useful correction
+
+#35 and #36 both said `tests/fuzzing.py` should compare the two participants'
+adjacency. That file is the mutation library; the comparison that drives both
+backends through a real stage is `blocks()` in `test_compiled.py`, and it
+collected records and regions only. One edit made the participant line part of
+every existing file-level differential, and the revert-and-watch for #36
+showed that edit — not the new tests — was what caught `run_compiled` ignoring
+`EMIT`. Had the issues' wording been followed, the adjacency check would have
+landed somewhere that runs no stage.
+
+### 8.3 §3.4 was right to pull #31 in, and the rule refused a fixture the plan had not looked at
+
+The one shipped spec the terminal-unit check rejected was in the awkward
+corpus of `test_compiled.py`: a `switch` whose `default` arm was `remaining`,
+followed by a field that reads. That is the exact fault #31 describes — every
+input taking the default starves the field after it — sitting in the corpus
+that fuzzes the compiler, passing every test because no fuzzed input was ever
+checked for *which bytes* `after` cited. §5's "run `check` over every spec in
+`examples/` and `tests/packeteer/`" was the right instinct aimed at the wrong
+directories; the awkward corpus is a third place shipped specs live, and the
+plan did not list it. The arm is `fill` now, which is what the author meant.
+
+### 8.4 §4's instruction to verify #38's claims before writing them paid twice
+
+Both of the issue's factual claims about packeteer failed the probes. `http.yaml`
+is not "refused outright"; it is reported on every one of its fourteen fields,
+plus type errors where a condition reads a `select` result. And packeteer's
+checker does not enforce its reference's rule that sub-byte fields add up to
+whole bytes — its generated decoder reads `{bits: 3}` then `{bits: 8}` across
+the boundary exactly as kober does, `a=5, b=2` over `a0 42`. The section that
+was being replaced had also been true when written; the reference now says
+what was observed, with the probe inputs, rather than a paraphrase of an
+issue that was itself a paraphrase of another project's reference.
+
+### 8.5 What the plan did not anticipate at all
+
+**The sweep found more staleness outside the milestone than in it.** §6 said
+to run the pipeline and release; the sweep was added at the user's request.
+It found that the README and the docs landing page said "not released" two
+tags after `v0.1.0`, that `DESIGN.md` led with "Revision 8" above a
+Revision 9 paragraph and called two upstream bugs open that `zpf` 0.3.0 had
+fixed, and that the decisions index listed as open a question §11 had struck
+through before 0.1.0. None of that was touched by any issue on the milestone.
+The release checklist in `docs/dev/contributing.md` now names the sweep, which
+is the only fix that outlasts one release.
+
+**The pipeline needed both drivers, and the checklist did not say so.** The
+README's pipeline runs the interpreter; `docs/dev/testing.md` mentions the
+compiled path as "worth running". For a release whose two substantive changes
+were one derivation used by two drivers, the interpreter-only pipeline would
+have tested half of it. The checklist now says both, compared block for block.
+
+### 8.6 The ordering held, and step 0 earned its paragraph
+
+`pip install -e .` failed on the stale pin exactly as §2 predicted, and the
+`--no-deps` reinstall carried step 0 until #34 moved the pin. Nothing was
+reordered. #39 was done after the `zpf` strand as scheduled and touched
+nothing that strand touched; #37 before #38 meant the reference's claims about
+the other direction had a passing test behind them before they were written.
