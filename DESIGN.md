@@ -964,9 +964,10 @@ work, and every `zpf` minor is a break.
 became `role` (`0x0092`), a per-record label read in the namespace of the
 decoder that wrote it — independent of `content_type`, so a field record carries
 `prim:u32` *and* `dns.header.id` at once rather than choosing. #59 reshaped
-`SessionWriter.record()`, which this project does not call. The pin is
-`zpf>=0.3.0,<0.4`, and §4.1's single emit site made the switch the one-line
-change it was kept that way to be.
+`SessionWriter.record()`, which this project does not call. The pin became
+`zpf>=0.3.0,<0.4` — it is `>=0.5.0,<0.6` since kober 0.3.0, two minors that
+changed nothing this tree calls except to add `adjacency=` — and §4.1's single
+emit site made the switch the one-line change it was kept that way to be.
 
 ### 9.2 Smaller findings
 

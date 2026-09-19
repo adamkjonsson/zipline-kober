@@ -12,10 +12,10 @@ python3 -m venv .venv
 .venv/bin/pip install -e . -r requirements.txt
 ```
 
-**Why `zpf` comes from a checkout.** This project requires `zpf>=0.3.0,<0.4` —
-it is built on `zpf.decode_stage`, on the per-record `role=` label, and on a
-record timestamp derived from `cites`, all `0.3.0` work — and at the time of
-writing PyPI does not publish it. Once it lands there the checkout becomes a
+**Why `zpf` comes from a checkout.** This project requires `zpf>=0.5.0,<0.6` —
+it is built on `zpf.decode_stage` and its `adjacency=` keyword, which is
+`0.5.0` work, on the per-record `role=` label, and on a record timestamp
+derived from `cites` — and at the time of writing PyPI publishes only `0.1.0`. Once it lands there the checkout becomes a
 convenience rather than a requirement.
 
 The pin covers a single `zpf` minor deliberately: that library is in `0.x`,

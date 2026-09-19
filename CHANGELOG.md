@@ -22,6 +22,16 @@ minor bump here too.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** the required `zpf` is now `>=0.5.0,<0.6` (Zipline Payload
+  Format 0.21), up from `>=0.3.0,<0.4` (0.19). A caller on `zpf 0.3` must
+  upgrade. Under `zpf`'s `0.x` rule every minor is a version gate, so a `.zpf`
+  kept from an earlier kober should be regenerated, not transcoded — `0.5.0`
+  refuses `0.3.0`'s files at the gate, and the reverse. Nothing kober calls
+  changed across the two minors; `0.5.0` adds the `adjacency=` keyword on
+  `decode_stage`, which is what the floor is for.
+
 ## [0.2.0] - 2026-09-10
 
 **The dialect release.** Nothing here changes what kober decodes: every change

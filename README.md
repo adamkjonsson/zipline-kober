@@ -205,11 +205,11 @@ python3 -m venv .venv
 ```
 
 **Why `zpf` is installed from a checkout.** This project depends on
-`zpf>=0.3.0,<0.4` — it is built on `zpf.decode_stage`, on the per-record
-`role=` label, and on a record timestamp derived from `cites`, which are
-`0.3.0` work. `zpf` `0.3.0` is released and tagged, but at the time of writing
-PyPI does not yet publish it, so the dependency has to come from a local (or
-git) install. Once it reaches PyPI the checkout becomes a convenience rather
+`zpf>=0.5.0,<0.6` — it is built on `zpf.decode_stage` and its `adjacency=`
+keyword, which is `0.5.0` work, on the per-record `role=` label, and on a
+record timestamp derived from `cites`. `zpf` `0.5.0` is released and tagged,
+but at the time of writing PyPI publishes only `0.1.0`, so the dependency has
+to come from a local (or git) install. Once it reaches PyPI the checkout becomes a convenience rather
 than a requirement, and the first line above can be dropped.
 
 The pin covers a single `zpf` minor deliberately: that library is in `0.x`,
