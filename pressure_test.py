@@ -14,7 +14,21 @@ Q2   Are overlapping spans accepted (bitfields sharing bytes)?   yes
 Q3   May a created payload differ from its cited bytes?          yes
 Q4   Does a message spanning segments get the last segment's ts? yes
 Q5   Can a per-field record say which field it is?               yes
+Q6   Can a per-field file say its records do not join, and does  yes
+     a stage chained over it keep saying so?
 ===  ==========================================================  ======
+
+Q6 was asked of ``zpf`` 0.5.0 (spec 0.21), the others of 0.16. It is the
+question kober's own files raised upstream as `zipline#106
+<https://github.com/adamkjonsson/zipline/issues/106>`_: whether a record naming
+bytes an earlier record already cited is a well-formed decoded stream. Under
+``contiguous`` such a file was untested rather than conformant — the seam
+predicate declines a pair whose citations overlap — and 0.21 answered with a
+Participant Descriptor field, ``adjacency``, whose ``units`` value declares
+what field granularity is: every record citable, no two assumed to join, no
+seam owed anywhere. ``decode_stage(adjacency=UNITS)`` writes it, and a stage
+chained over such a file with the keyword left ``None`` carries it forward
+rather than claiming its output joins. See ``DESIGN.md`` §5.
 
 Q5 was the finding that blocked field granularity: the records below carried
 correct values and correct spans with no way to tell one from another. It was
@@ -142,13 +156,16 @@ def stage_chained(source: Path, sink: Path) -> None:
 
 
 def stage_fields(source: Path, sink: Path) -> None:
-    """Q2/Q3/Q5: one record per field, overlapping spans, normalized payloads, names."""
+    """Q2/Q3/Q5/Q6: one record per field, overlapping spans, payloads, names, units."""
     with zpf.decode_stage(
         source,
         sink,
         decoder=("dns", "1.0"),
         produced_by="kober 0.1",
         produced_at=1_700_000_000,
+        # Q6: the records below do not join -- two of them are *inside* a
+        # third -- and since 0.21 the file can say so.
+        adjacency=zpf.Adjacency.UNITS,
     ) as stage:
         for stream in stage.streams():
             data = stream.reassembled()
@@ -180,6 +197,41 @@ def stage_fields(source: Path, sink: Path) -> None:
             stage.undecoded(stream, 6, len(data), reason="undecodable")
 
 
+def adjacency_of(path: Path) -> list[zpf.Adjacency]:
+    """Return what each participant declares about its stored neighbours."""
+    with zpf.open(path) as handle:
+        return [
+            zpf.Adjacency(p.adjacency)
+            for session in handle.sessions()
+            for p in session.participants
+        ]
+
+
+def stage_over_units(source: Path, sink: Path) -> None:
+    """Q6: a stage over a unit sequence, with ``adjacency`` left unsaid.
+
+    Each input unit is copied through whole. What matters is the participant
+    line of the output: ``None`` must carry the input's ``units`` forward, since
+    a stage reading a unit sequence may not claim its output joins.
+    """
+    with zpf.decode_stage(
+        source,
+        sink,
+        decoder=("dns-copy", "1.0"),
+        produced_by="kober 0.1",
+        produced_at=1_700_000_000,
+    ) as stage:
+        for stream in stage.streams():
+            for dgram in stream.datagrams():
+                stage.record(
+                    stream,
+                    dgram.data,
+                    content_type=dgram.record.content_type,
+                    role=dgram.record.role,
+                    cites=(dgram.off_start, dgram.off_end),
+                )
+
+
 def read_back(path: Path) -> list[str | None]:
     """Show what a consumer sees, and return each record's name for Q5."""
     names: list[str | None] = []
@@ -202,6 +254,7 @@ def main() -> None:
     OUT.mkdir(exist_ok=True)
     transport, stage1 = OUT / "transport.zpf", OUT / "stage1.zpf"
     stage2, fields = OUT / "stage2.zpf", OUT / "fields.zpf"
+    over_units = OUT / "over-units.zpf"
 
     banner("build the transport input")
     build_transport(transport)
@@ -237,6 +290,23 @@ def main() -> None:
             print(f"  Q5: YES -- {len(names)} records, each named and distinct")
         else:
             print(f"  Q5: NO -- names={names}")
+
+    banner("Q6: a unit sequence, and a stage chained over it")
+    try:
+        declared = adjacency_of(fields)
+        print(f"  fields.zpf declares: {[a.name for a in declared]}")
+        stage_over_units(fields, over_units)
+        carried = adjacency_of(over_units)
+        print(f"  over-units.zpf declares: {[a.name for a in carried]}")
+    except PROBE_ERRORS:
+        print("  Q6: FAILED")
+        traceback.print_exc()
+    else:
+        report(over_units, source=fields)
+        if declared == [zpf.Adjacency.UNITS] and carried == [zpf.Adjacency.UNITS]:
+            print("  Q6: YES -- the file says units, and a stage over it keeps saying so")
+        else:
+            print("  Q6: NO")
 
 
 if __name__ == "__main__":

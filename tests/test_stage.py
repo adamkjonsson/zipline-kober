@@ -432,3 +432,116 @@ def test_a_record_citing_no_bytes_still_gets_a_timestamp(tmp_path: Path):
         "a record citing nothing takes the run's completion time, there being "
         "nothing to derive one from"
     )
+
+
+# --- adjacency: what the file says its records assert -----------------------
+
+
+def adjacencies(path: Path) -> list[zpf.Adjacency]:
+    """Return every participant's declared adjacency, in declaration order."""
+    with zpf.open(path) as handle:
+        return [
+            zpf.Adjacency(p.adjacency)
+            for session in handle.sessions()
+            for p in session.participants
+        ]
+
+
+def units_seen(path: Path) -> list[object]:
+    """Return what a 0.5.0 consumer sees: records and breaks, in order."""
+    with zpf.open(path) as handle:
+        return [
+            unit
+            for session in handle.sessions()
+            for view in session.reassemble()
+            for unit in view.units()
+        ]
+
+
+def test_field_granularity_declares_a_unit_sequence(tmp_path: Path):
+    """Consecutive leaves of a tree walk do not join, and the file says so."""
+    source, sink = tmp_path / "in.zpf", tmp_path / "out.zpf"
+    write_transport(source, [(1000, MESSAGE, 1001)])
+    Decoder(SPEC, emit=Emit.FIELD).run(source, sink, produced_by="t", produced_at=1)
+    assert_conformant(sink, source)
+    assert adjacencies(sink) == [zpf.Adjacency.UNITS]
+
+
+def test_message_granularity_declares_nothing_over_a_transport_input(tmp_path: Path):
+    """Messages do join; a transport input is contiguous, and that carries."""
+    source, sink = tmp_path / "in.zpf", tmp_path / "out.zpf"
+    write_transport(source, [(1000, MESSAGE, 1001)])
+    Decoder(SPEC).run(source, sink, produced_by="t", produced_at=1)
+    assert adjacencies(sink) == [zpf.Adjacency.CONTIGUOUS]
+
+
+def test_a_message_stage_over_a_unit_sequence_keeps_saying_so(tmp_path: Path):
+    """`None`, not `CONTIGUOUS`: the input's adjacency is carried forward.
+
+    A stage reading a unit sequence must not claim its output joins, and a
+    message-granularity kober stage never crosses two input units anyway. An
+    explicit `CONTIGUOUS` would override the input and contradict it — this is
+    the test that fails if `None` is ever "simplified" to that.
+    """
+    source = tmp_path / "in.zpf"
+    fields, messages = tmp_path / "fields.zpf", tmp_path / "messages.zpf"
+    write_transport(source, [(1000, MESSAGE, 1001)])
+    Decoder(SPEC, emit=Emit.FIELD).run(source, fields, produced_by="t", produced_at=1)
+    Decoder(SPEC).run(fields, messages, produced_by="t", produced_at=1)
+    assert_conformant(messages, fields)
+    assert adjacencies(messages) == [zpf.Adjacency.UNITS]
+
+
+def test_the_entry_units_own_emit_decides_the_adjacency(tmp_path: Path):
+    """The root granularity is the entry unit's `emit` if set, else the decoder's.
+
+    That is what `plan()` resolves at the root, and it is what decides whether
+    the file can hold a field record at all.
+    """
+    spec = Spec.from_yaml("""
+name: t
+version: "1.0"
+entry: message
+units:
+  message:
+    emit: field
+    fields:
+      - {name: tag, type: {int: {bits: 16}}}
+      - {name: body, type: {int: {bits: 16}}}
+""")
+    source, sink = tmp_path / "in.zpf", tmp_path / "out.zpf"
+    write_transport(source, [(1000, MESSAGE, 1001)])
+    Decoder(spec).run(source, sink, produced_by="t", produced_at=1)
+    assert {r.role for r in read_records(sink)} == {"t.tag", "t.body"}
+    assert adjacencies(sink) == [zpf.Adjacency.UNITS]
+
+
+def test_a_consumer_sees_a_break_between_every_field(tmp_path: Path):
+    """The 0.5.0 idiom — flush on every `Break` — honours a kober file unchanged.
+
+    A unit sequence is surfaced as a `declared=False` break before every record
+    after the first; the seam after a hole is a `declared=True` one *alongside*
+    the synthetic break at the same offset, not instead of it.
+    """
+    source, sink = gapped(tmp_path)
+    Decoder(SPEC, emit=Emit.FIELD).run(source, sink, produced_by="t", produced_at=1)
+    assert_conformant(sink, source)
+    seen = units_seen(sink)
+    breaks = [u for u in seen if isinstance(u, zpf.Break)]
+    records = [u for u in seen if not isinstance(u, zpf.Break)]
+    assert len(records) == 4  # two messages of two fields, either side of the hole
+    assert [(b.off_start, b.declared, b.reason) for b in breaks] == [
+        (2, False, None),
+        (4, True, "stream-gap"),
+        (4, False, None),
+        (6, False, None),
+    ]
+
+
+def test_a_seam_is_still_written_under_a_unit_sequence(tmp_path: Path):
+    """Redundant there, but permitted, and one writer serves both granularities."""
+    source, sink = gapped(tmp_path)
+    Decoder(SPEC, emit=Emit.FIELD).run(source, sink, produced_by="t", produced_at=1)
+    assert_conformant(sink, source)
+    seams = [b for b in read_blocks(sink) if isinstance(b, zpf.Discontinuity)]
+    assert [s.reason for s in seams] == ["stream-gap"]

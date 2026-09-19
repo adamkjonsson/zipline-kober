@@ -75,7 +75,8 @@ is the part that would otherwise vanish. Two examples:
 ## Upstream issues — what is blocked on the format
 
 `kober` is a load test of `zpf`, and a gap upstream is treated as a finding
-rather than something to route around. Six have been filed against the format:
+rather than something to route around. Six have been filed against the
+library, and one against the format itself:
 
 | Issue | What | State |
 | --- | --- | --- |
@@ -85,6 +86,13 @@ rather than something to route around. Six have been filed against the format:
 | [#58](https://github.com/adamkjonsson/python-zipline/issues/58) | Whether the format wants per-field records at all, and how to name them | Fixed in 0.3.0 — `role` |
 | [#62](https://github.com/adamkjonsson/python-zipline/issues/62) | Which timestamp a message inside a multi-message run carries | Fixed in 0.3.0 |
 | [#63](https://github.com/adamkjonsson/python-zipline/issues/63) | `check_coverage` measures a real TCP stream as 2³²−1 bytes | Fixed in 0.3.0 |
+| [zipline#106](https://github.com/adamkjonsson/zipline/issues/106) | Whether a field-granular decoded stream is still a stream: records that cite bytes an earlier record already cited, and what seam is owed between them | Answered in spec 0.21 (`zpf` 0.5.0) — `adjacency=units` |
+
+zipline#106 is the format-level question the five above led to. The answer is
+a Participant Descriptor field rather than a rule about seams: a producer
+declares its records a **unit sequence**, and the question of whether
+`dns.flags.qr` joins `dns.flags` never arises, because nothing is assumed to
+join. Field-granularity output declares it since kober 0.3.0 (`DESIGN.md` §5).
 
 #58 is the one that shaped this codebase, and it landed in 0.3.0 as `role`:
 what a record **is**, beside rather than instead of the `content_type` saying

@@ -31,6 +31,20 @@ minor bump here too.
   refuses `0.3.0`'s files at the gate, and the reverse. Nothing kober calls
   changed across the two minors; `0.5.0` adds the `adjacency=` keyword on
   `decode_stage`, which is what the floor is for.
+- Field-granularity output now declares itself a **unit sequence**
+  (`adjacency=units` on every participant), the Participant Descriptor field
+  spec 0.21 added in answer to zipline#106 — the question kober's own files
+  raised. Its records are adjacent because they are consecutive leaves of a
+  tree walk, not because content runs from one into the next: sub-byte fields
+  cite the byte that holds them, a `computed` cites what it read, a `pointer`
+  target cites bytes behind the cursor. Message granularity declares nothing,
+  so a stage chained over a unit sequence carries `units` forward rather than
+  contradicting its input. The value is derived from the root granularity and
+  cannot be supplied. Not breaking for a reader — the format defines the bit,
+  and a `zpf` 0.5.0 consumer that flushes on every `Break` already handles it
+  — but a test elsewhere comparing projected JSONL will see
+  `"adjacency":"units"` on those participant lines. The `Seam` after a hole
+  is still written under `units`. `pressure_test.py` gains Q6 for it.
 
 ## [0.2.0] - 2026-09-10
 

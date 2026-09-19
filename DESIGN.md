@@ -770,6 +770,42 @@ know how many decoded units they would have become. Reporting the input count
 in a field defined as an output measurement would be misleading rather than
 merely imprecise, so it is omitted, which still says the two do not join.
 
+**The rule above is the message-granularity rule. Field granularity takes the
+wholesale form instead: the participant is declared a unit sequence.** Spec
+0.21 added `adjacency` to the Participant Descriptor, answering the question
+kober's own files raised as [zipline#106](https://github.com/adamkjonsson/zipline/issues/106):
+`contiguous` (what every file ever written held in that byte) means stored
+neighbours join unless a Seam says otherwise; `units` means *no two adjacent
+records may be assumed to join*, every record is still citable, and no Seam
+is owed at any seam. At field granularity kober's records are adjacent because
+they are consecutive leaves of a tree walk, not because content ran from one
+into the next — three shapes in `emit.py` say so outright:
+
+- **Sub-byte fields** cite the byte that holds them: `dns.flags.qr`,
+  `dns.flags.opcode` and `dns.flags.aa` all cite `[2, 3)` of a message, since
+  the cursor rounds a bit range out to its byte and `prim_token` widens the
+  value to `u8`. `flags.qr` is not continuous with `flags`; it is *inside* it.
+- **Computed fields** cite the fields their expression read (§3.2) — bytes
+  already cited, possibly much earlier in the stream.
+- **Pointer targets** cite bytes behind the cursor (§11), and a pointer owes
+  no seam — but the neighbours do not join either.
+
+Every payload is also *created*, not copied, so the output's own offset space
+is not a splice of anything. Under `contiguous` none of this was a conformance
+failure, because the seam predicate declines to test a pair whose citations
+overlap or run backwards; but "untested" is not "stated". So field granularity
+passes `adjacency=UNITS` and message granularity passes **nothing** — `None`,
+which is not `CONTIGUOUS`: `None` carries the input's effective adjacency
+forward, an explicit `CONTIGUOUS` overrides it, and a stage reading a unit
+sequence is required to keep saying so. The value is derived from the root
+granularity (`emit.root_emit`), which is what decides whether the file can
+hold a field record at all, and a caller cannot supply one — that would be a
+way to state something false about the file. `UNITS` asserts less and is never
+wrong, even for a flat spec whose leaves happen to abut, so no per-spec
+"containment" predicate is attempted. The Seam after a hole is still written
+under `units`: redundant, but permitted by the format, and both drivers share
+the one writer. Q6 of `pressure_test.py` is the **[verified]** claim.
+
 ## 6. Public API
 
 ```python
