@@ -8,13 +8,16 @@ into a [Zipline](https://github.com/adamkjonsson/zipline) decode stage — a
 input bytes it came from. It is a CLI backed by a Python API, and everything
 the CLI does is reachable from the API.
 
-> ⚠️ **Early, and not released.** All five CLI verbs work: a spec decodes real
-> `.zpf` files at message or field granularity, checked against `zpf`'s own
-> conformance and coverage checkers, and `compile` turns one into a Python
-> module that does the same about twenty times faster. It has been exercised on
-> small hand-built captures and adversarial input rather than in anger. See
-> [DESIGN.md](DESIGN.md) for the reasoning, and for which claims were verified
-> against `zpf` rather than merely reasoned about.
+> ⚠️ **Early: `0.x`, tagged but not on PyPI.** All five CLI verbs work: a spec
+> decodes real `.zpf` files at message or field granularity, checked against
+> `zpf`'s own conformance and coverage checkers, and `compile` turns one into a
+> Python module that does the same about twenty times faster. It has been
+> exercised on real captures, generated impaired traffic and adversarial input
+> rather than in anger, and `zpf` itself is `0.x`, where every minor is a
+> break — each kober minor pins one. See [DESIGN.md](DESIGN.md) for the
+> reasoning, and for which claims were verified against `zpf` rather than
+> merely reasoned about; [CHANGELOG.md](CHANGELOG.md) for what each release
+> changed.
 
 ## Writing and checking a spec
 
@@ -113,6 +116,13 @@ or named as `undecodable`, `truncated`, `gap`, or `skipped` — never both, and
 never silently. An undecodable region is a conformant result rather than a
 failure, so `run` reports it and still succeeds.
 
+A field-granularity file also says what its records are: a **unit sequence**
+(`adjacency=units`, spec 0.21), meaning no two adjacent records may be assumed
+to join — `flags.qr` is *inside* `flags`, not after it. A message-granularity
+file declares nothing and carries its input's adjacency forward, so a stage
+chained over a unit sequence keeps saying so. The value is derived from the
+granularity, never passed.
+
 `try` decodes one buffer with no file at all, which is the fastest way to see
 what a spec does to some bytes:
 
@@ -157,7 +167,10 @@ Fields are `int` and `str` rather than a generic tree, so an editor can complete
 them and a typo is an error at import time instead of `None` at runtime. Byte
 ranges live beside the values rather than wrapping them, which is what keeps a
 decode cheap. `kober.stage.run_compiled` drives such a module over a `.zpf`
-file exactly as `run` drives the interpreter.
+file exactly as `run` drives the interpreter: the module records the
+granularity it was built at in `EMIT`, beside `NAME` and `VERSION`, and the
+driver reads it to declare the output's adjacency the same way. A module
+compiled by a kober before 0.3.0 has no `EMIT` and is refused — recompile it.
 
 The interpreter is not going anywhere: it is what `try` should always use, and
 it is the reference implementation the generated code is tested against — the

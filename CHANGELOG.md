@@ -96,6 +96,16 @@ minor bump here too.
   default). The vendored copies under `tests/packeteer/` and the test over
   them now track packeteer 0.16.0; the test that asserted `rpc.yaml` was
   refused is replaced by one that decodes it.
+- A sweep for what the project's own development had made untrue. The README
+  and the docs landing page said "not released" two tags after `v0.1.0`;
+  `DESIGN.md` §9 called two upstream bugs open that `zpf` 0.3.0 fixed, its
+  status line and revision header were two revisions behind, and the decisions
+  index listed "when to follow `zpf` 0.3" as an open question that §11 had
+  struck through. The README, the reference's *Emission granularity* section,
+  the architecture and compiler guides and the test map now describe what a
+  file declares and what a generated module exports; the testing guide records
+  the 0.3.0 run of the deeper pipeline; the release checklist says to do this
+  sweep.
 
 ## [0.2.0] - 2026-09-10
 

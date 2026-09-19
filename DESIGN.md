@@ -1,6 +1,7 @@
 # kober — design
 
-**Status:** implemented and exercised against real captures, not released.
+**Status:** implemented, exercised against real captures, and released as
+`0.x` — `v0.1.0`, `v0.2.0`, and now `0.3.0`, each pinning one `zpf` minor.
 The spec model, expression language, checker, decode engine, emitter, stage
 driver, all five CLI verbs, the **compiler** (§14), and the `Pointer` construct
 (§3.2) exist, in both implementations. What is *not* built is marked as such:
@@ -10,7 +11,7 @@ everything in §11 that is still a question.
 `zpf` by [`pressure_test.py`](pressure_test.py), and since revision 6 against
 real captures too.
 
-Revision 8. Revision 1 was written blind and got the layer wrong — it invented
+Revision 10. Revision 1 was written blind and got the layer wrong — it invented
 reassembly, gaps, and provenance that `zpf` already provides. Revision 2 fixed
 that against the source. Revision 3 added the results of an executable pressure
 test (§10) and treated this project as what it is: **a load test of `zpf`, where
@@ -73,6 +74,19 @@ delimited read stop at one boundary without running past another — between the
 `examples/http.yaml` chooses its framing instead of assuming it, and the
 capture that had never been run decodes 2000 messages with no undecoded region
 where it used to leave 405 421 of its 414 460 bytes `undecodable`.
+
+Revision 10 follows the upstream projects, for `0.3.0`. Spec 0.21 answered the
+format-level question this project's own files raised — whether a stream of
+records that cite one another's bytes is a stream at all — with `adjacency`
+on the Participant Descriptor, and §5 gains its **wholesale form**: field
+granularity declares a unit sequence and message granularity declares nothing,
+which is not the same as `contiguous`. §14.3 lets a generated module say which
+granularity it was built at, since the driver now needs to know. §9 and §13.4
+stop calling fixed things open. And the checker gained the rule packeteer
+states for its dialect, that `remaining` and `fill` are measured against the
+message — a fault that passed `check`, cited the wrong bytes, and reported a
+hole the stream never had, invisible to every fixture because every fixture
+put the field last.
 
 The revision's real content is the same shape as revision 8's, one level in.
 Aggregation went into the **model** rather than into the expression language,
@@ -966,8 +980,10 @@ The pressure test produced three findings, all filed against `python-zipline`,
 all fixed, and all released in `zpf` 0.2.0. Kept here because the reasoning
 still constrains our design, not as an open list.
 
-Real captures later produced two more, both **open**, in §13.4 — this section
-is the pressure test's three, not the project's total.
+Real captures later produced two more, in §13.4, both fixed in `zpf` 0.3.0 —
+this section is the pressure test's three, not the project's total. The one
+question kober's files raised against the *format* rather than the library,
+zipline#106, is §5's: answered in spec 0.21 with `adjacency`.
 
 ### 9.1 A per-record name for decoded fields — fixed, and still argued
 
@@ -1318,7 +1334,7 @@ absent, seven `truncated` regions where a hole cut a line in half, no message
 spanning a hole, conformance clean. §5's rule and §2's vocabulary both work at
 a scale no fixture reached. **[verified]**
 
-### 13.4 Two upstream bugs
+### 13.4 Two upstream bugs — both fixed
 
 - **[#62](https://github.com/adamkjonsson/python-zipline/issues/62)** — which
   timestamp a message inside a multi-message run should carry. `zpf`'s own
@@ -1334,7 +1350,9 @@ a scale no fixture reached. **[verified]**
   `stream_extent` takes the maximum. `chunks()` skips empty records and
   `record_ranges` does not. It makes `check_coverage` report false violations
   on any capture including its handshake — the tool a decode stage proves
-  itself with.
+  itself with. **Fixed in `zpf` 0.3.0**; `0.5.0` then reworked placement
+  altogether (offsets unwrap along stored order, so a stream past 2 GiB
+  places), which only widens what kober can read.
 
 ### 13.5 Two of our own, and why no test could have caught them
 

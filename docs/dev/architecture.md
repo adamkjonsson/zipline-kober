@@ -88,6 +88,12 @@ It does no I/O.
 
 **Write.** The driver writes them, attaching a seam where a hole-class region
 lies between two records, and accounts for whatever the tree did not reach.
+Before any of that it has told `zpf.decode_stage` what the output's records
+assert about one another: a unit sequence (`adjacency=units`) at field
+granularity, nothing at message granularity. The value comes from the
+granularity in force at the entry unit ({func}`kober.emit.root_emit`) — the
+same for the interpreter and for a generated module, which records its own in
+`EMIT`.
 
 ## The redirect seam, and what it is not yet used for
 
@@ -178,6 +184,15 @@ Two consequences that are easy to get wrong, and both have been:
   `zpf` classifies `gap` and `truncated` as holes; `undecodable` and `skipped`
   as bytes that existed. The class is read from `zpf.blocks.UNDECODED_REASONS`
   rather than restated here.
+- That per-seam rule is the *message*-granularity rule. Field-granularity
+  records are consecutive leaves of a tree walk — sub-byte fields cite the
+  byte that holds them, a `computed` cites what it read, a `pointer` target
+  cites bytes behind the cursor — so the participant is declared a **unit
+  sequence** instead, and no join is assumed anywhere. Message granularity
+  passes `None`, not `contiguous`: `None` carries the input's adjacency
+  forward, which is what a stage reading a unit sequence must do. The seam is
+  still written under `units`, redundant but permitted, because both drivers
+  share one writer. `DESIGN.md` §5 has the argument.
 
 ### The field path is formatted in exactly one place
 

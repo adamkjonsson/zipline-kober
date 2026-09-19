@@ -39,6 +39,10 @@ which is the point of keeping them:
   agreed with it and every measurement ran the framing arm that worked. Both
   wrong readings are kept side by side, which is the most useful thing in that
   section.
+- **Revision 10** follows the upstream projects for `0.3.0`: §5 gains the
+  wholesale form of the seam rule (a field-granularity file is a unit
+  sequence), §14.3 lets a generated module record its granularity, and §9 and
+  §13.4 stop calling fixed things open.
 
 Sections most worth reading before changing code: §2.1 (the cursor rule), §4.1
 (field naming and its stopgap), §5 (seams), §9.2, §13 and §14.
@@ -88,7 +92,7 @@ library, and one against the format itself:
 | [#63](https://github.com/adamkjonsson/python-zipline/issues/63) | `check_coverage` measures a real TCP stream as 2³²−1 bytes | Fixed in 0.3.0 |
 | [zipline#106](https://github.com/adamkjonsson/zipline/issues/106) | Whether a field-granular decoded stream is still a stream: records that cite bytes an earlier record already cited, and what seam is owed between them | Answered in spec 0.21 (`zpf` 0.5.0) — `adjacency=units` |
 
-zipline#106 is the format-level question the five above led to. The answer is
+zipline#106 is the format-level question the six above led to. The answer is
 a Participant Descriptor field rather than a rule about seams: a producer
 declares its records a **unit sequence**, and the question of whether
 `dns.flags.qr` joins `dns.flags` never arises, because nothing is assumed to
@@ -145,7 +149,8 @@ decision down before it is one is how a document starts lying:
    in the model.
 2. *(Closed — `Computed` stays.)*
 3. Whether to import `.ksy`.
-4. When to follow `zpf` 0.3, which will break.
+4. *(Closed — `zpf` 0.3 was taken before 0.1.0 rather than after, and each
+   kober minor has pinned one `zpf` minor since: 0.3 → 0.5 at kober 0.3.0.)*
 5. How far the spec language goes before it becomes a program. The one that has
    moved most: `Pointer`, a closed table of three functions, and `Select` have
    all landed on the near side, each closing a real gap by making the

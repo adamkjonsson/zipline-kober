@@ -214,6 +214,16 @@ over the unit holding it.
 - `none` — decode for control flow and write nothing. The bytes are marked
   `skipped`, which says the spec deliberately passed over them.
 
+The granularity in force at the entry unit also decides what the output file
+*declares* about its records. At `field` every participant is a **unit
+sequence** (`adjacency=units`, Zipline Payload Format 0.21): the records are
+consecutive leaves of a tree walk, not content that runs from one into the
+next — `flags.qr` is inside `flags`, a `computed` cites what it read, a
+`pointer` target cites bytes behind the cursor — so no two adjacent records may
+be assumed to join. At `message` and `none` nothing is declared, and a stage
+chained over a unit sequence carries `units` forward. The value is derived,
+never passed; a generated module records its own in `EMIT`.
+
 Two chains, resolved differently, and the difference is the point:
 
 | | Chain | Resolved |

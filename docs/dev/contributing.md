@@ -137,5 +137,14 @@ was written down first.
 
 - `pressure_test.py` green.
 - The deeper fuzzing pipeline in [Testing](testing.md) run against a real
-  capture — it is the only thing that exercises `stage.py`.
-- The docs build clean under `-W`.
+  capture — it is the only thing that exercises `stage.py` — through **both**
+  drivers, with the two files compared block for block. A release that moved
+  the `zpf` pin needs the sibling checkouts (`python-zipline-wire`, and the
+  `zpf` their venvs import) at versions that write the same spec version.
+- The docs build clean under `-W`, and a sweep of `README.md`, `DESIGN.md` and
+  `docs/` for anything the release made untrue — a version, a pin, a claim
+  that something is open or unreleased. The changelog records what changed;
+  the rest of the documentation has to stop describing the world before it.
+- Then the steps in `CLAUDE.md`, in order: changelog heading, version suffix,
+  link definitions, the three-part tag, and the issues closed at release
+  rather than at merge.

@@ -97,14 +97,25 @@ reviewable like any other, which is the point of keeping it.
 
 No spec model, no `Node`, no YAML, no checker. That is what makes a decoder
 shippable, and it is why {func}`kober.runtime.read_int_le` exists at all — the
-one spec-shaped import happens there, once.
+one spec-shaped import happens there, once. It is also why a module says what
+it is in plain strings: `NAME` and `VERSION` for the spec, and `EMIT` for the
+granularity it was compiled at — the {class}`~kober.spec.Emit` value's string,
+since the enum lives in the spec model the module must not import. `EMIT`
+records a compile-time choice rather than offering one (`DESIGN.md` §14.3);
+what it is for is the driver.
 
 ### Both halves write through the same driver
 
 `stage.py` has one loop, one sink, and two steps. Gaps, seams and run tails are
 true of a decode however the decode was written, and the seam rules are the
 subtlest code here — they had a bug that passed every hand-built test. One
-implementation of them is one place for them to be wrong.
+implementation of them is one place for them to be wrong. The same goes for
+what the output *declares*: one `_adjacency()` derives it from the root
+granularity, the interpreter hands it the resolved entry and `run_compiled`
+hands it `Emit(module.EMIT)`, and a module without `EMIT` is refused rather
+than guessed at. The file-level differential in `tests/test_compiled.py`
+compares the participant line along with every record and region, so the two
+derivations cannot drift apart quietly.
 
 ## What the Python backend refuses
 
