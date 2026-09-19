@@ -1431,7 +1431,14 @@ argument for keeping both.
 
 **Granularity is a compile-time choice**, because it is a difference in the
 code and not in a flag: at `message` a decoder builds no field paths at all,
-and at `field` the path is threaded through every unit function.
+and at `field` the path is threaded through every unit function. The module
+*records* the choice in `EMIT` — the `Emit` value's string, beside `NAME` and
+`VERSION` — but cannot change it; what the constant is for is the stage driver,
+which reads it to declare what the output's records assert about one another
+(§5), exactly as it derives the same thing from a `Decoder`. `run_compiled`
+refuses a module without it rather than guessing, since a stale field module
+writing `contiguous` over sub-byte fields is the silent wrong statement
+`adjacency` exists to prevent.
 
 ### 14.4 Names, and refusing rather than renaming
 

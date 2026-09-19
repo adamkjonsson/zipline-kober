@@ -147,8 +147,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=Emit.MESSAGE.value,
         help=(
             "granularity to compile for: one record per message (default), one per "
-            "field, or none at all. A compile-time choice, not a flag the module "
-            "carries — at message granularity it builds no field paths at all"
+            "field, or none at all. A compile-time choice the module records in "
+            "EMIT but cannot change — at message granularity it builds no field "
+            "paths at all"
         ),
     )
 

@@ -2864,11 +2864,30 @@ def render_enums(plan: Plan, names: Names | None = None) -> str:
 
 
 def _granularity_constants(plan: Plan, emit: Emit) -> list[str]:
-    """Return the content-type constants a module needs for its granularity."""
+    """Return the constants that say what a module is, and what it needs.
+
+    ``NAME`` and ``VERSION`` record which spec; ``EMIT`` records which way it
+    was built, as the :class:`~kober.spec.Emit` value's string rather than the
+    enum, since a generated module imports :mod:`kober.runtime` only and the
+    string is what a spec says. The stage driver reads ``EMIT`` to declare what
+    the output's records assert about one another — a field module writes a
+    unit sequence, exactly as the interpreter does at that granularity — and
+    refuses a module without it rather than guess. The constant records a
+    compile-time choice; it does not make one, since at message granularity
+    the module builds no field paths at all (``DESIGN.md`` §14.3).
+
+    The content-type constants after it are what the module *uses*, and only
+    the granularity that uses one gets it.
+    """
     lines = [
         "#: The specification this module was generated from.",
         f"NAME = {_literal(plan.name)}",
         f"VERSION = {_literal(plan.version)}",
+        "",
+        "#: The granularity this module was generated at: one record per message,",
+        "#: one per leaf field, or none. The stage driver reads it to declare what",
+        "#: the output's records assert about one another.",
+        f"EMIT = {_literal(emit.value)}",
         "",
     ]
     if emit is Emit.MESSAGE:

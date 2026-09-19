@@ -22,8 +22,22 @@ minor bump here too.
 
 ## [Unreleased]
 
+### Added
+
+- A generated module exports `EMIT`, the granularity it was compiled at, as
+  the `Emit` value's string (`"message"`, `"field"` or `"none"`) beside `NAME`
+  and `VERSION`. It records the compile-time choice rather than making one —
+  a message module still builds no field paths — and is what
+  `kober.stage.run_compiled` reads to declare the output's adjacency exactly
+  as the interpreter does.
+
 ### Changed
 
+- **Breaking:** `run_compiled` requires the module to export `EMIT` and
+  raises `TypeError` naming the constant otherwise. Every module compiled by
+  an earlier kober must be regenerated with `kober compile` — which is the
+  honest advice regardless, since a module compiled against `zpf 0.3`
+  semantics was never tested against `0.5`.
 - **Breaking:** the required `zpf` is now `>=0.5.0,<0.6` (Zipline Payload
   Format 0.21), up from `>=0.3.0,<0.4` (0.19). A caller on `zpf 0.3` must
   upgrade. Under `zpf`'s `0.x` rule every minor is a version gate, so a `.zpf`

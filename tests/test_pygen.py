@@ -342,6 +342,29 @@ def test_a_generated_module_imports(name: str, emit: Emit, tmp_path: Path):
     assert module.VERSION == "1.0"
 
 
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE, Emit.NONE], ids=lambda e: e.value)
+def test_a_generated_module_records_its_granularity(emit: Emit, tmp_path: Path):
+    """``EMIT`` says which way the module was built, as the spec's own string.
+
+    Every granularity, including ``none`` — and including a field module with
+    no text field, which before ``EMIT`` exported no constant at all that a
+    driver could recover the granularity from.
+    """
+    spec = Spec.from_yaml("""
+name: t
+version: "1"
+entry: m
+units:
+  m:
+    fields:
+      - {name: x, type: {int: {bits: 8}}}
+""")
+    module = imported(render_spec(spec, emit=emit), tmp_path, f"plain_{emit.value}")
+    assert emit.value == module.EMIT
+    assert Emit(module.EMIT) is emit
+    assert not hasattr(module, "TEXT_CONTENT_TYPE")
+
+
 def test_a_generated_object_carries_its_spans(tmp_path: Path):
     """Q2, reached through generated code rather than the hand-written copy."""
     module = imported(render_spec(load("dns.yaml")), tmp_path, "dns_spans")

@@ -40,7 +40,7 @@ from fuzzing import (
     select_cases,
     variants,
 )
-from zpf.blocks import UNDECODED_REASONS, Record, Undecoded
+from zpf.blocks import UNDECODED_REASONS, Participant, Record, Undecoded
 
 from kober.cli import main
 from kober.decoder import Decoder
@@ -849,14 +849,18 @@ def blocks(path: Path) -> list[tuple[object, ...]]:
     """Return what a decoded file says, in file order.
 
     Records and undecoded regions both, since a difference in either is a
-    difference in the file. Read from the raw block stream rather than the
-    session views, because the order the two implementations write in is part of
-    what is being compared.
+    difference in the file — and each participant's declared adjacency, since
+    that is a statement about every record in it, derived separately by each
+    implementation. Read from the raw block stream rather than the session
+    views, because the order the two implementations write in is part of what
+    is being compared.
     """
     out: list[tuple[object, ...]] = []
     with zpf.open(path) as handle:
         for block in handle.blocks():
-            if isinstance(block, Record):
+            if isinstance(block, Participant):
+                out.append(("participant", block.participant_id, zpf.Adjacency(block.adjacency)))
+            elif isinstance(block, Record):
                 spans = tuple((s.off_start, s.off_end) for s in block.spans)
                 out.append(("record", block.content_type, block.role, block.payload, spans))
             elif isinstance(block, Undecoded):
@@ -956,6 +960,26 @@ def test_a_generated_module_writes_the_file_the_interpreter_writes(tmp_path: Pat
 
     assert blocks(compiled_out) == blocks(interpreted_out)
     assert_conformant(compiled_out, source)
+
+
+def test_a_module_without_emit_is_refused(tmp_path: Path):
+    """A module from before ``EMIT`` is told to recompile, not guessed at.
+
+    A stale field module written as ``contiguous`` over sub-byte fields is
+    exactly the silent wrong statement the adjacency field exists to prevent,
+    so the refusal names the constant and the remedy.
+    """
+    source = tmp_path / "transport.zpf"
+    write_transport(source, QUERY)
+    current = compiled(example("dns"), Emit.FIELD)
+    # What a 0.2.0 module exported, and nothing more: a fresh module rather
+    # than the cached one with a constant deleted, which other tests share.
+    stale = ModuleType("stale_dns")
+    for name in ("NAME", "VERSION", "TEXT_CONTENT_TYPE", "decode_from"):
+        setattr(stale, name, getattr(current, name))
+    with pytest.raises(TypeError, match="EMIT.*kober compile"):
+        run_compiled(stale, source, tmp_path / "out.zpf", produced_by="t", produced_at=0)
+    assert not (tmp_path / "out.zpf").exists(), "refused before anything was written"
 
 
 def test_the_shipped_driver_is_what_makes_a_generated_module_runnable(tmp_path: Path):
