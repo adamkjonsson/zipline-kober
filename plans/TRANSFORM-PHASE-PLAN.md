@@ -291,28 +291,102 @@ optional.**
   in spirit (the spec asks for something this process cannot give), and it
   must not become a per-message `undecodable` that quietly marks a whole file.
 
-### Q7 — What can kober ship, under the standard-library rule?
+### Q7 — Which transform names does the *language* have, and which does *this implementation* bind?
 
-`CLAUDE.md` allows the standard library and the zipline projects, nothing
-else. The standard library has `zlib`, `gzip`, `bz2` and `lzma`; it has **no
-AES, no ChaCha20, no GCM**.
+The first draft of this question asked only *what can kober ship, under the
+standard-library rule?*, answered *the registry and `gzip`/`zlib`/`deflate`/
+`bz2`/`lzma`*, and was wrong in a way worth recording rather than quietly
+fixing — because the error is one this project has made nowhere else and
+would have been expensive to find later.
 
-**Leaning: kober ships the registry and the decompressors; decryption is
-always caller-registered, and the docs say so in the first paragraph.**
+**It derived the language's vocabulary from CPython's packaging.** Those are
+two rules, and they must stay apart:
 
-- `kober.transforms`: `register(name, fn)`, `lookup(name)`, and the shipped
-  set — `gzip`, `zlib`, `deflate` (raw), `bz2`, `lzma`. Each is
-  `(data: bytes, *, limit: int, **args) -> bytes`, raising one
+| Rule | What it governs | Where it comes from |
+| --- | --- | --- |
+| kober depends on the standard library and the zipline projects only | what this Python package may `import` | `CLAUDE.md` |
+| which transform names a spec may use | the **format**, which Q3 defends as consumable by another implementation | this plan |
+
+Deriving the second from the first produces exactly the failure Q3 refuses —
+a spec valid against one backend and invalid against another — only now
+discovered at *backend* time rather than at `check` time.
+
+**The assumption does not survive contact with any other language.** Node 18's
+`zlib` was probed directly; Go, Java, .NET, Rust and the browser are from
+knowledge and should be re-checked in Stage 1:
+
+| | deflate | zlib | gzip | bz2 | lzma/xz |
+| --- | --- | --- | --- | --- | --- |
+| Python | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Node | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Go | ✅ | ✅ | ✅ | ✅ *decompress only* | ❌ |
+| Java | ✅ | ✅ | ✅ | ❌ | ❌ |
+| .NET | ✅ | ✅ (6+) | ✅ | ❌ | ❌ |
+| Rust | ❌ | ❌ | ❌ | ❌ | ❌ |
+| C | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Browser `DecompressionStream` | ✅ | ✅ | ✅ | ❌ | ❌ |
+
+`deflate`/`zlib`/`gzip` are effectively universal among languages that ship
+compression at all; Rust and C ship none, which is a different problem — there
+the codec is a dependency every project already has. `bz2` and `lzma` are
+Python's generosity and not a norm. Go's bzip2 being decompress-only costs
+nothing here, because **kober only ever decompresses** — a fact worth stating
+in its own right, since it shrinks what any backend must bind.
+
+**And the inversion is what settles it.** Python's standard library has no
+**brotli**. `Content-Encoding: br` is one of the three encodings actually met
+on the wire, RFC 7932 defines it, and Node and .NET have it built in. Under
+the first draft's rule the spec language could never name `br` — while
+carrying `lzma`, which no network protocol uses. The set was chosen by an
+accident of CPython's packaging, and `examples/http.yaml`, this phase's own
+driving example, is where that would have been felt.
+
+**Leaning: a well-known name is defined by a normative reference, tiered for
+portability, and bound per backend.**
+
+1. **A name means a specification, not an implementation.** `deflate` =
+   RFC 1951, `zlib` = RFC 1950, `gzip` = RFC 1952, `br` = RFC 7932, plus
+   `bzip2` and `xz`. That is what makes a name portable, independent of who
+   has the codec.
+2. **Two tiers.** A **core** tier — `deflate`, `zlib`, `gzip` — that any
+   backend must bind to claim conformance, and an **extended** tier a backend
+   may decline. A spec that stays in core is portable by construction; one
+   that does not says so in its own `transforms:` block, where an author can
+   see it before a backend refuses it.
+3. **A backend declares a capability set, and refusal is static.**
+   `kober compile --target go` refuses a spec needing a name that target
+   cannot bind, before generating a line. `check` with no target stays
+   target-independent: it verifies the name is well-known or declared, and
+   nothing more. This is Q3's discipline applied one level up — the spec
+   declares, the binder supplies, and the two are checked at different times.
+4. **What this implementation ships is then a separate, short sentence.** The
+   core tier plus `bzip2` and `xz`, all from the standard library; `br` and
+   `zstd` through the same caller registration that ciphers use. No new
+   mechanism, only a different framing of the one below.
+
+The registry itself is unchanged by any of this:
+
+- `kober.transforms`: `register(name, fn)`, `lookup(name)`, and the bound set
+  above. Each is `(data: bytes, *, limit: int, **args) -> bytes`, raising one
   `TransformError` that becomes `undecodable`.
-- A caller registers `aes-gcm` from `cryptography` or wherever, in their own
-  process, and the spec declares it under `transforms:`. The test suite does
-  the same with a deliberately trivial cipher (XOR with the key, plus a fake
-  tag check) — stdlib-only, deterministic, and enough to exercise every path
-  a real cipher would: parameters from fields and from `params:`, failure on
-  the wrong key, `params_digest` changing with the key.
+- **Decryption is always caller-registered**, and the docs say so in the first
+  paragraph: the standard library has no AES, no ChaCha20 and no GCM, and
+  `CLAUDE.md` forbids reaching for one. A caller registers `aes-gcm` from
+  `cryptography` or wherever, in their own process, and the spec declares it
+  under `transforms:`. The test suite does the same with a deliberately
+  trivial cipher (XOR with the key, plus a fake tag check) — stdlib-only,
+  deterministic, and enough to exercise every path a real cipher would:
+  parameters from fields and from `params:`, failure on the wrong key,
+  `params_digest` changing with the key.
 - A generated module `import`s the registry and binds its names at import
   time, so an unregistered transform fails when the module loads, not when a
   message arrives — the compiled analogue of Q6's last bullet.
+
+**What this costs now is one table and one flag's worth of design; what it
+would have cost later is the vocabulary.** A name that ships is a name that
+has to keep working, so a second backend arriving to find `lzma` in the core
+set and `br` unnameable would be a break in the format rather than a fix to a
+plan.
 
 ### Q8 — Stateful transforms?
 
@@ -389,6 +463,11 @@ Two things the spike should try that the plan cannot decide on paper: whether
 whether `space` on `Node` disturbs any of `emit._walk`, `_holes`, or the
 differential's comparison (Q5).
 
+One thing it should *check* rather than try: Q7's table is one row verified
+and seven recalled. Confirm what Go, Java, .NET, Rust and the browser
+actually have before the tiering is written down, because the tier boundary
+is a promise the format has to keep.
+
 ### Stage 2 — the constructs in the model, loader, and checker
 
 - `Transform` and `Concat` field types in [`spec.py`](../src/kober/spec.py);
@@ -396,19 +475,32 @@ differential's comparison (Q5).
 - The loader accepts both keys, with source locations on faults as the
   dialect phase established.
 - `check` rules: `from` names an earlier `bytes`-typed field, `concat` field
-  or `bytes` parameter; `with` is declared under `transforms:`; every `args`
-  entry is typed against the declaration and every declared parameter is
-  supplied; `limit` is present and positive; `type` resolves; `content_type`
-  is well-formed and only present without `type`; a `concat` names a
-  repeated field's element field and nothing else. A transform in a
-  repetition without progress is refused the way a repeated pointer is.
+  or `bytes` parameter; `with` is a well-known name or declared under
+  `transforms:`; every `args` entry is typed against the declaration and
+  every declared parameter is supplied; `limit` is present and positive;
+  `type` resolves; `content_type` is well-formed and only present without
+  `type`; a `concat` names a repeated field's element field and nothing else.
+  A transform in a repetition without progress is refused the way a repeated
+  pointer is. **No rule here consults a binding** — that is Q7's split, and
+  it is what keeps `check` answering the same way against every backend.
 - `kober show` renders `content: gzip(body) → json_document`.
 
-### Stage 3 — the registry and the shipped transforms
+### Stage 3 — the well-known names, the registry, and the bound set
 
-`kober.transforms` per Q7, with the bound honoured incrementally and a test
-that a crafted bomb stops at `limit` in bounded memory, not after. The test
-cipher lives in `tests/`, not in the package.
+Two things, and Q7 says why they are two:
+
+- **The name table** — the well-known names with their normative references
+  and their tier, in the package but not tied to any binding. `check` reads
+  it; a backend's capability set is declared against it. Core is `deflate`,
+  `zlib`, `gzip`; extended is `bzip2`, `xz`, `br`, `zstd`.
+- **The Python binding** — `kober.transforms` per Q7, binding the core tier
+  plus `bzip2` and `xz` from the standard library, with the bound honoured
+  incrementally and a test that a crafted bomb stops at `limit` in bounded
+  memory, not after. `br` and `zstd` are well-known names this backend does
+  not bind, which is the first live test that a declined name fails cleanly
+  rather than looking like a typo.
+
+The test cipher lives in `tests/`, not in the package.
 
 ### Stage 4 — the interpreter
 
@@ -467,6 +559,11 @@ already makes.
   `params:`; [`concepts.md`](../docs/format/concepts.md) loses its last
   *cannot say* bullet and gains a paragraph on the second offset space, and
   on what the file does and does not say about it.
+- **The well-known name table is reference documentation, not a note**: every
+  name, its normative reference, its tier, and whether this backend binds it.
+  It is what an author consults before using `br`, and what a second backend
+  implements against — so it belongs beside the type reference rather than in
+  a changelog entry.
 - `DESIGN.md`: §2.1 revision 10 (a cursor over bytes that are not input);
   §3.2 gains the two constructs; §6 gains `params`; §11.5 records that the
   deferred branch was taken and where the line sits now; a new §13 entry for
@@ -487,6 +584,9 @@ already makes.
   the line §11.5 drew, and this phase stays on its side.
 - **Multi-range citation** on `Node` or `Emission`, unless the spike proves
   the hull says something false.
+- **A second backend.** Q7 tiers the names so one is possible later and
+  writes the capability set down; it does not build a target, and
+  `--target` has exactly one value until one exists.
 - **A release.** `0.4.0` is a separate step and follows the release procedure
   in `CLAUDE.md`; this plan ends at *merged under `Unreleased`*.
 
@@ -508,6 +608,14 @@ already makes.
 6. `check` refuses an undeclared transform, an untyped or missing argument, a
    missing `limit`, and a `from` that is not an earlier bytes field — before
    any data exists, with no registry loaded.
-7. `DESIGN.md` and the format docs say what is true of both implementations
+7. **The core tier is stated as a conformance claim**: a backend binding
+   `deflate`, `zlib` and `gzip` can run any spec that stays inside it, and the
+   docs say which names are core, which are extended, and what each one's
+   normative reference is.
+8. **An extended-tier name a backend declines fails statically and says so** —
+   `br` against the Python binding is the case in hand — with a message that
+   distinguishes *this backend does not bind that* from *no such transform*,
+   and `check` without a target still passes the same spec.
+9. `DESIGN.md` and the format docs say what is true of both implementations
    afterwards, and `concepts.md` no longer lists transforms as something a
    spec cannot say.
