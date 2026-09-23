@@ -80,7 +80,12 @@ checker proves.
 a hard message boundary. Within a contiguous run it builds a
 {class}`kober.cursor.Cursor` and calls the engine repeatedly until the run is
 exhausted. The engine walks the spec, reading through the cursor and building
-{class}`kober.node.Node` objects.
+{class}`kober.node.Node` objects. Per stream, the driver holds everything
+until the first whole message **confirms** the stream, and **declines** a
+stream that fails before that or ends without one. A declined stream keeps no
+record: what was tried is `undecodable`, the rest `skipped` untried, each with
+a `not <spec>: …` comment (`DESIGN.md` §3.1, *A stream is confirmed before it
+is believed*).
 
 **Emit.** {func}`kober.emit.plan` walks the tree and returns two lists:
 `Emission` (records to write) and `Unclaimed` (regions to mark, with a reason).

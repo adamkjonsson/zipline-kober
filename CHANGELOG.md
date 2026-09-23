@@ -22,6 +22,137 @@ minor bump here too.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-23
+
+**The verdict release.** Each change here is about what a file *says* about
+the bytes it was given, when that was not true. The largest is stream
+confirmation. A stream is not believed until its first whole message, and one
+in another protocol is declined whole rather than retried message by message
+with a partial field tree written each time. Two bugs made a file claim
+something false. A starved field under `check=False` reported a hole that was
+never there, and an `emit` on the entry unit was read differently by the
+interpreter's walk, its branch and the compiler. Probing the failure wording
+that stream confirmation quotes found a third: a repetition's `count` could
+raise out of a decode. The deeper pipeline the release checklist requires is
+now a checked-in script. One change is breaking: what a file says about a
+foreign stream. The `zpf` pin does not move.
+
+### Added
+
+- `kober.check.starved_fields()` and `kober.check.Starved`: the fields the
+  terminal rule leaves no bytes for, keyed `(unit, field index)` like
+  `fill_widths()`, with the explanation a decode reports
+  ([#43](https://github.com/adamkjonsson/zipline-kober/issues/43)). Empty for
+  every spec that passes `check`. `kober.ops.FieldPlan` carries each field's
+  entry as `starved`, so a backend can name the fault.
+
+### Changed
+
+- **Breaking: a stream in another protocol is declined, not retried**
+  ([#32](https://github.com/adamkjonsson/zipline-kober/issues/32)). A stream is
+  now confirmed by its first whole message, and nothing written for it is
+  kept until then. One that meets an `undecodable` first (a `const` that
+  disagrees, a `confirm` that does not hold, a `switch` with no case), or that
+  ends without a whole message, is declined:
+  - it keeps **no record**, including the fields that read cleanly before the
+    failure;
+  - every run or datagram tried is marked `undecodable` whole, and every one
+    after is `skipped` without being tried;
+  - each of those regions carries a comment such as `not dns: no case for 7
+    and no default, stopped at offset 3`, or `not http: no message decoded;
+    every attempt ran out of input`.
+
+  A stream that confirms writes exactly what it did before, and a failure after
+  confirmation is handled as before. **What a file says about a foreign stream
+  changes**:
+  - a foreign UDP stream used to be one `undecodable` region per datagram, each
+    a fresh attempt, and is now one attempt;
+  - at field granularity, the partial field tree before a failure is no
+    longer written;
+  - a stream that only ever ran out, such as plain text under the HTTP spec,
+    is `undecodable` rather than `truncated`, so it no longer claims a hole.
+
+  A consumer that counted `undecodable` or `truncated` bytes for foreign
+  streams should read the region's comment instead. **Two kinds of stream in
+  the right protocol are declined too**, because nothing tells them apart
+  from a foreign one: one whose first message is `undecodable`, and one whose
+  only message was cut short. This is deliberate, and documented in
+  `docs/format/concepts.md` (*What a spec meets in someone else's stream*) and
+  `DESIGN.md` §3.1. No setting turns it off. `tools/pipeline.py` reports how
+  many streams each output declined.
+- **Both implementations word an `undecodable` failure the same way**, because
+  a declined stream quotes it in the output.
+  - The interpreter no longer prefixes a failed condition (`condition failed:
+    …`) or guard (`confirm could not be decided: …`), and says `division by
+    zero` for `%` as for `/`, as Python 3.14 does.
+  - A generated module words a failed `confirm`/`reject`, a runaway
+    repetition and the nesting limit as the interpreter does, and no longer
+    takes the text of a division by zero from Python, whose wording changed
+    between versions.
+  - A division by zero inside a `confirm` or `reject` now fails where the
+    interpreter says it does, instead of escaping as a bare
+    `ZeroDivisionError` to the entry point.
+  - Modules compiled by an earlier 0.4.0 development build should be
+    regenerated.
+
+### Fixed
+
+- **An `emit` on the entry unit now wins over `--emit` in both backends**
+  ([#40](https://github.com/adamkjonsson/zipline-kober/issues/40)). The
+  documented chain is field → unit → enclosing unit → decoder, and every
+  nested unit followed it, but the entry unit did not. The interpreter chose
+  the whole message's output from the entry's setting and then walked its
+  fields with the decoder's, so an entry marked `emit: field` wrote nothing at
+  `--emit none`. The compiler never read the entry's setting at all, so at
+  `--emit message` it wrote one message record where the interpreter wrote
+  fields. `--emit` is now the default it was documented as, and both backends
+  build the whole message at the entry's own granularity when it names one. A
+  generated module's `EMIT` records that granularity rather than the flag,
+  and so does the participant adjacency derived from it. **Output changes
+  only for a spec with `emit` on its entry unit**, and no shipped example has
+  one. A module compiled from such a spec should be regenerated with
+  `kober compile`.
+- **A field the spec leaves no bytes for is `undecodable`, not `truncated`**
+  ([#43](https://github.com/adamkjonsson/zipline-kober/issues/43)). A spec
+  that reads anything after a `remaining`, or after a unit that reads to the
+  end of the message, is refused by `check` since 0.3.0. Run anyway with
+  `Decoder(spec, check=False)`, the field after it used to report
+  `truncated`. That verdict is hole-class and claims the input was cut short,
+  when it arrived whole and the spec gave its bytes away. Both backends now
+  report `undecodable` with the reason, e.g. `'crc' has no bytes left: 'body'
+  reads to the end of the message`, as a `pointer` target already did.
+  Reachable **only with `check=False`**. They do so only when the field
+  started with nothing left, so a short message is still `truncated` where
+  the field that would have read to the end was absent.
+- **A repetition whose `count` or `until` cannot be computed no longer raises
+  out of a decode.** A count of `12 / n` with `n` zero on the wire raised
+  `EvalError` out of `Decoder.decode_bytes` and stopped the stage driver,
+  breaking the promise that a decode never raises. Every other place an
+  expression is evaluated already reported it as a verdict. It is now
+  `undecodable`, with the reason, as the compiled module already had it.
+  Found while probing #32's failure wording. No spec in the fuzz corpus had a
+  count or an `until` that could fail, and the corpus now has one.
+
+### Documentation
+
+- **The deeper pipeline is a script**, `tools/pipeline.py`
+  ([#44](https://github.com/adamkjonsson/zipline-kober/issues/44)). The
+  release checklist required it, but it existed only as shell recipes in the
+  README and `docs/dev/testing.md`, and the 0.3.0 run of it was a script
+  written for that release and never checked in. It now runs as one command
+  over eight inputs (fuzzed and generated DNS, generated chunked HTTP with
+  and without loss, four real captures), through both example specs, both
+  drivers and both granularities. It checks every output for conformance and
+  coverage, compares each interpreter/compiled pair block for block, and
+  checks the decoded shape. On a lossless HTTP stream the shape is counted
+  against a small independent reader of the message framing, which catches
+  the trailer bug that bounds on the counts missed. `--baseline DIR` reports
+  every output that differs from an earlier run. The README's *Fuzzing*
+  section, `docs/dev/testing.md` and the release checklist in
+  `docs/dev/contributing.md` now point at the script. `docs/dev/testing.md`
+  also corrects a miscount: the fuzzed DNS capture follows 252 compression
+  pointers, and 1932 is the number of records read through them.
+
 ## [0.3.0] - 2026-09-19
 
 **The alignment release.** Nothing here changes what kober decodes; the
@@ -1803,7 +1934,8 @@ installed from a checkout (see the README).
   parses `comment` back. Whether to follow `zpf` 0.3 (#58, #59) is recorded as
   an open question rather than settled.
 
-[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/adamkjonsson/zipline-kober/releases/tag/v0.1.0

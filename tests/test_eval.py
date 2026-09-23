@@ -108,7 +108,8 @@ def test_division_by_zero():
 
 
 def test_modulo_by_zero():
-    with pytest.raises(EvalError, match="modulo by zero"):
+    """Worded as division, as Python words it: a compiled module cannot tell them apart."""
+    with pytest.raises(EvalError, match="^division by zero$"):
         value("4 % n", n=0)
 
 

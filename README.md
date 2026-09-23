@@ -116,6 +116,15 @@ or named as `undecodable`, `truncated`, `gap`, or `skipped` — never both, and
 never silently. An undecodable region is a conformant result rather than a
 failure, so `run` reports it and still succeeds.
 
+A stream is **confirmed** by its first whole message, and nothing kober writes
+for it is kept until then. One that fails before that, or ends without one, is
+taken to be in another protocol and is **declined**: no record for any of it,
+what was tried marked `undecodable` and the rest `skipped`, each region saying
+why (`not dns: …`). A stream in the right protocol whose first message is
+corrupt, or whose only message was cut short, is declined too. The bytes cannot
+tell it apart from a foreign one ([What a spec meets in someone else's
+stream](docs/format/concepts.md)).
+
 A field-granularity file also says what its records are: a **unit sequence**
 (`adjacency=units`, spec 0.21), meaning no two adjacent records may be assumed
 to join — `flags.qr` is *inside* `flags`, not after it. A message-granularity
@@ -251,62 +260,29 @@ never claims more than it was given, and no byte is ever both cited and marked
 undecoded. Mutations are seeded, so a failure reproduces from the bytes it
 prints.
 
-There is a **deeper pipeline** worth running before a release or after touching
-the stage driver, using two sibling checkouts. It is what found the seam bug
-that the entire hand-built suite missed:
+There is a **deeper pipeline** to run before a release or after touching the
+stage driver. It is what found the seam bug that the entire hand-built suite
+missed, and it is one command:
 
 ```bash
-# Adversarial variants of a real capture, then convert, then decode.
-../packeteer/.venv/bin/packeteer fuzz \
-    ../python-zipline-wire/tests/captures/dns_example.pcapng \
-    --pcap /tmp/fuzz.pcap --seed 1
-../python-zipline-wire/.venv/bin/zpfwire convert /tmp/fuzz.pcap -o /tmp/fuzz.zpf
-.venv/bin/kober run examples/dns.yaml /tmp/fuzz.zpf -o /tmp/out.zpf --emit field
+.venv/bin/python tools/pipeline.py
 ```
 
-Then check the output with `zpf.ConformanceChecker` and `zpf.check_coverage`.
-The in-suite fuzzing covers the decoder and emitter; only this covers the
-**stage driver**, because reaching it needs real stream structure — gaps,
-truncated messages between whole ones, several records per run — rather than
-one adversarial buffer.
-
-[`packeteer`](https://github.com/adamkjonsson/packeteer) can also generate
-traffic with impairments directly, which is a better source of gap and
-reordering cases than hand-built fixtures. Since its 0.9.0 that includes
-**HTTP**, which it could not impair or chunk before:
-
-```bash
-# Chunked bodies, with trailers, split small enough to straddle segments,
-# on a lossy wire — none of which any capture in reach can supply.
-../packeteer/.venv/bin/packeteer stream --payload http \
-    --client-ip 10.0.0.2 --server-ip 10.0.0.1 --requests 30 \
-    --chunked-rate 0.5 --trailer-rate 0.5 --min-chunk 8 --max-chunk 32 \
-    --mss 200 --packet-loss 0.05 --seed 3 --pcap /tmp/http.pcap
-```
-
-`--mss` matters as much as the impairment: at the default 1460 a generated
-message fits in one segment, so losing one loses a whole message. Lower it and
-a chunk boundary falls across a segment boundary, which is the case a streaming
-decoder is most likely to get wrong. Assert the **shape** of the result, not
-just its coverage: the first thing this found was a chunked *trailer* section
-that `examples/http.yaml` mis-read, with every byte still cited and nothing
-marked undecoded.
-
-Since packeteer 0.12.0 the same is possible for **DNS**, which previously had to
-come from fuzzing a capture. `--payload` takes any registered protocol, and
-`--protocol-messages` says what to send — including bytes of your own, which is
-how a *compressed* response gets into a generated stream:
-
-```bash
-# messages.json: [{"raw": "<query hex>"}, {"raw": "<compressed response hex>"}]
-../packeteer/.venv/bin/packeteer stream --payload dns --protocol udp \
-    --protocol-messages messages.json --client-ip 10.0.0.2 --server-ip 10.0.0.1 \
-    --packets 40 --packet-loss 0.05 --gap-jitter 0.01 --seed 5 --pcap /tmp/dns.pcap
-```
-
-Each element is a protocol **section body** — `{"raw": …}`, not `{"dns": {…}}`.
-The wrapped form is what `packeteer parse` writes and it is accepted in silence,
-building an empty 12-byte header instead of your message.
+It needs two sibling checkouts with their own venvs,
+[`packeteer`](https://github.com/adamkjonsson/packeteer) and
+[`python-zipline-wire`](https://github.com/adamkjonsson/python-zipline-wire)
+(`--packeteer` and `--wire` if they are not at `../`). It fuzzes and generates
+DNS and chunked HTTP, converts them and four real captures to `.zpf`, and runs
+both example specs through the interpreter and a freshly compiled module at both
+granularities. Every output must be conformant and account for every byte; each
+interpreter/compiled pair must be identical block for block; and the decoded
+**shape** must be right — counted against an independent reader where the
+stream is lossless — because coverage alone cannot tell a chunked body from
+twenty imaginary messages. `--baseline DIR` compares every output with an
+earlier run's `--work DIR`. The in-suite fuzzing covers the decoder and emitter;
+only this covers the **stage driver**, because reaching it needs real stream
+structure — gaps, truncated messages between whole ones, several records per
+run. [Testing](docs/dev/testing.md) says what each input is for.
 
 ## License
 

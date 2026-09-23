@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import zpf
+from zpfcompare import assert_conformant
 
 from kober.decoder import Decoder
 from kober.emit import plan
@@ -96,16 +97,6 @@ def run_stage(source: Path, sink: Path, spec: Spec, emit: Emit) -> None:
                 stage.undecoded(
                     stream, tree.off_end, end, reason=tree.status.value
                 )
-
-
-def assert_conformant(path: Path, source: Path) -> None:
-    """Fail unless the file passes conformance and coverage."""
-    checker = zpf.ConformanceChecker()
-    with zpf.open(path) as handle:
-        checker.check(handle.blocks())
-    checker.finish()
-    assert checker.coverage_findings() == []
-    assert zpf.check_coverage(path, source) == []
 
 
 @pytest.fixture

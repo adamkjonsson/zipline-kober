@@ -752,8 +752,9 @@ def render_expr(expr: Expr, binding: Binding) -> str:
     ``_as_bool`` exist because it discovers types at decode time; the checker
     has already proved them, so the compiled form skips them. Division by zero
     is the one failure that survives compilation, and it survives as
-    ``ZeroDivisionError`` for the entry point to turn into an ``undecodable``
-    region — the same outcome by a shorter road.
+    ``ZeroDivisionError`` for the code around the expression to turn into
+    ``Undecodable("division by zero")`` — the same outcome, and the same words,
+    as the interpreter's.
 
     Args:
         expr: The expression to render.
@@ -846,6 +847,29 @@ def _group(text: str, level: int, limit: int) -> str:
 # --- emission --------------------------------------------------------------
 
 
+def _root_granularity(plan: Plan, default: Emit) -> Emit:
+    """Return the granularity in force at the entry unit.
+
+    The entry unit's own ``emit`` if it has one, else the decoder's — what
+    :func:`kober.emit.root_emit` answers for the interpreter, read off the plan.
+    It is the granularity of the whole module: whether it writes one record per
+    message, walks to the leaves, or writes nothing, whether its functions carry
+    a sink at all, and what it records in ``EMIT``. The entry is a unit like any
+    other, so its setting wins over the decoder's exactly as a nested unit's
+    does; resolving it here, once, is what keeps every one of those decisions
+    agreeing with the interpreter's.
+
+    Args:
+        plan: The plan being compiled.
+        default: The granularity the decoder was asked for.
+
+    Returns:
+        The granularity the module is built at.
+
+    """
+    return plan.object(plan.entry).emit or default
+
+
 def granularity(plan: Plan, default: Emit) -> Mapping[str, Emit]:
     """Return the granularity in force inside each unit.
 
@@ -853,7 +877,9 @@ def granularity(plan: Plan, default: Emit) -> Mapping[str, Emit]:
     own ``emit`` wins, then its unit's, then whatever encloses it, then the
     decoder's. A compiler resolves it once, which is the same rule read from the
     other end — and it can, because what a unit inherits is decided by the sites
-    that reference it.
+    that reference it. The entry unit is referenced by no site, so it starts
+    from its own ``emit`` if it names one and from ``default`` only if it does
+    not; that one granularity is what the whole module is built at.
 
     Args:
         plan: The plan being compiled.
@@ -870,7 +896,7 @@ def granularity(plan: Plan, default: Emit) -> Mapping[str, Emit]:
             picking one.
 
     """
-    inside: dict[str, Emit] = {plan.entry: default}
+    inside: dict[str, Emit] = {plan.entry: _root_granularity(plan, default)}
     pending = [plan.entry]
     while pending:
         unit = pending.pop()
@@ -1323,8 +1349,8 @@ class _Function:
             return rendered
         self.emit(f"{pad}try:")
         self.emit(f"{pad}    _value = {rendered}")
-        self.emit(f"{pad}except (EvalError, ZeroDivisionError) as _exc:")
-        self.emit(f"{pad}    raise Undecodable(str(_exc), {self.stopped()}) from _exc")
+        for line in _failing(self.stopped()):
+            self.emit(f"{pad}{line}")
         return "_value"
 
     def provable(self, expr: Expr) -> bool:
@@ -1336,7 +1362,9 @@ class _Function:
         return [
             f"    if _depth > {MAX_DEPTH}:",
             *_wrap(
-                f'raise Undecodable("unit nesting passed {MAX_DEPTH} levels", {ANCHOR})',
+                f"raise Undecodable("
+                f"{_literal(f'unit nesting passed {MAX_DEPTH} levels at {self.obj.unit!r}')}, "
+                f"{ANCHOR})",
                 8,
                 hang=4,
             ),
@@ -1351,18 +1379,26 @@ class _Function:
         """
         lines: list[str] = []
         binding = self.binding(len(self.obj.fields))
-        unit = _literal(self.obj.unit)
+        # Worded as the interpreter words them, since a stream declined on one
+        # quotes it in the file (`kober.stage`) and the two files must agree.
+        confirmed = _literal(f"unit {self.obj.unit!r} did not confirm")
+        rejected = _literal(f"unit {self.obj.unit!r} rejected the input")
         where = self.stopped()
-        if self.obj.confirm is not None:
-            lines.append(f"    if not ({render_expr(self.obj.confirm, binding)}):")
-            lines.append(
-                f'        raise Undecodable(f"unit {{{unit}}} did not confirm", {where})'
-            )
-        if self.obj.reject is not None:
-            lines.append(f"    if {render_expr(self.obj.reject, binding)}:")
-            lines.append(
-                f'        raise Undecodable(f"unit {{{unit}}} rejected the input", {where})'
-            )
+        for expr, holds, message in (
+            (self.obj.confirm, False, confirmed),
+            (self.obj.reject, True, rejected),
+        ):
+            if expr is None:
+                continue
+            rendered = render_expr(expr, binding)
+            if _fallible(rendered):
+                # Taken in a `try` as any other fallible expression is, so a
+                # division by zero in a guard fails where the interpreter says.
+                lines.extend(["    try:", f"        _guard = {rendered}"])
+                lines.extend(f"    {line}" for line in _failing(where))
+                rendered = "_guard"
+            test = rendered if holds else f"not ({rendered})"
+            lines.extend([f"    if {test}:", f"        raise Undecodable({message}, {where})"])
         if lines:
             lines.append("")
         return lines
@@ -1590,7 +1626,47 @@ class _Function:
         return all(value.kind is Kind.OBJECT for value in item.types)
 
     def present(self, index: int, item: FieldPlan, target: str | None, indent: int) -> None:
-        """Emit a field's read, at whatever indentation its condition left."""
+        """Emit a field's read, at whatever indentation its condition left.
+
+        A field the terminal rule leaves no bytes for — reachable only in a spec
+        run with ``check=False`` — has its read wrapped, so that a short read
+        starting with nothing left is reported ``undecodable`` with the reason
+        rather than ``truncated``, as the interpreter reports it
+        (:func:`kober.check.starved_fields`). Every other field is emitted
+        exactly as it would be without this, so a spec that passes ``check``
+        compiles to the same source.
+        """
+        starved = item.starved
+        if starved is None or starved.elements:
+            self.unguarded(index, item, target, indent)
+            return
+        pad = " " * indent
+        flag = f"_starved_{index}"
+        self.emit(f"{pad}{flag} = {self.nothing_left()}")
+        self.emit(f"{pad}try:")
+        self.unguarded(index, item, target, indent + 4)
+        self.starve(flag, starved.detail, indent)
+
+    def nothing_left(self) -> str:
+        """Return an expression for whether the position is at the end of the run.
+
+        In bits, as the interpreter's ``cursor.at_end()`` asks it: a position
+        part-way into the last byte still has bits to read.
+        """
+        if self.delta == 0:
+            return f"{ANCHOR} >= _size"
+        return f"{ANCHOR} * 8 + {self.delta} >= _size * 8"
+
+    def starve(self, flag: str, detail: str, indent: int) -> None:
+        """Close a starved read's ``try``: a short read from nothing is a spec fault."""
+        pad = " " * indent
+        self.emit(f"{pad}except TruncatedRead as _exc:")
+        self.emit(f"{pad}    if not {flag}:")
+        self.emit(f"{pad}        raise")
+        self.emit(f"{pad}    raise Undecodable({_literal(detail)}, _exc.at) from _exc")
+
+    def unguarded(self, index: int, item: FieldPlan, target: str | None, indent: int) -> None:
+        """Emit a field's read with nothing around it."""
         pad = " " * indent
         if self.redirected(item):
             self.pointer(index, item, target, indent)
@@ -1781,6 +1857,8 @@ class _Function:
             self.emit(f"{pad}{_spans_local(item.name)}: list[tuple[int, int]] = []")
         if indexed and not counted:
             self.emit(f"{pad}_index = 0")
+        if item.starved is not None and item.starved.elements:
+            self.emit(f"{pad}_rs_{index} = {ANCHOR}")
         if counted:
             self.count(index, item.repeat, indent, indexed=indexed)
         elif isinstance(item.repeat, ToEnd):
@@ -1794,7 +1872,18 @@ class _Function:
         marked = not self.container(item) and (self.emits(item) or self.skips(item))
         if marked:
             self.emit(f"{inner}_emark = {ORIGIN}")
-        self.value(index, item, ELEMENT_LOCAL, indent + 4, self.element_path(item))
+        starved = item.starved if item.starved is not None and item.starved.elements else None
+        if starved is None:
+            self.value(index, item, ELEMENT_LOCAL, indent + 4, self.element_path(item))
+        else:
+            # A repetition that reads to the end: its first element takes
+            # everything, so a later one starts with nothing left. The loop's
+            # top is settled, so the anchor is exact here.
+            flag = f"_starved_{index}"
+            self.emit(f"{inner}{flag} = {ANCHOR} >= _size and {ANCHOR} > _rs_{index}")
+            self.emit(f"{inner}try:")
+            self.value(index, item, ELEMENT_LOCAL, indent + 8, self.element_path(item))
+            self.starve(flag, starved.detail, indent + 4)
         if marked:
             self.emit(f"{inner}_es, _ee = _emark, {self.end()}")
             self.account(
@@ -1817,9 +1906,11 @@ class _Function:
             # the field is not a reason to check: it decides whether the loop
             # runs, not whether an iteration of it gets anywhere.
             self.emit(f"{inner}if {ANCHOR} == _before:")
-            self.emit(
-                f'{inner}    raise Undecodable("a repetition consumed no input", {ANCHOR})'
+            spun = _literal(
+                f"repeated field {item.name!r} consumed no input; the repetition cannot "
+                "terminate"
             )
+            self.emit(f"{inner}    raise Undecodable({spun}, {ANCHOR})")
         if isinstance(item.repeat, Until):
             self.index_of = index
             condition = self.evaluate(
@@ -2342,6 +2433,29 @@ class _Function:
         self.lines.append(line)
 
 
+def _failing(where: str) -> list[str]:
+    """Return the handlers that turn a failed expression into ``Undecodable``.
+
+    Worded as the interpreter words it, and for division by zero fixed rather
+    than taken from Python: its text changed between versions, and a stream the
+    driver declines quotes it in the output (:mod:`kober.stage`), where the two
+    implementations have to agree on every Python this project supports.
+
+    Args:
+        where: The position expression to report the failure at.
+
+    Returns:
+        The ``except`` clauses, unindented, for the ``try`` just emitted.
+
+    """
+    return [
+        "except ZeroDivisionError as _exc:",
+        f'    raise Undecodable("division by zero", {where}) from _exc',
+        "except EvalError as _exc:",
+        f"    raise Undecodable(str(_exc), {where}) from _exc",
+    ]
+
+
 def _fallible(rendered: str) -> bool:
     """Whether a rendered expression can fail for some input.
 
@@ -2383,7 +2497,8 @@ def render_decoder(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.
     Args:
         plan: The plan to render.
         names: Its resolved identifiers, built if not supplied.
-        emit: The granularity to compile for. **A compile-time choice**, which
+        emit: The decoder's granularity; the entry unit's own ``emit`` wins
+            over it (as :func:`granularity` resolves it). **A compile-time choice**, which
             is the phase plan's answer to Q1's open sub-question: at
             ``MESSAGE`` these functions build no field paths and take no sink at
             all, and at ``FIELD`` the path is threaded through every one of
@@ -2397,6 +2512,7 @@ def render_decoder(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.
 
     """
     names = names or Names(plan)
+    emit = _root_granularity(plan, emit)
     inside = granularity(plan, emit)
     functions: list[str] = []
     for obj in plan.objects:
@@ -2446,13 +2562,15 @@ def render_entry(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.ME
     Args:
         plan: The plan to render.
         names: Its resolved identifiers, built if not supplied.
-        emit: The granularity to compile for.
+        emit: The decoder's granularity; the entry unit's own ``emit`` wins
+            over it (as :func:`granularity` resolves it).
 
     Returns:
         Python source for the entry points, without a trailing newline.
 
     """
     names = names or Names(plan)
+    emit = _root_granularity(plan, emit)
     cls = names.class_of(plan.entry)
     unit = _safe(plan.entry)
     arguments = ["cur"]
@@ -2992,8 +3110,9 @@ def render(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.MESSAGE)
     Args:
         plan: The plan to render.
         names: Its resolved identifiers, built if not supplied.
-        emit: The granularity to compile for, which decides what the module
-            emits and therefore what it is shaped like.
+        emit: The decoder's granularity, which decides what the module emits
+            and therefore what it is shaped like — unless the entry unit names
+            its own, which wins (as :func:`granularity` resolves it).
 
     Returns:
         Python source, newline terminated.
@@ -3005,6 +3124,7 @@ def render(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.MESSAGE)
 
     """
     names = names or Names(plan)
+    emit = _root_granularity(plan, emit)
     granularity(plan, emit)
     title = f"Decoder for the ``{_safe(plan.name)}`` specification, version {_safe(plan.version)}."
     lines = [f'"""{title}']
@@ -3055,7 +3175,7 @@ def render_spec(spec: Spec, *, emit: Emit = Emit.MESSAGE, check: bool = True) ->
 
     Args:
         spec: The spec to compile.
-        emit: The granularity to compile for.
+        emit: The decoder's granularity; the entry unit's own ``emit`` wins.
         check: Validate it before compiling, as
             :meth:`kober.ops.Plan.from_spec` does.
 

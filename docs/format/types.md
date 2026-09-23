@@ -406,7 +406,13 @@ So a unit containing either, at any depth, may only be referenced from the last
 position of its own unit, and so on up; and a `remaining` may only be the last
 field that reads anything in its unit. A spec that breaks this decodes no
 input: the field takes the bytes a later one needs and cites them as its own,
-and the later one reports `truncated` for a message that was complete.
+and the later one has nothing left to read.
+
+`check` refuses such a spec. Run anyway — `Decoder(spec, check=False)` — the
+starved field is reported **`undecodable`**, with the reason (`'trailer' has no
+bytes left: 'body' is unit 'inner', …`), not `truncated`. The bytes all arrived
+and the spec read them wrongly. `truncated` would say the message was cut
+short, which is a claim about the capture rather than the spec.
 
 ```yaml
 units:

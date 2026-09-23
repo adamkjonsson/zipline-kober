@@ -356,3 +356,82 @@ def const_cases(seed: int) -> list[bytes]:
 
     """
     return variants(CONST_MESSAGE, seed)
+
+
+#: Specs ``check`` refuses under the terminal rule, run anyway with
+#: ``check=False``: each has a field decoded after one that reads to the end of
+#: the message. Named for the shape, with the explanation the starved field must
+#: report and the name of the node that reads to the end.
+STARVED_SPECS: dict[str, tuple[str, str, str]] = {
+    "remaining not last": (
+        """
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: a, type: {int: {bits: 8}}}
+              - {name: body, type: {bytes: {size: {remaining: {}}}}}
+              - {name: crc, type: {int: {bits: 16}}}
+        """,
+        "'crc' has no bytes left: 'body' reads to the end of the message",
+        "body",
+    ),
+    "fill referenced early": (
+        """
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: inner, type: {unit: in}}
+              - {name: trailer, type: {int: {bits: 16}}}
+          in:
+            fields:
+              - {name: data, type: {bytes: {size: {fill: {}}}}}
+              - {name: tag, type: {int: {bits: 8}}}
+        """,
+        "'trailer' has no bytes left: 'inner' is unit 'in', which reads to the end of "
+        "the message through 'data'",
+        "inner",
+    ),
+    "repeated terminal unit": (
+        """
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: n, type: {int: {bits: 8}}}
+              - {name: recs, type: {unit: rec}, repeat: {count: "2"}}
+          rec:
+            fields:
+              - {name: tag, type: {int: {bits: 8}}}
+              - {name: data, type: {bytes: {size: {remaining: {}}}}}
+        """,
+        "the elements of 'recs' after the first have no bytes left: 'recs' is unit "
+        "'rec', which reads to the end of the message through 'data'",
+        "recs[0]",
+    ),
+}
+
+
+#: What every :data:`STARVED_SPECS` spec is fuzzed from: long enough that the
+#: field reading to the end has something to take.
+STARVED_MESSAGE = bytes.fromhex("0102030405")
+
+
+def starved_cases(seed: int) -> list[bytes]:
+    """Build one batch of variants for the specs the terminal rule refuses.
+
+    Args:
+        seed: Which batch.
+
+    Returns:
+        The batch.
+
+    """
+    return variants(STARVED_MESSAGE, seed)

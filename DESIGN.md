@@ -1,7 +1,7 @@
 # kober — design
 
 **Status:** implemented, exercised against real captures, and released as
-`0.x` — `v0.1.0`, `v0.2.0`, and now `0.3.0`, each pinning one `zpf` minor.
+`0.x` — `v0.1.0` to `v0.3.0`, and now `0.4.0`, each pinning one `zpf` minor.
 The spec model, expression language, checker, decode engine, emitter, stage
 driver, all five CLI verbs, the **compiler** (§14), and the `Pointer` construct
 (§3.2) exist, in both implementations. What is *not* built is marked as such:
@@ -11,7 +11,7 @@ everything in §11 that is still a question.
 `zpf` by [`pressure_test.py`](pressure_test.py), and since revision 6 against
 real captures too.
 
-Revision 10. Revision 1 was written blind and got the layer wrong — it invented
+Revision 11. Revision 1 was written blind and got the layer wrong — it invented
 reassembly, gaps, and provenance that `zpf` already provides. Revision 2 fixed
 that against the source. Revision 3 added the results of an executable pressure
 test (§10) and treated this project as what it is: **a load test of `zpf`, where
@@ -75,19 +75,6 @@ delimited read stop at one boundary without running past another — between the
 capture that had never been run decodes 2000 messages with no undecoded region
 where it used to leave 405 421 of its 414 460 bytes `undecodable`.
 
-Revision 10 follows the upstream projects, for `0.3.0`. Spec 0.21 answered the
-format-level question this project's own files raised — whether a stream of
-records that cite one another's bytes is a stream at all — with `adjacency`
-on the Participant Descriptor, and §5 gains its **wholesale form**: field
-granularity declares a unit sequence and message granularity declares nothing,
-which is not the same as `contiguous`. §14.3 lets a generated module say which
-granularity it was built at, since the driver now needs to know. §9 and §13.4
-stop calling fixed things open. And the checker gained the rule packeteer
-states for its dialect, that `remaining` and `fill` are measured against the
-message — a fault that passed `check`, cited the wrong bytes, and reported a
-hole the stream never had, invisible to every fixture because every fixture
-put the field last.
-
 The revision's real content is the same shape as revision 8's, one level in.
 Aggregation went into the **model** rather than into the expression language,
 which is the third real gap closed by making the declarative language say more
@@ -110,6 +97,31 @@ passes every coverage-shaped invariant the suite has — the byte it took would
 simply be covered by whatever followed — so the rule it is supposed to obey is
 asserted directly and each assertion is checked against an implementation that
 breaks it.
+
+Revision 10 follows the upstream projects, for `0.3.0`. Spec 0.21 answered the
+format-level question this project's own files raised — whether a stream of
+records that cite one another's bytes is a stream at all — with `adjacency`
+on the Participant Descriptor, and §5 gains its **wholesale form**: field
+granularity declares a unit sequence and message granularity declares nothing,
+which is not the same as `contiguous`. §14.3 lets a generated module say which
+granularity it was built at, since the driver now needs to know. §9 and §13.4
+stop calling fixed things open. And the checker gained the rule packeteer
+states for its dialect, that `remaining` and `fill` are measured against the
+message — a fault that passed `check`, cited the wrong bytes, and reported a
+hole the stream never had, invisible to every fixture because every fixture
+put the field last.
+
+Revision 11, for `0.4.0`, is about the **verdict** a file states, and moves one
+decision from the message to the stream. §3.1 gains stream confirmation: until
+a stream's first whole message it is not believed, and one that fails first,
+or never has a whole message, is declined. Nothing is kept for it, what was
+tried is `undecodable` and the rest `skipped`, and every region says why. The
+trade-off (a stream in the right protocol whose first message fails, or whose
+only message was cut short, is declined too) is stated there. §11.5's
+principle, that `truncated` must never be claimed for bytes that arrived, gets
+its second application: a field starved under `check=False`. And the entry
+unit's `emit` now wins over the decoder's in both implementations, as the
+chain in §4 always said.
 
 Claims below marked **[verified]** were executed, not reasoned about: against
 `zpf` 0.16 by the script in §10, and against real captures as recorded in §13.
@@ -166,6 +178,10 @@ when this doesn't match":
 - a length field pointing past the end of the segment → `reason="truncated"`
 - a field landing inside a `Gap` → `reason="gap"`
 - a region the spec deliberately ignores (padding, encrypted body) → `reason="skipped"`
+- a stream that fails before its first whole message, or ends without one → the
+  stream is **declined**: no record for any of it, what was tried
+  `undecodable` and the rest `skipped`, every region commented `not <spec>: …`
+  (§3.1, *A stream is confirmed before it is believed*)
 
 **What the guarantee is not: leaves do not tile the input.** Until `Pointer`
 (§3.2) existed, every leaf covered a distinct range and the leaves together
@@ -401,7 +417,8 @@ class Field:
 
 `confirm`/`reject` survive from revision 1 and matter more here than they did
 in Spicy, because rejecting cleanly is how a wrong protocol guess becomes an
-honest `undecodable` region instead of a fabricated field tree.
+honest `undecodable` region instead of a fabricated field tree — and, on a
+stream's first message, how a whole stream is declined (below).
 
 `const` is the same need one field wide, and the timing is why it is not just a
 `confirm`. A guard runs **once the unit's fields are decoded**; a run holds as
@@ -417,6 +434,73 @@ constant is not a spec-side value that vanishes from the output. The compiled
 decoder raises `Undecodable` where the interpreter records the verdict, which
 is the split `errors.py` documents, and both name the same region: the refused
 field's own bytes, which no record claims because the record is never written.
+
+#### A stream is confirmed before it is believed (0.4.0)
+
+A verdict on one message is the wrong unit for a wrong-protocol guess, because
+a guess is about the stream. Until 0.4.0 a foreign UDP stream yielded one
+`undecodable` region per datagram, each after a fresh attempt, and a foreign
+TCP stream was tried again after every gap. At field granularity every field
+read before the failure was written as a real record, which is the fabricated
+tree `const` and `confirm` exist to prevent. The rule is Zeek's for dynamic
+protocol detection (#32), applied in the driver alone. The decoder and every
+construct are untouched:
+
+- A stream is **confirmed** by its first whole message. Until then everything
+  the driver writes for it is held, and the confirming message releases it
+  unchanged. A stream that confirms writes exactly what it wrote before.
+- A stream is **declined** by an `undecodable` before confirmation, or by
+  reaching its end unconfirmed. Held records are discarded. Every run or
+  datagram that was tried is `undecodable` across its whole extent (the
+  discarded records cited those bytes, and something must name them). Every
+  one after the decision is `skipped` without being tried. Gaps stay gaps.
+- Every `undecodable` and `skipped` region of a declined stream carries the
+  comment `not <spec>: <detail>, stopped at offset <n>`, or `not <spec>: no
+  message decoded; every attempt ran out of input` for one that ended
+  unconfirmed. The detail is quoted, so both implementations word every
+  `undecodable` failure identically; the differential asserts it.
+- After confirmation nothing changes. A failure is a desync in the right
+  protocol, worth resynchronising after.
+
+**Why split the reason.** Both are in `zpf`'s *bytes exist* class, so both are
+equally recoverable by a later stage. The spec says the three bytes-exist
+reasons "differ in intent, not in recoverability". The first run *was* tried
+and failed; the rest were declined on purpose. A consumer counting genuinely
+unparsed bytes, the use the spec names, sees the attempt and not the stream.
+
+**Why the end of the stream declines.** A spec reading a foreign stream does not
+always fail `undecodable`. The HTTP spec over plain text looks for a line ending
+that never comes, and every attempt is `truncated`, which is hole-class. So a
+rule that declined only on `undecodable` would leave the file claiming a hole
+the capture never had, 71617 bytes of it for `packet_loss` under `http.yaml`.
+
+**The trade-off, accepted with open eyes.** Two kinds of stream in the right
+protocol are declined as well, because nothing distinguishes them from a
+foreign one before a message has decoded:
+
+1. A stream whose **first message is `undecodable`** (corrupt, or a case the
+   spec does not describe yet). Its later, good messages are `skipped`. This
+   bears on iterative decoding in particular: a partial spec meeting an unknown
+   case in a flow's first message loses the flow.
+2. A stream whose **only message was cut short**, by a capture that stopped or
+   a loss before anything completed. It was `truncated`, which was true, and is
+   `not http: …` now.
+
+Neither occurs in the 22 real captures this project tests against, where every
+declined stream is foreign. The nearest is a request direction of `GET\r\n`,
+with no version and no end, on a loss-and-reordering fixture. It is declined,
+and not wrongly. The cost is paid for what it buys on the streams that
+*are* foreign, which is most of the streams any spec meets. The pipeline
+(`tools/pipeline.py`) prints how many streams each output declined, so a
+change in that is visible. Two things were weighed and left out. A spec key
+naming the identifying fields (`magic: true`) would be a second thing to teach
+for what the timing already separates. A switch to turn confirmation off would
+be a way to write the fabricated trees back.
+
+Confirmation is per stream: per direction of a TCP session, per participant of a
+chained stage's input. Held output costs memory in proportion to the
+unconfirmed prefix, which for a stream that never confirms is all of it, since
+the decline that ends it cannot come earlier.
 
 `Spec.foreign` holds the keys a document used that belong to **packeteer's**
 dialect of this format — `over`, `ports`, `derive`, `sensitive`. Recognised,
@@ -522,6 +606,16 @@ Out-of-range, cyclic, forward and garbage targets all produce `undecodable`
 regions and none of them raise. A short read *inside* a target is converted to
 `undecodable` rather than propagated as `truncated`, because `truncated` is
 hole-class (§5) and would claim the stream had a gap it did not have.
+
+The same principle has a second application, outside `pointer`. A spec that
+breaks the terminal rule — a field that reads input after one that reads to
+the end of the message — is refused by `check`, but `check=False` runs it, and
+there the starved field's short read is the spec's fault and not the input's.
+Both backends precompute the starved fields (`kober.check.starved_fields`, as
+they do `fill_widths`) and report such a read `undecodable` with the reason.
+They do so only when the field started with nothing left to read, since
+`check` ignores conditions and a `remaining` that was absent from a message
+starves nothing: a field after it that runs out is really `truncated`.
 
 #### `Select` — asking a question about a repetition, revision 9
 

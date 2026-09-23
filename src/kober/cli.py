@@ -125,7 +125,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--emit",
         choices=[Emit.MESSAGE.value, Emit.FIELD.value],
         default=Emit.MESSAGE.value,
-        help="one record per message (default) or per field",
+        help=(
+            "one record per message (default) or per field. The default only: a "
+            "unit's own emit wins over it, the entry unit's included"
+        ),
     )
     runner.add_argument(
         "--produced-by",
@@ -147,8 +150,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=Emit.MESSAGE.value,
         help=(
             "granularity to compile for: one record per message (default), one per "
-            "field, or none at all. A compile-time choice the module records in "
-            "EMIT but cannot change — at message granularity it builds no field "
+            "field, or none at all. The default only: a unit's own emit wins over "
+            "it, the entry unit's included. A compile-time choice the module records "
+            "in EMIT but cannot change — at message granularity it builds no field "
             "paths at all"
         ),
     )

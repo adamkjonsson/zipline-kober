@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+import re
 import struct
 import sys
 from pathlib import Path
@@ -33,18 +34,22 @@ from fuzzing import (
     SEEDS,
     SELECT_MESSAGE,
     SELECT_SPEC,
+    STARVED_MESSAGE,
+    STARVED_SPECS,
     cases,
     const_cases,
     framing_cases,
     pointer_cases,
     select_cases,
+    starved_cases,
     variants,
 )
-from zpf.blocks import UNDECODED_REASONS, Participant, Record, Undecoded
+from zpf.blocks import UNDECODED_REASONS
+from zpfcompare import assert_conformant, blocks
 
 from kober.cli import main
 from kober.decoder import Decoder
-from kober.emit import Emission, Unclaimed, plan
+from kober.emit import Emission, Unclaimed, plan, root_emit
 from kober.errors import CompileError, EvalError, TruncatedRead, Undecodable
 from kober.node import Node, NodeStatus
 from kober.ops import Plan
@@ -95,7 +100,7 @@ HTTP_MESSAGES = [
 _MODULES: dict[str, ModuleType] = {}
 
 
-def compiled(spec: Spec, emit: Emit = Emit.MESSAGE) -> ModuleType:
+def compiled(spec: Spec, emit: Emit = Emit.MESSAGE, *, check: bool = True) -> ModuleType:
     """Compile a spec and import the module, without going through a file.
 
     Registered in ``sys.modules`` because ``dataclasses`` looks a class's module
@@ -103,7 +108,7 @@ def compiled(spec: Spec, emit: Emit = Emit.MESSAGE) -> ModuleType:
     also true of a generated module a consumer imports normally, so nothing is
     being papered over.
     """
-    source = render(Plan.from_spec(spec), emit=emit)
+    source = render(Plan.from_spec(spec, check=check), emit=emit)
     if source in _MODULES:
         return _MODULES[source]
     name = f"compiled_{spec.name}_{len(_MODULES)}"
@@ -221,7 +226,7 @@ def merged(regions: list[Unclaimed]) -> list[Unclaimed]:
 
 
 def interpreted(
-    spec: Spec, data: bytes, emit: Emit, base: int = 0
+    spec: Spec, data: bytes, emit: Emit, base: int = 0, *, check: bool = True
 ) -> tuple[list[Emission], list[Unclaimed]]:
     """Return what the interpreter would write for ``data``, tail included.
 
@@ -229,7 +234,7 @@ def interpreted(
     so the driver's part is done here — otherwise the two sides would be compared
     over different amounts of input.
     """
-    tree = Decoder(spec).decode_bytes(data, base=base)
+    tree = Decoder(spec, check=check).decode_bytes(data, base=base)
     emissions, unclaimed = plan(spec, tree, data, emit=emit, base=base)
     end = base + len(data)
     if tree.off_end < end:
@@ -239,18 +244,20 @@ def interpreted(
 
 
 def emitted(
-    spec: Spec, data: bytes, emit: Emit, base: int = 0
+    spec: Spec, data: bytes, emit: Emit, base: int = 0, *, check: bool = True
 ) -> tuple[list[Emission], list[Unclaimed]]:
     """Return what the generated module writes for ``data``."""
     sink = RecordingSink()
-    compiled(spec, emit).decode(data, base=base, sink=sink)
+    compiled(spec, emit, check=check).decode(data, base=base, sink=sink)
     sink.finish()
     return sink.records, sink.regions
 
 
-def writes(spec: Spec, data: bytes, emit: Emit, base: int = 0) -> None:
+def writes(spec: Spec, data: bytes, emit: Emit, base: int = 0, *, check: bool = True) -> None:
     """Require both implementations to write the same thing for ``data``."""
-    assert emitted(spec, data, emit, base) == interpreted(spec, data, emit, base)
+    assert emitted(spec, data, emit, base, check=check) == interpreted(
+        spec, data, emit, base, check=check
+    )
 
 
 def compare(spec: Spec, data: bytes, base: int = 0) -> None:
@@ -274,6 +281,11 @@ def compare(spec: Spec, data: bytes, base: int = 0) -> None:
         )
         assert REASONS[type(exc)] == tree.status.value, f"different reasons for {data!r}"
         assert stopped == tree.off_end, f"stopped at {stopped}, interpreter at {tree.off_end}"
+        if tree.status is NodeStatus.UNDECODABLE:
+            # Quoted in the comment on a stream the driver declines, so a
+            # difference in wording is a difference in the file. `truncated`
+            # is never quoted, and its wording is free to differ.
+            assert str(exc) == tree.detail, f"different details for {data!r}"
         return
 
     assert tree.status is NodeStatus.OK, (
@@ -820,6 +832,228 @@ def test_a_unit_reached_at_two_granularities_is_refused():
         compiled(spec, Emit.FIELD)
 
 
+def entry_at(granularity: Emit) -> Spec:
+    """Return a two-field spec whose entry unit names its own granularity."""
+    return inline(f"""
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            emit: {granularity.value}
+            fields:
+              - {{name: tag, type: {{int: {{bits: 16}}}}}}
+              - {{name: body, type: {{int: {{bits: 16}}}}}}
+    """)
+
+
+#: What each granularity writes for ``entry_at`` over four bytes: the records,
+#: then the regions.
+AT_ENTRY = {
+    Emit.FIELD: ([("prim:u16", "t.tag", 0, 2), ("prim:u16", "t.body", 2, 4)], []),
+    Emit.MESSAGE: ([("dec:t-message", None, 0, 4)], []),
+    Emit.NONE: ([], [(0, 4, "skipped")]),
+}
+
+
+@pytest.mark.parametrize("default", list(Emit), ids=lambda e: f"decoder-{e.value}")
+@pytest.mark.parametrize("own", list(Emit), ids=lambda e: f"entry-{e.value}")
+def test_the_entry_units_own_emit_wins_over_the_decoders(own: Emit, default: Emit):
+    """Regression for #40: field, then unit, then enclosing unit, then decoder.
+
+    The entry unit is a unit, so its own ``emit`` wins over the decoder's for
+    the whole message. Every nested unit already worked that way; the entry did
+    not, in either backend. The interpreter branched on the entry's setting and
+    then walked the leaves with the decoder's, so an entry marked ``field`` was
+    walked at ``--emit none`` and every leaf skipped. The compiler never read
+    the entry's setting at all, so at ``--emit message`` it wrote one message
+    record where the entry asked for fields. Each backend is asserted on its own
+    as well as against the other, so that when they disagree the failure says
+    which one is wrong.
+    """
+    spec = entry_at(own)
+    data = bytes.fromhex("12345678")
+    records, regions = AT_ENTRY[own]
+    for side in (interpreted, emitted):
+        written, unclaimed = side(spec, data, default)
+        assert [(r.content_type, r.role, r.off_start, r.off_end) for r in written] == records, (
+            side.__name__
+        )
+        assert [(u.off_start, u.off_end, u.reason) for u in unclaimed] == regions, side.__name__
+    writes(spec, data, default)
+
+
+@pytest.mark.parametrize("default", list(Emit), ids=lambda e: f"decoder-{e.value}")
+def test_a_module_records_the_granularity_its_entry_resolved_to(default: Emit):
+    """``EMIT`` is what the entry resolved to, not the flag the compiler was given.
+
+    It is what the stage driver declares the output's adjacency from, so it has
+    to agree with what the interpreter's driver derives from the same spec.
+    """
+    spec = entry_at(Emit.FIELD)
+    assert compiled(spec, default).EMIT == root_emit(spec, default).value == "field"
+
+
+def test_a_file_from_an_entry_marked_field_is_the_same_file_both_ways(tmp_path: Path):
+    """The whole file, participant line included, at the granularity #40 broke."""
+    spec = entry_at(Emit.FIELD)
+    source = tmp_path / "transport.zpf"
+    write_transport(source, bytes.fromhex("12345678"), bytes.fromhex("9abc"))
+    from_compiler = tmp_path / "compiled.zpf"
+    run_stage(spec, Emit.MESSAGE, source, from_compiler)
+    from_interpreter = tmp_path / "interpreted.zpf"
+    Decoder(spec, emit=Emit.MESSAGE).run(
+        source, from_interpreter, produced_by="kober compiler", produced_at=1_700_000_000
+    )
+    written = blocks(from_compiler)
+    assert written == blocks(from_interpreter)
+    assert {block[2] for block in written if block[0] == "participant"} == {zpf.Adjacency.UNITS}
+    assert_conformant(from_compiler, source)
+
+
+#: Every place an expression is evaluated, each dividing by a value off the
+#: wire: what a unit adds, and what its field list ends with.
+FAILING_AT = {
+    "condition": ("", '- {name: y, type: {int: {bits: 8}}, condition: "10 / x == 1"}'),
+    "size": ("", '- {name: y, type: {bytes: {size: {expr: "10 / x"}}}}'),
+    "count": ("", '- {name: y, type: {int: {bits: 8}}, repeat: {count: "10 / x"}}'),
+    "until": ("", '- {name: y, type: {int: {bits: 8}}, repeat: {until: "10 / x == y"}}'),
+    "computed": ("", '- {name: y, type: {computed: "10 / x"}}'),
+    "modulo": ("", '- {name: y, type: {computed: "10 % x"}}'),
+    "dispatch": (
+        "",
+        '- {name: y, type: {switch: {dispatch: "10 / x", cases: {1: {int: {bits: 8}}}}}}',
+    ),
+    "confirm": ('confirm: "10 / x == 1"', ""),
+    "reject": ('reject: "10 / x == 1"', ""),
+}
+
+
+@pytest.mark.parametrize("where", sorted(FAILING_AT))
+def test_an_expression_that_fails_is_worded_the_same_in_both(where: str):
+    """Same reason, same offset, and the same words, wherever the expression is.
+
+    The words matter since #32: a stream declined on a failure quotes its detail
+    in the output, and the two drivers' files must be identical. The two
+    implementations had drifted in four of these — the interpreter prefixed a
+    condition's and a guard's failure, said ``modulo by zero`` where a compiled
+    module could only say ``division``, and a compiled module took the text of
+    a division by zero from Python, whose wording changed at 3.14.
+    """
+    unit, field = FAILING_AT[where]
+    spec = inline(
+        "name: t\nversion: \"1\"\nentry: m\nunits:\n  m:\n"
+        + (f"    {unit}\n" if unit else "")
+        + "    fields:\n      - {name: x, type: {int: {bits: 8}}}\n"
+        + (f"      {field}\n" if field else "")
+    )
+    data = b"\x00\x01\x02"
+    tree = Decoder(spec).decode_bytes(data)
+    assert (tree.status, tree.detail) == (NodeStatus.UNDECODABLE, "division by zero")
+    compare(spec, data)
+    for emit in (Emit.FIELD, Emit.MESSAGE):
+        writes(spec, data, emit)
+
+
+# --- a field the spec leaves no bytes for (#43) ----------------------------
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+@pytest.mark.parametrize("name", sorted(STARVED_SPECS))
+def test_a_starved_field_is_undecodable_not_truncated(name: str, emit: Emit):
+    """Regression for #43: the input was whole, and the spec read it wrongly.
+
+    ``truncated`` is hole-class: it says bytes never arrived, and a file that
+    says so declares a break in a stream that had none. The bytes the starved
+    field needed were read, and cited, by the field before it — so what is true
+    is ``undecodable``, with the reason. Both backends, through the same
+    comparison every other differential uses.
+    """
+    source, detail, _ = STARVED_SPECS[name]
+    spec = inline(source)
+    data = STARVED_MESSAGE
+    tree = Decoder(spec, check=False).decode_bytes(data)
+    assert (tree.status, tree.detail) == (NodeStatus.UNDECODABLE, detail)
+    with pytest.raises(Undecodable, match=re.escape(detail)):
+        compiled(spec, emit, check=False).decode_from(Cursor(data, 0))
+    written, unclaimed = interpreted(spec, data, emit, check=False)
+    assert all(region.reason != "truncated" for region in unclaimed)
+    if emit is Emit.MESSAGE:
+        assert written == []
+        assert [(u.off_start, u.off_end, u.reason) for u in unclaimed] == [(0, 5, "undecodable")]
+    writes(spec, data, emit, check=False)
+
+
+def test_a_starved_field_is_named_only_when_nothing_was_left():
+    """Short input is still short input, under the same refused spec.
+
+    ``check`` does not look at conditions, so it lists ``crc`` as starved even
+    though ``body`` is absent whenever ``flag`` is not 1. Then nothing read to
+    the end, and a ``crc`` cut short by a short message is a real
+    ``truncated``. The guard is that a starved field is converted only when it
+    started with nothing left, which is what follows a real ``remaining`` and
+    is not what follows a missing one.
+    """
+    spec = inline("""
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: flag, type: {int: {bits: 8}}}
+              - {name: body, type: {bytes: {size: {remaining: {}}}}, condition: "flag == 1"}
+              - {name: crc, type: {int: {bits: 16}}}
+    """)
+    cases = ((b"\x00\xaa", NodeStatus.TRUNCATED), (b"\x01\xaa", NodeStatus.UNDECODABLE))
+    for data, status in cases:
+        assert Decoder(spec, check=False).decode_bytes(data).status is status, data
+        for emit in (Emit.FIELD, Emit.MESSAGE):
+            writes(spec, data, emit, check=False)
+
+
+def test_the_first_element_of_a_repeated_terminal_unit_may_still_run_out():
+    """Only the elements *after* the first are starved; the first is ordinary.
+
+    Over one byte, ``n`` takes it and the first element's ``tag`` starts with
+    nothing left — because the message ended, not because a field before it
+    read to the end, which is exactly what ``truncated`` means. Asserted on each
+    backend directly as well as through the output, since at field granularity
+    the zero-width failure leaves no region to compare.
+    """
+    spec = inline(STARVED_SPECS["repeated terminal unit"][0])
+    data = b"\x01"
+    assert Decoder(spec, check=False).decode_bytes(data).status is NodeStatus.TRUNCATED
+    with pytest.raises(TruncatedRead):
+        compiled(spec, Emit.MESSAGE, check=False).decode_from(Cursor(data, 0))
+    for emit in (Emit.FIELD, Emit.MESSAGE):
+        writes(spec, data, emit, check=False)
+
+
+def test_a_fill_on_a_short_run_is_still_truncated():
+    """The ordinary use of ``fill``, which passes ``check``, is not touched.
+
+    A run too short for the trailer fails at the fill itself, before anything is
+    starved — the case the phase plan feared a broader rule would misname.
+    """
+    spec = awkward("fill")
+    tree = Decoder(spec).decode_bytes(b"\x03HE")
+    assert tree.status is NodeStatus.TRUNCATED
+    writes(spec, b"\x03HE", Emit.FIELD)
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+@pytest.mark.parametrize("name", sorted(STARVED_SPECS))
+def test_the_two_agree_on_starved_fields_over_mutated_input(name: str, emit: Emit):
+    """Same verdict, same offset, same regions, whatever the input does to the guard."""
+    spec = inline(STARVED_SPECS[name][0])
+    for data in starved_cases(3):
+        try:
+            writes(spec, data, emit, check=False)
+        except AssertionError as exc:
+            exc.add_note(f"disagreed: {name!r} {emit.value} on {data!r}")
+            raise
+
+
 # --- through a real decode stage --------------------------------------------
 
 
@@ -843,39 +1077,6 @@ def run_stage(spec: Spec, emit: Emit, source: Path, sink: Path) -> None:
         produced_by="kober compiler",
         produced_at=1_700_000_000,
     )
-
-
-def blocks(path: Path) -> list[tuple[object, ...]]:
-    """Return what a decoded file says, in file order.
-
-    Records and undecoded regions both, since a difference in either is a
-    difference in the file — and each participant's declared adjacency, since
-    that is a statement about every record in it, derived separately by each
-    implementation. Read from the raw block stream rather than the session
-    views, because the order the two implementations write in is part of what
-    is being compared.
-    """
-    out: list[tuple[object, ...]] = []
-    with zpf.open(path) as handle:
-        for block in handle.blocks():
-            if isinstance(block, Participant):
-                out.append(("participant", block.participant_id, zpf.Adjacency(block.adjacency)))
-            elif isinstance(block, Record):
-                spans = tuple((s.off_start, s.off_end) for s in block.spans)
-                out.append(("record", block.content_type, block.role, block.payload, spans))
-            elif isinstance(block, Undecoded):
-                out.append(("undecoded", block.reason, block.off_start, block.off_end))
-    return out
-
-
-def assert_conformant(path: Path, source: Path) -> None:
-    """Fail unless the file passes conformance and accounts for its input."""
-    checker = zpf.ConformanceChecker()
-    with zpf.open(path) as handle:
-        checker.check(handle.blocks())
-    checker.finish()
-    assert checker.coverage_findings() == []
-    assert zpf.check_coverage(path, source) == []
 
 
 @pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
@@ -1220,6 +1421,27 @@ AWKWARD["text arithmetic"] = """
             condition: "lower(size) == size"
 """
 
+AWKWARD["entry granularity"] = """
+    name: entry
+    version: "1"
+    entry: m
+    units:
+      m:
+        emit: field
+        fields:
+          - {name: kind, type: {int: {bits: 8}}}
+          - {name: quiet, type: {unit: inner}, emit: none}
+          - {name: loud, type: {unit: other}}
+          - {name: tail, type: {bytes: {size: {remaining: true}}}}
+      inner:
+        fields:
+          - {name: a, type: {int: {bits: 4}}}
+          - {name: b, type: {int: {bits: 4}}}
+      other:
+        fields:
+          - {name: c, type: {int: {bits: 16}}}
+"""
+
 AWKWARD_SEEDS: dict[str, bytes] = {
     "bitfields": bytes(range(1, 12)),
     "signed and wide": bytes(range(0x80, 0x90)),
@@ -1234,6 +1456,7 @@ AWKWARD_SEEDS: dict[str, bytes] = {
     # real owner name makes when it points into an earlier record's rdata.
     "back-reference": bytes([0xAA, 0xBB, 0xCC, 0xDD, 1, 9, 9, 9]),
     "text arithmetic": b"1a\r\n" + b"x" * 26 + b"rest",
+    "entry granularity": bytes([7, 0xA5, 0x12, 0x34]) + b"tail",
 }
 
 
@@ -1773,12 +1996,12 @@ def test_a_conditional_repeat_of_a_consuming_element_needs_no_progress_guard():
     can never fire here — its absence is invisible to any decode.
     """
     source = render(Plan.from_spec(inline(CONDITIONAL_REPEAT)))
-    assert "a repetition consumed no input" not in source
+    assert "the repetition cannot terminate" not in source
     # And with the same shape over an element that reads nothing, it is there.
     reading_nothing = CONDITIONAL_REPEAT.replace(
         '{unit: item}', '{computed: "flag"}'
     ).replace('repeat: {to_end: true}', 'repeat: {count: "flag"}')
-    assert "a repetition consumed no input" in render(Plan.from_spec(inline(reading_nothing)))
+    assert "the repetition cannot terminate" in render(Plan.from_spec(inline(reading_nothing)))
 
 
 @pytest.mark.parametrize(

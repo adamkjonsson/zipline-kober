@@ -886,8 +886,11 @@ def _eval_binary(expr: BinOp, env: Environment) -> ExprValue:
         return left * right
     if expr.op in ("/", "%"):
         if right == 0:
-            what = "division" if expr.op == "/" else "modulo"
-            msg = f"{what} by zero"
+            # One wording for both operators, as Python's own gives since 3.14.
+            # A compiled module cannot tell the two apart once the division
+            # has failed, and a stream the driver declines quotes this in the
+            # file, where the two implementations must say the same thing.
+            msg = "division by zero"
             raise EvalError(msg)
         # Floor, matching the `//` spelling the parser folds into this same
         # operator. Wire values are non-negative, where floor and

@@ -215,8 +215,11 @@ def plan(
             )
     elif granularity is Emit.FIELD:
         # Paths are rooted at the *spec* name, not the entry unit's, matching
-        # `dns.flags.qr` in §4.1 and the pressure test.
-        _walk(spec, tree, [spec.name], emit, emissions, unclaimed)
+        # `dns.flags.qr` in §4.1 and the pressure test. The walk starts from the
+        # granularity the root resolved to, not the decoder's: the entry is a
+        # unit, and a unit's setting is the default inside it, here as at every
+        # container `_walk` meets below.
+        _walk(spec, tree, [spec.name], granularity, emissions, unclaimed)
     elif tree.width:
         unclaimed.append(Unclaimed(tree.off_start, tree.off_end, NodeStatus.SKIPPED.value))
 
