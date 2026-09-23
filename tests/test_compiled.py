@@ -40,7 +40,8 @@ from fuzzing import (
     select_cases,
     variants,
 )
-from zpf.blocks import UNDECODED_REASONS, Participant, Record, Undecoded
+from zpf.blocks import UNDECODED_REASONS
+from zpfcompare import assert_conformant, blocks
 
 from kober.cli import main
 from kober.decoder import Decoder
@@ -843,39 +844,6 @@ def run_stage(spec: Spec, emit: Emit, source: Path, sink: Path) -> None:
         produced_by="kober compiler",
         produced_at=1_700_000_000,
     )
-
-
-def blocks(path: Path) -> list[tuple[object, ...]]:
-    """Return what a decoded file says, in file order.
-
-    Records and undecoded regions both, since a difference in either is a
-    difference in the file — and each participant's declared adjacency, since
-    that is a statement about every record in it, derived separately by each
-    implementation. Read from the raw block stream rather than the session
-    views, because the order the two implementations write in is part of what
-    is being compared.
-    """
-    out: list[tuple[object, ...]] = []
-    with zpf.open(path) as handle:
-        for block in handle.blocks():
-            if isinstance(block, Participant):
-                out.append(("participant", block.participant_id, zpf.Adjacency(block.adjacency)))
-            elif isinstance(block, Record):
-                spans = tuple((s.off_start, s.off_end) for s in block.spans)
-                out.append(("record", block.content_type, block.role, block.payload, spans))
-            elif isinstance(block, Undecoded):
-                out.append(("undecoded", block.reason, block.off_start, block.off_end))
-    return out
-
-
-def assert_conformant(path: Path, source: Path) -> None:
-    """Fail unless the file passes conformance and accounts for its input."""
-    checker = zpf.ConformanceChecker()
-    with zpf.open(path) as handle:
-        checker.check(handle.blocks())
-    checker.finish()
-    assert checker.coverage_findings() == []
-    assert zpf.check_coverage(path, source) == []
 
 
 @pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)

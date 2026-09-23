@@ -122,6 +122,7 @@ python -m venv .venv
     pointers it always had — count `.target` records to know.
     If it lacks a protocol, write one as a `packeteer protocol` spec (0.11.0)
     rather than filing; file when that language cannot express it.
-  - The deeper pipeline is in the README, under Fuzzing. Run it before a
-    release or after touching the stage driver — it is the only thing that
-    reaches the driver, and it is what found the seam bug.
+  - The deeper pipeline is `tools/pipeline.py` (`docs/dev/testing.md`, *The
+    deeper pipeline*). Run it before a release or after touching the stage
+    driver — it is the only thing that reaches the driver, and it is what
+    found the seam bug. `--baseline DIR` shows which outputs a change moved.

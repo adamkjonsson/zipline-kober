@@ -22,6 +22,26 @@ minor bump here too.
 
 ## [Unreleased]
 
+### Documentation
+
+- **The deeper pipeline is a script**, `tools/pipeline.py`
+  ([#44](https://github.com/adamkjonsson/zipline-kober/issues/44)). The
+  release checklist required it, but it existed only as shell recipes in the
+  README and `docs/dev/testing.md`, and the 0.3.0 run of it was a script
+  written for that release and never checked in. It now runs as one command
+  over eight inputs (fuzzed and generated DNS, generated chunked HTTP with
+  and without loss, four real captures), through both example specs, both
+  drivers and both granularities. It checks every output for conformance and
+  coverage, compares each interpreter/compiled pair block for block, and
+  checks the decoded shape. On a lossless HTTP stream the shape is counted
+  against a small independent reader of the message framing, which catches
+  the trailer bug that bounds on the counts missed. `--baseline DIR` reports
+  every output that differs from an earlier run. The README's *Fuzzing*
+  section, `docs/dev/testing.md` and the release checklist in
+  `docs/dev/contributing.md` now point at the script. `docs/dev/testing.md`
+  also corrects a miscount: the fuzzed DNS capture follows 252 compression
+  pointers, and 1932 is the number of records read through them.
+
 ## [0.3.0] - 2026-09-19
 
 **The alignment release.** Nothing here changes what kober decodes; the

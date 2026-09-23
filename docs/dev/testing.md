@@ -33,6 +33,7 @@ itself came from the second kind, and none of them needed a clever test.
 | `test_compiled.py` | **The differential**, and the fuzzing of it. See below. |
 | `test_fuzz.py` | **The interpreter's invariants**, over adversarial input. See below. |
 | `fuzzing.py` | Not a test: the mutators, shared so both implementations are fuzzed with the same inputs. |
+| `zpfcompare.py` | Not a test: what "conformant" and "the same file, block for block" mean, shared by the suite and by `tools/pipeline.py` so the two cannot come to mean different things. |
 
 ## Two implementations, and the test that compares them
 
@@ -117,45 +118,61 @@ stage driver**, which needs real stream structure: gaps, truncated messages
 between whole ones, several records per run. That is exactly where the seam bug
 lived, and it is why this pipeline exists.
 
-Two sibling checkouts, neither a dependency of this project:
+It is one command, and **run it before a release, or after touching
+`stage.py`**:
 
 ```bash
-# Adversarial variants of a real capture, then convert, then decode.
-../packeteer/.venv/bin/packeteer fuzz \
-    ../python-zipline-wire/tests/captures/dns_example.pcapng \
-    --pcap /tmp/fuzz.pcap --seed 1
-../python-zipline-wire/.venv/bin/zpfwire convert /tmp/fuzz.pcap -o /tmp/fuzz.zpf
-.venv/bin/kober run examples/dns.yaml /tmp/fuzz.zpf -o /tmp/out.zpf --emit field
+.venv/bin/python tools/pipeline.py
 ```
 
-Then put the output past `zpf.ConformanceChecker` and `zpf.check_coverage`.
-**Run this before a release, or after touching `stage.py`.**
+It needs two sibling checkouts with their own venvs, neither a dependency of
+this project — `../packeteer` and `../python-zipline-wire`, or wherever
+`--packeteer` and `--wire` say. It builds eight inputs:
 
-The compiled path is worth running over the same file, since both drive the same
-`stage.py` and should write the same one — compare the two files block for
-block, participant lines included, as `tests/test_compiled.py::blocks` does:
+| Input | What it is for |
+| --- | --- |
+| `dns_fuzz` | `packeteer fuzz --seed 1` over `dns_example.pcapng`: adversarial variants of real DNS, compression pointers and all. |
+| `dns_gen` | A generated, lossy DNS stream whose response is compressed — `raw:` bytes from `tools/dns-messages.json`, since a built message carries no pointer (see *Generated DNS* below). |
+| `http_gen` | Generated chunked HTTP with trailers at `--mss 200` on a 5% lossy link: chunk boundaries across segment boundaries, and losses mid-body. |
+| `http_clean` | The same traffic with no loss, so its shape can be checked exactly. |
+| `packet_loss`, `tcp_lossy_ts`, `tcp_reorder_ts` | Real captures kept for their loss and reordering. They are not DNS or HTTP; they are driver structure. |
+| `http_stream_1` | A real HTTP capture, 2000 messages, lossless. |
 
-```bash
-.venv/bin/kober compile examples/dns.yaml -o /tmp/dns.py --emit field
-.venv/bin/python -c "import sys; sys.path.insert(0, '/tmp'); import dns; \
-    from kober.stage import run_compiled; \
-    run_compiled(dns, '/tmp/fuzz.zpf', '/tmp/compiled.zpf', \
-                 produced_by='kober', produced_at=0)"
-```
+Each is converted with `zpfwire convert` and run through **both** example specs
+— a spec meeting a stream in another protocol is a case the driver has to
+handle too — by the interpreter and by a module compiled fresh from the spec, at
+both granularities: 64 files. For each, it checks:
 
-Compile the module fresh each time. `run_compiled` reads the granularity from
-the module's `EMIT` and refuses one that has none — a module left over from a
-kober before 0.3.0 — rather than write a participant line it cannot vouch for.
+- **Conformance and coverage**: `zpf.ConformanceChecker` and
+  `zpf.check_coverage`.
+- **The pair**: the interpreter's and the compiled module's files identical
+  block for block, participant adjacency and region comments included, as
+  `tests/zpfcompare.py` defines it — the same definition the differential
+  tests use.
+- **The shape**, at field granularity over an input in the spec's own protocol.
+  For DNS, how many compression pointers were followed and how many records
+  were read through them. For HTTP over a lossless stream, the start lines,
+  chunk sizes and trailer lines must equal what a small independent reader of
+  RFC 7230 framing in the script counts from the same bytes; over a lossy one,
+  there must be no more start lines than messages sent, since the bug this
+  shape exists to catch is a message that stops early and leaves its tail to
+  be read as more messages.
 
-The `0.3.0` run of this pipeline, on `zpf` 0.5.0, took seven inputs — the
-fuzzed DNS capture above, a generated DNS stream carrying a compressed
-response, the impaired chunked HTTP stream below, and four real captures
-(`packet_loss`, `http_stream_1`, `tcp_lossy_ts`, `tcp_reorder_ts`) — through
-both drivers at both granularities: 28 files, every one conformant with full
-coverage, every interpreter/compiled pair identical block for block, every
-field file declaring `units` and every message file `contiguous`. The shapes
-held too: 60 start lines for 30 requests, 36 chunk sizes and 26 trailer fields
-in the chunked stream, 1932 pointer targets in the fuzzed DNS.
+It prints one line per check and exits non-zero if any failed, keeping the work
+directory. `--work DIR` keeps it anyway, and `--baseline DIR` compares every
+output with the one an earlier run left in `DIR`, printing each difference —
+which is how a change to the decoder is shown to have moved exactly the files it
+meant to and no others. The script was checked against the two bugs it is meant
+to catch: a compiled driver that misreports a failure fails the pair, and the
+trailer bug below, reintroduced, fails the shape.
+
+The `0.3.0` run of this pipeline, before it was a script, took seven of these
+inputs (all but `http_clean`) through both drivers at both granularities: 28
+files, every one conformant with full coverage, every interpreter/compiled pair
+identical block for block, every field file declaring `units` and every message
+file `contiguous`. The shapes held too: 60 start lines for 30 requests, 36
+chunk sizes and 26 trailer-field records in the chunked stream, and in the
+fuzzed DNS 1932 records read through 252 followed pointers.
 
 - [`python-zipline-wire`](https://github.com/adamkjonsson/python-zipline-wire)
   converts real captures to `.zpf`. Its `tests/captures/` holds twenty-two at
@@ -184,14 +201,10 @@ in the chunked stream, 1932 pointer targets in the fuzzed DNS.
   spec's handling of one had never been executed by anything. It was wrong:
   see *A trailer section is not a chunk* below.
 
-  Generate the hard case rather than the average one:
-
-  ```bash
-  ../packeteer/.venv/bin/packeteer stream --payload http \
-      --client-ip 10.0.0.2 --server-ip 10.0.0.1 --requests 30 \
-      --chunked-rate 0.5 --trailer-rate 0.5 --min-chunk 8 --max-chunk 32 \
-      --mss 200 --packet-loss 0.05 --seed 3 --pcap /tmp/http.pcap
-  ```
+  The pipeline's `http_gen` input is the hard case rather than the average
+  one: 30 requests, half with chunked responses and half of those with
+  trailers, chunks of 8 to 32 bytes, at `--mss 200` on a 5% lossy link
+  (`_generated_http` in `tools/pipeline.py`).
 
   `--mss` is doing as much work as `--packet-loss`. At the default 1460 a
   generated message fits inside one segment, so a loss takes a whole message
@@ -216,21 +229,17 @@ compression correctly and `build` wrote every name out in full, so a compressed
 message re-encoded larger than captured and no packet carrying one ever rebuilt
 — 118 of 238 in one of packeteer's own captures. Whatever `packeteer fuzz`
 produced from a DNS capture, it was not the compressed majority of it. It is
-now: one run of the pipeline above over `dns_example.pcapng` yields 340 messages
-in which **1932 compression pointers are followed**, conformant and with every
-byte accounted for.
+now: one run of the pipeline over `dns_example.pcapng` yields 340 messages in
+which **252 compression pointers are followed and 1932 records are read through
+them**, conformant and with every byte accounted for.
 
 **DNS can now be generated rather than only fuzzed.** `--payload` takes any
 registered protocol, and `--protocol-messages` says which messages to send — so
 the "generate the hard case rather than the average one" that HTTP got in 0.9.0
-is available for DNS, impairments and all:
-
-```bash
-# messages.json: [{"raw": "<query hex>"}, {"raw": "<compressed response hex>"}]
-../packeteer/.venv/bin/packeteer stream --payload dns --protocol udp \
-    --protocol-messages messages.json --client-ip 10.0.0.2 --server-ip 10.0.0.1 \
-    --packets 40 --packet-loss 0.05 --gap-jitter 0.01 --seed 5 --pcap /tmp/dns.pcap
-```
+is available for DNS, impairments and all. The pipeline's `dns_gen` input is
+that, sending the two messages in `tools/dns-messages.json`: a query from
+`dns_example.pcapng` and its response, whose two answers carry one pointer back
+to the question's name and one into the first answer's own data.
 
 `raw:` is what makes this worth doing. A *generated* DNS message is built from
 decoded fields and writes every name in full, so it carries no pointer at all;

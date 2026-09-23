@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import zpf
+from zpfcompare import assert_conformant
 
 from kober.decoder import Decoder
 from kober.errors import SpecError
@@ -41,15 +42,6 @@ def write_transport(path: Path, records: list[tuple[int, bytes, int]]) -> None:
             for ts, payload, seq in records:
                 session.record(client, ts=ts, payload=payload, hints=zpf.Hints(seq_start=seq))
             session.end(reason="fin")
-
-
-def assert_conformant(path: Path, source: Path) -> None:
-    checker = zpf.ConformanceChecker()
-    with zpf.open(path) as handle:
-        checker.check(handle.blocks())
-    checker.finish()
-    assert checker.coverage_findings() == []
-    assert zpf.check_coverage(path, source) == []
 
 
 def read_records(path: Path) -> list[zpf.Record]:
