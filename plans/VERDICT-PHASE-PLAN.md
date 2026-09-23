@@ -10,6 +10,12 @@
 > [`TRANSFORM-PHASE-PLAN.md`](TRANSFORM-PHASE-PLAN.md)) follows it and is not
 > touched here.
 
+> **Revised 2026-09-23, before #32 was started**, on two decisions Adam made:
+> §3.3(a) now splits the reason between tried and untried regions, and drops
+> an availability argument that the format does not support; §3.3(b) and (c)
+> now decline a stream that ends without one whole message decoding, not only
+> one that meets an `undecodable`. §2 gains the measurement behind the second.
+
 > The upstream state this was checked against: `../python-zipline` at
 > `v0.5.0`, `../packeteer` at `v0.16.0`, `../python-zipline-wire` at
 > `v0.4.0-2-g32896b7` (pin `zpf>=0.5.0`). No pin moves in this release.
@@ -97,6 +103,17 @@ also means the corpus holds **no example of the case #32 is riskiest for**, a
 flow in the right protocol whose first message fails and whose later ones do
 not. §5 #32 builds that case synthetically.
 
+**Declining a stream that never confirms costs nothing either** (measured
+during the revision above). Of the streams in the 22 real captures that never
+decode a whole message, `dns.yaml` meets 64 that say `undecodable` and 6 that
+only ever say `truncated`; `http.yaml` meets 32 that only ever say
+`truncated`. None is DNS or HTTP. Ten of the HTTP ones sit on port 80 and
+carry plain text (the *Daisy Bell* lyrics), which the HTTP spec reads as a
+start line that never ends. The case the broader rule gets wrong — a real
+stream whose only message was cut short, by a capture that stopped or a loss
+before anything completed — is not in the corpus either, and gets a synthetic
+test in §5.
+
 **The two backends already agree on failure detail text**, which #32's
 `comment=` needs. `const` gives `expected 66, read 0` from both, and a switch
 with no case gives `no case for 9 and no default` from both. Neither text
@@ -171,14 +188,19 @@ on a genuinely short run, which is a real `truncated`.
 The issue's model is adopted: Zeek-style confirmation, entirely in the driver,
 with the decoder and `const` untouched. Four points it leaves open:
 
-**(a) The reason: `skipped`, with a comment on every declined region.** This
-is the one judgment call the issue names, and the plan leans the issue's way.
-`skipped` is literally true of every run after the first, which were never
-tried. For the first, `undecodable` would be literal too, but a chained stage
-reading `Undecoded` blocks should see *this stream is available to another
-decoder*, and one stream should carry one verdict. The comment carries the
-evidence either way. **This needs Adam's call before implementation starts**,
-because it decides the `DESIGN.md` §3.1 revision and the changelog wording.
+**(a) The reason: `undecodable` for what was tried, `skipped` for what was
+not, with the comment on both.** Decided by Adam. The issue argued for
+`skipped` throughout, on the grounds that a chained stage should see the stream
+as *available to another decoder*. The format does not support that argument.
+`undecodable`, `skipped` and `dropped` are all in the **bytes exist** class
+(Zipline Payload Format 0.21, *Undecoded*): every one can be fetched and
+decoded again by any consumer, and the spec says the three "differ in
+**intent**, not in recoverability". So the choice is only which intent is
+true, and the definitions answer it region by region. A run or datagram
+decoded before the decline was **tried and failed**, which is `undecodable`.
+One after it was **declined on purpose**, never tried, which is `skipped`. A
+consumer that counts genuinely unparsed bytes, the use the spec names for the
+distinction, then sees the attempt but not the rest of the stream.
 
 The comment is `not {spec name}: {detail} at offset {n}`, e.g.
 `not toy: expected 66, read 0 at offset 1`. It uses the spec's `name` (or the
@@ -187,35 +209,56 @@ and the offset from `_stopped_at`. It has **no field path**, since neither
 backend has one at the step. Adding one would be a separate change to both.
 Every declined region carries the comment, not only the first, because a gap
 splits the stream into regions and a reader landing on any of them should see
-why. `_Writer`'s coalescing merges on `(reason, comment)`.
+why. `_Writer`'s coalescing merges on `(reason, comment)`. A stream declined
+at its end has no single failure to quote, so its comment names the first:
+`not http: no message decoded; first: {detail} at offset {n}`.
 
-**(b) Trigger: any `undecodable` before confirmation, as the issue says.** A
-narrower trigger (only `const`/`confirm`/`reject`, the identification
-constructs) was considered and is not taken. §2 measured the cost of the broad
-one as zero, and the narrow one needs a failure classification that neither
-backend has. The broad trigger's real risk is iterative decoding: a partial
-spec meeting an unknown case in a flow's *first* message now loses the flow's
-later datagrams. §2 found no such flow. Record the risk in `DESIGN.md`, and
-have the pipeline (#44) print declined-stream counts, so that a future input
-where it bites shows up as a number rather than as silence.
+**(b) Trigger: any `undecodable` before confirmation, as the issue says —
+or reaching the end of the stream unconfirmed.** A narrower trigger (only
+`const`/`confirm`/`reject`, the identification constructs) was considered and
+is not taken. §2 measured the cost of the broad one as zero, and the narrow
+one needs a failure classification that neither backend has. The broad
+trigger's real risk is iterative decoding: a partial spec meeting an unknown
+case in a flow's *first* message now loses the flow's later datagrams. §2
+found no such flow. Record the risk in `DESIGN.md`, and have the pipeline
+(#44) print declined-stream counts, so that a future input where it bites
+shows up as a number rather than as silence.
 
-**(c) `truncated` before confirmation: keep buffering, decide later.** The
-issue says the writer "releases [records] once the step returns OK" and that
-`truncated` does not decline. It does not say what happens to a truncated
-first message's records. If they are released, a stream that truncates, then
-declines, has written records, and the fuzz invariant "no record is ever
-written for a declined stream" is false. So: **while unconfirmed, the writer
-buffers everything** (records *and* regions, in order) across as many
-messages as it takes. The first OK message releases the buffer as-is. A
-decline discards the buffered records and rewrites every buffered region
-except `gap` to `skipped` with the comment. A stream that ends unconfirmed
-without declining (all truncated) is released as-is at `flush()`, which is
-today's output.
+The second trigger is Adam's, and closes a hole the issue left. A spec meeting
+a foreign stream does not always fail with `undecodable`. The HTTP spec
+reading plain text looks for the end of a start line that never comes, and
+every attempt says `truncated`, which is **hole-class**. So `packet_loss`
+under `http.yaml` is 71617 bytes the file claims never arrived, and a rule that
+declines only on `undecodable` would leave that claim standing. A stream is
+confirmed by one whole message. One that ends without any is declined as well,
+whatever its attempts said. The trade-off: a real stream whose only message
+was cut short is declined too, `not http` where it used to be `truncated`.
+kober cannot tell the two apart from the bytes, and §2 found no real stream
+that it misjudges.
 
-Cost: memory proportional to the unconfirmed prefix, which is unbounded for a
-stream that only ever truncates. Accept it, and say so in the `_Writer`
-docstring. A cap would reintroduce the fabricated-records case the issue
-exists to remove.
+**(c) Before confirmation, buffer everything; decide at confirmation, at the
+first `undecodable`, or at the end of the stream.** The issue says the writer
+"releases [records] once the step returns OK". It does not say what happens
+to a truncated first message's records. If they are released, a stream that
+truncates and then declines has written records, and the fuzz invariant "no
+record is ever written for a declined stream" is false. So: **while
+unconfirmed, the writer buffers everything**, records *and* regions in order,
+per run or datagram. Then:
+
+- **The first OK message** releases the buffer as-is. From there on,
+  behaviour is today's.
+- **A decline**, at the first `undecodable` or at `flush()` for a stream that
+  ended unconfirmed, discards every buffered record. Each tried run or
+  datagram is then marked `undecodable` **across its whole extent**, with
+  the comment, since the discarded records' bytes must be named by
+  something. Gaps stay `gap`. After an `undecodable` trigger, every later run
+  or datagram is marked `skipped` with the same comment, without being
+  tried.
+
+Cost: memory proportional to the unconfirmed prefix. For a stream that never
+confirms, that is the whole stream, because the end-of-stream trigger cannot
+fire earlier. Accept it, and say so in the `_Writer` docstring. A cap would
+reintroduce the fabricated-records case the issue exists to remove.
 
 **(d) The step reports its detail.** `_Step` returns `str | None` today. It
 becomes a small `_Verdict(reason, detail)` or `None`. For the interpreter
@@ -229,10 +272,11 @@ chunk or datagram. Confirmation state is per `decode_stream` /
 declining a stream is local to that call. No CLI flag and no API switch turns
 it off (§8).
 
-**Changelog:** `Changed`, marked **Breaking:**. No signature moves, but a
-consumer that counts `undecodable` bytes for a foreign stream now sees
-`skipped`, which is a change in what a file asserts. The note says what to do
-instead: read the region's comment.
+**Changelog:** `Changed`, marked **Breaking:**. No signature moves, but what
+a file asserts about a foreign stream changes. Its later runs are `skipped`
+rather than retried, no partial field tree is written for it, and a stream that
+only ever ran out is `undecodable` rather than `truncated`, so it no longer
+claims a hole. The note says what to do instead: read the region's comment.
 
 ### 3.4 #44: a script in `tools/`, sharing its comparison with the suite
 
@@ -400,19 +444,26 @@ module docstring gains a paragraph on confirmation.
 Tests, in `test_stage.py` with `write_transport` / `datagrams`, each
 reverted-and-watched, all through **both** drivers with `blocks()` equal:
 
-- The issue's toy spec over a foreign datagram stream: one `skipped` region
-  per stream with the comment, no records, at both granularities.
-- The same over a byte stream with two gaps: `skipped`, `gap`, `skipped`,
-  `gap`, `skipped`, no retry after either gap. Check that with a counting
-  step, not from the output.
+- The issue's toy spec over a foreign datagram stream: the first datagram
+  `undecodable`, every later one `skipped`, all with the comment, no records,
+  at both granularities.
+- The same over a byte stream with two gaps: `undecodable`, `gap`,
+  `skipped`, `gap`, `skipped`, no retry after either gap. Check that with a
+  counting step, not from the output.
+- A foreign stream that only ever says `truncated` (plain text under the HTTP
+  spec, as `packet_loss` is): declined at its end, every tried run
+  `undecodable` with the end-of-stream comment, and no `truncated` left.
+- **The trade-off §3.3(b) accepts:** a real HTTP stream whose only message is
+  cut short is declined as `not http`. Asserted, with the reason in the
+  docstring, so that changing it is a decision and not an accident.
 - **The risky case §2 found no example of:** right protocol, first message
   undecodable, later ones fine. It declines, and the test asserts that and
   names the trade-off in its docstring.
 - Confirmed, then undecodable: today's output exactly (resume after the gap
   or at the next datagram).
 - Truncated first, then OK: records released, identical to 0.3.0 output.
-  Truncated first, then undecodable: declined, and nothing written, which is
-  §3.3(c)'s case.
+  Truncated first, then undecodable: declined, nothing written, both runs
+  `undecodable` in full, which is §3.3(c)'s case.
 - Message granularity over a foreign stream: no difference but the reason and
   comment.
 
@@ -420,17 +471,20 @@ reverted-and-watched, all through **both** drivers with `blocks()` equal:
 streams built with `write_transport` and `datagrams`: runs and datagrams
 mixing valid, foreign and truncated messages, with gaps. Invariants:
 
-- A declined stream writes no record, and its every byte is `skipped` or
-  `gap`.
+- A declined stream writes no record, and its every byte is `undecodable`,
+  `skipped` or `gap` — never `truncated`, and `skipped` only after an
+  `undecodable`.
 - A stream that confirms writes, from the confirming message on, exactly
   what 0.3.0's driver would have written. Keep the old driver loop as a
   reference inside the test.
 - Conformance and coverage hold.
 
-Docs: `DESIGN.md` §2 (a row in the failure list, a stream whose first message
-fails → `skipped` for the whole stream), §3.1 (the "honest `undecodable`
-region" sentence, revised per §3.3a), and the risk from §3.3b stated where a
-reader of §3.1 will find it. `docs/dev/architecture.md` on the driver.
+Docs: `DESIGN.md` §2 (a row in the failure list: a stream that fails before
+its first whole message, or never has one, is declined, with what was tried
+`undecodable` and the rest `skipped`), §3.1 (the "honest `undecodable` region"
+sentence, which stays true for the attempt), and both risks from §3.3b stated
+where a reader of §3.1 will find them. `docs/dev/architecture.md` on the
+driver.
 
 Changelog: `Changed`, **Breaking:** (§3.3).
 
