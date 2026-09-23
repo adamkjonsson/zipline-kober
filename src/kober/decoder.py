@@ -483,6 +483,12 @@ class Decoder:
                 elements.append(element)
         except _Stop as stop:
             status, detail = stop.status, stop.detail
+        except EvalError as exc:
+            # The count, or the `until` test, could not be computed from what
+            # was read — a division by zero off the wire. Every other place an
+            # expression is evaluated turns this into a verdict, and failure
+            # must never escape a decode (`DESIGN.md` §2).
+            status, detail = NodeStatus.UNDECODABLE, str(exc)
         start, end = cursor.span(mark)
         return Node(
             name=item.name,

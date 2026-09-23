@@ -33,6 +33,7 @@ from fuzzing import (
     pointer_cases,
     select_cases,
     starved_cases,
+    variants,
 )
 
 from kober.cursor import Cursor
@@ -679,3 +680,35 @@ def test_a_message_read_to_its_end_is_never_called_truncated(name: str, seed: in
             f"truncated on {data!r}: {tree.detail}"
         )
     assert reached, f"{name}: no variant decoded {terminal!r} whole"
+
+
+#: A repetition whose count and ``until`` both divide by a value off the wire.
+FAILING_REPEAT = """
+name: failing_repeat
+version: "1"
+entry: m
+units:
+  m:
+    fields:
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: counted, type: {int: {bits: 8}}, repeat: {count: "12 / n"}}
+      - {name: ended, type: {int: {bits: 8}}, repeat: {until: "12 % n == ended"}}
+"""
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_repetitions_own_expressions_never_raise(seed: int):
+    """A count or an ``until`` that cannot be computed is a verdict, like any other.
+
+    The two expression sites the corpus never reached, until one of them was
+    found raising out of a decode.
+    """
+    decoder = Decoder(Spec.from_yaml(FAILING_REPEAT))
+    for data in variants(bytes([0, 1, 2, 3, 4, 5]), seed):
+        try:
+            tree = decoder.decode_bytes(data)
+        except Exception as exc:
+            exc.add_note(f"escaped a decode: seed={seed} on {data!r}")
+            raise
+        check_tree(tree, data)
+

@@ -60,6 +60,14 @@ minor bump here too.
   Reachable **only with `check=False`**. They do so only when the field
   started with nothing left, so a short message is still `truncated` where
   the field that would have read to the end was absent.
+- **A repetition whose `count` or `until` cannot be computed no longer raises
+  out of a decode.** A count of `12 / n` with `n` zero on the wire raised
+  `EvalError` out of `Decoder.decode_bytes` and stopped the stage driver,
+  breaking the promise that a decode never raises. Every other place an
+  expression is evaluated already reported it as a verdict. It is now
+  `undecodable`, with the reason, as the compiled module already had it.
+  Found while probing #32's failure wording. No spec in the fuzz corpus had a
+  count or an `until` that could fail, and the corpus now has one.
 
 ### Documentation
 

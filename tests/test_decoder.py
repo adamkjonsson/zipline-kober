@@ -1242,3 +1242,38 @@ def test_an_anonymous_constant_is_checked():
     tree = decode("      - {name: null, bits: 8, const: 0}\n", bytes([0x01]))
     assert tree.status is NodeStatus.UNDECODABLE
     assert tree.children[0].detail == "expected 0, read 1"
+
+
+@pytest.mark.parametrize(
+    "repeat",
+    [{"count": "12 / n"}, {"until": "12 / n == item"}],
+    ids=["count", "until"],
+)
+def test_a_repetition_whose_expression_fails_is_undecodable_not_raised(repeat: dict[str, str]):
+    """Regression: a failing ``count`` or ``until`` escaped the decode.
+
+    Every other place an expression is evaluated — a size, a condition, a
+    guard, a ``computed`` value — turns an evaluation error into a verdict. The
+    repetition's own expressions were the two that did not, so a count of
+    ``12 / n`` with ``n`` zero on the wire raised ``EvalError`` out of
+    ``decode_bytes`` and took the stage driver down with it. Nothing fuzzed it:
+    no spec in the corpus had a count or an ``until`` that could fail.
+    """
+    spec = Spec.from_dict(
+        {
+            "name": "t",
+            "version": "1",
+            "entry": "m",
+            "units": {
+                "m": {
+                    "fields": [
+                        {"name": "n", "type": {"int": {"bits": 8}}},
+                        {"name": "item", "type": {"int": {"bits": 8}}, "repeat": repeat},
+                    ]
+                }
+            },
+        }
+    )
+    tree = Decoder(spec).decode_bytes(b"\x00\x01\x02")
+    assert (tree.status, tree.detail) == (NodeStatus.UNDECODABLE, "division by zero")
+
