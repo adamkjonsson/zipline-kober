@@ -43,6 +43,11 @@ which is the point of keeping them:
   wholesale form of the seam rule (a field-granularity file is a unit
   sequence), §14.3 lets a generated module record its granularity, and §9 and
   §13.4 stop calling fixed things open.
+- **Revision 11** is `0.4.0`'s: §3.1 gains stream confirmation, where a
+  stream that fails before its first whole message is declined rather than
+  retried, with the trade-off it accepts stated beside it; §11.5's
+  no-false-hole principle is applied to fields starved under `check=False`;
+  and the entry unit's `emit` is honoured by both implementations.
 
 Sections most worth reading before changing code: §2.1 (the cursor rule), §4.1
 (field naming and its stopgap), §5 (seams), §9.2, §13 and §14.

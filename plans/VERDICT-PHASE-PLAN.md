@@ -1,6 +1,10 @@
 # The verdict phase — `0.4.0`
 
-**State: planned.**
+**State: done.** All four issues landed on `plan_0_4_0` and shipped in
+[`v0.4.0`](https://github.com/adamkjonsson/zipline-kober/releases/tag/v0.4.0)
+(2026-09-23), in the order §4 argues for, with one unplanned fix beside them.
+§9 records what the plan got right and wrong, and is the only section written
+after the fact apart from the dated revision note below.
 
 > **Written 2026-09-23** against `0.3.0` and the four issues on the
 > [`0.4.0` milestone](https://github.com/adamkjonsson/zipline-kober/milestone/3).
@@ -531,3 +535,94 @@ Changelog: `Changed`, **Breaking:** (§3.3).
   carry one to the step.
 - **A cap on the unconfirmed buffer** (§3.3c).
 - **Transforms.** That is `0.5.0`.
+
+---
+
+## 9. What this plan got right and wrong
+
+Written at release. The rest of this document is left as it was, revision
+note included, because the point of keeping a plan is to know what was
+believed at the time.
+
+### 9.1 Baseline first was the most useful decision in the plan
+
+§4 put #44 first so that every later step could be diffed against 0.3.0's
+output, and the diff did the work the plan hoped. #40 and #43 were shown to
+move **0 of 64** outputs, which is the claim §1 made, now observed. #32 moved
+44, and because the baseline existed they could be checked **stream by
+stream**: 456 declined, 416 unchanged, none misjudged. Without a baseline, "the
+foreign pairings changed" would have been an impression, not a finding. The
+`--baseline` option was not in the plan; it was added in step 1 because
+comparing by hand would not have been repeatable.
+
+### 9.2 §3.4's "relations, not remembered counts" failed its own check
+
+The plan said to assert the HTTP shape as bounds that survive a change in the
+generator's bytes, and to check the script against the trailer bug. The check
+was run, and the bounds passed with the bug reintroduced: the counts went from
+60/36/26 to 59/25/52, and every bound held. What catches it is an **exact**
+count against a small independent reader of RFC 7230 framing, which needs a
+lossless stream, so the script gained one (`http_clean`) and uses the reader
+wherever a stream has no gap (`http_stream_1` too, which matched at 2000).
+The bounds remain for lossy input. The instruction to watch the script fail
+was what found this. Without it the pipeline would have shipped unable to see
+the one bug it exists to see.
+
+### 9.3 §2 was right that #40's compiler fix was not one line
+
+The issue's proposed fix, only the seed in `_granularities`, was tried after
+the real fix landed and left 9 of the new cases failing, as §2 predicted from
+reading the code. The two faults had separate witnesses as the issue asked:
+the interpreter's alone failed exactly the one case the issue named.
+
+### 9.4 §3.2 missed a guard, and its reason for rejecting the broad rule was wrong
+
+`check` ignores conditions. A `remaining` absent from a message starves
+nothing, and a short read after it is real `truncated`, so the conversion
+needed a guard: only a field that started with nothing left. The plan's
+reason for rejecting the broader rule ("a `fill`'s own trailer truncating on a
+short run") was false. A `fill` on a short run fails at the fill, before its
+trailer is read. The narrow rule was still right, for the conditional case
+§3.2 did not think of. The repeated case was included as planned. One of its
+tests passed against the reverted compiler fix, because over empty input no
+region is written, and was strengthened until it did not.
+
+### 9.5 §3.3 was revised twice before #32, and once more by the code
+
+Both revisions are in the note at the top, and both were Adam's calls. The
+issue's argument that `skipped` leaves a stream "available to another decoder"
+is not supported by the format: every bytes-exist reason is equally
+recoverable. So the reason was split by what happened, tried against untried.
+And a foreign stream does not always fail `undecodable`, so a stream that ends
+without a whole message is declined too.
+
+The code then corrected the revised text in one place. The end-of-stream
+comment quotes no detail ("no message decoded; every attempt ran out of
+input"), not `first: {detail}`, because the two implementations word
+`truncated` differently by design. And the plan did not foresee that quoting
+`undecodable` details would require the implementations to **word every
+failure identically**. The differential was made to assert it, and found four
+drifts (prefixes on conditions and guards, `modulo` against `division`, the
+guard and repetition messages) plus a compiled module taking its
+division-by-zero text from Python, whose wording changed at 3.14.
+
+### 9.6 What the plan did not anticipate at all
+
+**A real "decode never raises" bug.** Probing failure wording across every
+place an expression is evaluated found that a repetition's `count` or `until`
+dividing by zero raised `EvalError` out of the decoder. No spec in the fuzz
+corpus had a fallible count, so nothing could have found it. It is fixed in its
+own commit, with a fuzz test of its own.
+
+**The corpus's one borderline stream.** §2's measurement said every stream
+the broader decline rule catches is foreign. The pipeline found the nearest
+thing to a counterexample: a loss-and-reordering fixture whose request
+direction is the bare line `GET\r\n`. It is not a complete HTTP message and
+never could be, so declining it is right. It is now the example the reference
+gives for the trade-off.
+
+**`DESIGN.md`'s revision history was out of order.** Revision 10's paragraph
+had been dropped into the middle of revision 9's narrative in 0.3.0, and the
+release sweep put revision 11 in the same wrong place before noticing. Both
+now follow revision 9.
+

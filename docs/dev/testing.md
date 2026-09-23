@@ -174,6 +174,19 @@ file `contiguous`. The shapes held too: 60 start lines for 30 requests, 36
 chunk sizes and 26 trailer-field records in the chunked stream, and in the
 fuzzed DNS 1932 records read through 252 followed pointers.
 
+The `0.4.0` run, the first from the script, against packeteer 0.16.0 and
+zpfwire 0.4.0: 64 files and 106 checks, all held. The shapes are unchanged
+from 0.3.0. `http_gen` has 60 start lines, 36 chunk sizes and 13 trailer lines
+(counted as lines now, where 0.3.0's 26 counted each line's name and value).
+`http_clean` matches the reference reader at 60, 42 and 15, `http_stream_1`
+matches it at 2000 start lines, and the DNS pointers are 252 and 40 as before.
+Stream confirmation (0.4.0) shows in the declined counts, and only where it
+should. No stream is declined where the spec meets its own protocol. Where it
+does not, every stream is: 59 of the fuzzed DNS under `http.yaml`, 40 of
+`http_stream_1` under `dns.yaml`, and one or two each elsewhere. Against a
+baseline from 0.3.0's driver, the 44 files that changed were checked stream by
+stream: 456 streams declined, 416 unchanged, none misjudged.
+
 - [`python-zipline-wire`](https://github.com/adamkjonsson/python-zipline-wire)
   converts real captures to `.zpf`. Its `tests/captures/` holds twenty-two at
   its 0.3.0 (sixteen when this was first measured), including DNS, HTTP, and

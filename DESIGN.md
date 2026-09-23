@@ -1,7 +1,7 @@
 # kober — design
 
 **Status:** implemented, exercised against real captures, and released as
-`0.x` — `v0.1.0`, `v0.2.0`, and now `0.3.0`, each pinning one `zpf` minor.
+`0.x` — `v0.1.0` to `v0.3.0`, and now `0.4.0`, each pinning one `zpf` minor.
 The spec model, expression language, checker, decode engine, emitter, stage
 driver, all five CLI verbs, the **compiler** (§14), and the `Pointer` construct
 (§3.2) exist, in both implementations. What is *not* built is marked as such:
@@ -11,7 +11,7 @@ everything in §11 that is still a question.
 `zpf` by [`pressure_test.py`](pressure_test.py), and since revision 6 against
 real captures too.
 
-Revision 10. Revision 1 was written blind and got the layer wrong — it invented
+Revision 11. Revision 1 was written blind and got the layer wrong — it invented
 reassembly, gaps, and provenance that `zpf` already provides. Revision 2 fixed
 that against the source. Revision 3 added the results of an executable pressure
 test (§10) and treated this project as what it is: **a load test of `zpf`, where
@@ -75,19 +75,6 @@ delimited read stop at one boundary without running past another — between the
 capture that had never been run decodes 2000 messages with no undecoded region
 where it used to leave 405 421 of its 414 460 bytes `undecodable`.
 
-Revision 10 follows the upstream projects, for `0.3.0`. Spec 0.21 answered the
-format-level question this project's own files raised — whether a stream of
-records that cite one another's bytes is a stream at all — with `adjacency`
-on the Participant Descriptor, and §5 gains its **wholesale form**: field
-granularity declares a unit sequence and message granularity declares nothing,
-which is not the same as `contiguous`. §14.3 lets a generated module say which
-granularity it was built at, since the driver now needs to know. §9 and §13.4
-stop calling fixed things open. And the checker gained the rule packeteer
-states for its dialect, that `remaining` and `fill` are measured against the
-message — a fault that passed `check`, cited the wrong bytes, and reported a
-hole the stream never had, invisible to every fixture because every fixture
-put the field last.
-
 The revision's real content is the same shape as revision 8's, one level in.
 Aggregation went into the **model** rather than into the expression language,
 which is the third real gap closed by making the declarative language say more
@@ -110,6 +97,31 @@ passes every coverage-shaped invariant the suite has — the byte it took would
 simply be covered by whatever followed — so the rule it is supposed to obey is
 asserted directly and each assertion is checked against an implementation that
 breaks it.
+
+Revision 10 follows the upstream projects, for `0.3.0`. Spec 0.21 answered the
+format-level question this project's own files raised — whether a stream of
+records that cite one another's bytes is a stream at all — with `adjacency`
+on the Participant Descriptor, and §5 gains its **wholesale form**: field
+granularity declares a unit sequence and message granularity declares nothing,
+which is not the same as `contiguous`. §14.3 lets a generated module say which
+granularity it was built at, since the driver now needs to know. §9 and §13.4
+stop calling fixed things open. And the checker gained the rule packeteer
+states for its dialect, that `remaining` and `fill` are measured against the
+message — a fault that passed `check`, cited the wrong bytes, and reported a
+hole the stream never had, invisible to every fixture because every fixture
+put the field last.
+
+Revision 11, for `0.4.0`, is about the **verdict** a file states, and moves one
+decision from the message to the stream. §3.1 gains stream confirmation: until
+a stream's first whole message it is not believed, and one that fails first,
+or never has a whole message, is declined. Nothing is kept for it, what was
+tried is `undecodable` and the rest `skipped`, and every region says why. The
+trade-off (a stream in the right protocol whose first message fails, or whose
+only message was cut short, is declined too) is stated there. §11.5's
+principle, that `truncated` must never be claimed for bytes that arrived, gets
+its second application: a field starved under `check=False`. And the entry
+unit's `emit` now wins over the decoder's in both implementations, as the
+chain in §4 always said.
 
 Claims below marked **[verified]** were executed, not reasoned about: against
 `zpf` 0.16 by the script in §10, and against real captures as recorded in §13.

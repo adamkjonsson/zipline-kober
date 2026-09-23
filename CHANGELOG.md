@@ -22,6 +22,21 @@ minor bump here too.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-23
+
+**The verdict release.** Each change here is about what a file *says* about
+the bytes it was given, when that was not true. The largest is stream
+confirmation. A stream is not believed until its first whole message, and one
+in another protocol is declined whole rather than retried message by message
+with a partial field tree written each time. Two bugs made a file claim
+something false. A starved field under `check=False` reported a hole that was
+never there, and an `emit` on the entry unit was read differently by the
+interpreter's walk, its branch and the compiler. Probing the failure wording
+that stream confirmation quotes found a third: a repetition's `count` could
+raise out of a decode. The deeper pipeline the release checklist requires is
+now a checked-in script. One change is breaking: what a file says about a
+foreign stream. The `zpf` pin does not move.
+
 ### Added
 
 - `kober.check.starved_fields()` and `kober.check.Starved`: the fields the
@@ -1919,7 +1934,8 @@ installed from a checkout (see the README).
   parses `comment` back. Whether to follow `zpf` 0.3 (#58, #59) is recorded as
   an open question rather than settled.
 
-[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/adamkjonsson/zipline-kober/releases/tag/v0.1.0
