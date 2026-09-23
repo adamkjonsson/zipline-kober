@@ -166,6 +166,10 @@ when this doesn't match":
 - a length field pointing past the end of the segment → `reason="truncated"`
 - a field landing inside a `Gap` → `reason="gap"`
 - a region the spec deliberately ignores (padding, encrypted body) → `reason="skipped"`
+- a stream that fails before its first whole message, or ends without one → the
+  stream is **declined**: no record for any of it, what was tried
+  `undecodable` and the rest `skipped`, every region commented `not <spec>: …`
+  (§3.1, *A stream is confirmed before it is believed*)
 
 **What the guarantee is not: leaves do not tile the input.** Until `Pointer`
 (§3.2) existed, every leaf covered a distinct range and the leaves together
@@ -401,7 +405,8 @@ class Field:
 
 `confirm`/`reject` survive from revision 1 and matter more here than they did
 in Spicy, because rejecting cleanly is how a wrong protocol guess becomes an
-honest `undecodable` region instead of a fabricated field tree.
+honest `undecodable` region instead of a fabricated field tree — and, on a
+stream's first message, how a whole stream is declined (below).
 
 `const` is the same need one field wide, and the timing is why it is not just a
 `confirm`. A guard runs **once the unit's fields are decoded**; a run holds as
@@ -417,6 +422,73 @@ constant is not a spec-side value that vanishes from the output. The compiled
 decoder raises `Undecodable` where the interpreter records the verdict, which
 is the split `errors.py` documents, and both name the same region: the refused
 field's own bytes, which no record claims because the record is never written.
+
+#### A stream is confirmed before it is believed (0.4.0)
+
+A verdict on one message is the wrong unit for a wrong-protocol guess, because
+a guess is about the stream. Until 0.4.0 a foreign UDP stream yielded one
+`undecodable` region per datagram, each after a fresh attempt, and a foreign
+TCP stream was tried again after every gap. At field granularity every field
+read before the failure was written as a real record, which is the fabricated
+tree `const` and `confirm` exist to prevent. The rule is Zeek's for dynamic
+protocol detection (#32), applied in the driver alone. The decoder and every
+construct are untouched:
+
+- A stream is **confirmed** by its first whole message. Until then everything
+  the driver writes for it is held, and the confirming message releases it
+  unchanged. A stream that confirms writes exactly what it wrote before.
+- A stream is **declined** by an `undecodable` before confirmation, or by
+  reaching its end unconfirmed. Held records are discarded. Every run or
+  datagram that was tried is `undecodable` across its whole extent (the
+  discarded records cited those bytes, and something must name them). Every
+  one after the decision is `skipped` without being tried. Gaps stay gaps.
+- Every `undecodable` and `skipped` region of a declined stream carries the
+  comment `not <spec>: <detail>, stopped at offset <n>`, or `not <spec>: no
+  message decoded; every attempt ran out of input` for one that ended
+  unconfirmed. The detail is quoted, so both implementations word every
+  `undecodable` failure identically; the differential asserts it.
+- After confirmation nothing changes. A failure is a desync in the right
+  protocol, worth resynchronising after.
+
+**Why split the reason.** Both are in `zpf`'s *bytes exist* class, so both are
+equally recoverable by a later stage. The spec says the three bytes-exist
+reasons "differ in intent, not in recoverability". The first run *was* tried
+and failed; the rest were declined on purpose. A consumer counting genuinely
+unparsed bytes, the use the spec names, sees the attempt and not the stream.
+
+**Why the end of the stream declines.** A spec reading a foreign stream does not
+always fail `undecodable`. The HTTP spec over plain text looks for a line ending
+that never comes, and every attempt is `truncated`, which is hole-class. So a
+rule that declined only on `undecodable` would leave the file claiming a hole
+the capture never had, 71617 bytes of it for `packet_loss` under `http.yaml`.
+
+**The trade-off, accepted with open eyes.** Two kinds of stream in the right
+protocol are declined as well, because nothing distinguishes them from a
+foreign one before a message has decoded:
+
+1. A stream whose **first message is `undecodable`** (corrupt, or a case the
+   spec does not describe yet). Its later, good messages are `skipped`. This
+   bears on iterative decoding in particular: a partial spec meeting an unknown
+   case in a flow's first message loses the flow.
+2. A stream whose **only message was cut short**, by a capture that stopped or
+   a loss before anything completed. It was `truncated`, which was true, and is
+   `not http: …` now.
+
+Neither occurs in the 22 real captures this project tests against, where every
+declined stream is foreign. The nearest is a request direction of `GET\r\n`,
+with no version and no end, on a loss-and-reordering fixture. It is declined,
+and not wrongly. The cost is paid for what it buys on the streams that
+*are* foreign, which is most of the streams any spec meets. The pipeline
+(`tools/pipeline.py`) prints how many streams each output declined, so a
+change in that is visible. Two things were weighed and left out. A spec key
+naming the identifying fields (`magic: true`) would be a second thing to teach
+for what the timing already separates. A switch to turn confirmation off would
+be a way to write the fabricated trees back.
+
+Confirmation is per stream: per direction of a TCP session, per participant of a
+chained stage's input. Held output costs memory in proportion to the
+unconfirmed prefix, which for a stream that never confirms is all of it, since
+the decline that ends it cannot come earlier.
 
 `Spec.foreign` holds the keys a document used that belong to **packeteer's**
 dialect of this format — `over`, `ports`, `derive`, `sensitive`. Recognised,

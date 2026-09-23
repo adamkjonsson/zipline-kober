@@ -126,7 +126,10 @@ units:
 
 `confirm` and `reject` are how a wrong protocol guess becomes an honest
 `undecodable` region rather than a fabricated field tree. Both are evaluated
-once the unit's fields are decoded, so both see all of them.
+once the unit's fields are decoded, so both see all of them. On a stream's
+first message they do more, since a failure there declines the whole stream:
+see [What a spec meets in someone else's
+stream](concepts.md#what-a-spec-meets-in-someone-elses-stream).
 
 Each `params` entry is a **single-key mapping of name to type**, like every
 other tagged construct in the schema, and a parameter's type is one of `int`,

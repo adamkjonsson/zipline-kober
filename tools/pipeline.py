@@ -266,17 +266,29 @@ class Report:
 
 
 def _summary(path: Path) -> str:
-    """Describe a decoded file in one line: records, and undecoded bytes by reason."""
+    """Describe a decoded file in one line: records, undecoded bytes, declined streams.
+
+    A declined stream is one the driver decided was not in this protocol: every
+    region of it says so in its comment (``not dns: …``). Counted so that a spec
+    that starts declining streams it should have decoded — the trade-off stream
+    confirmation accepts — shows up as a number rather than as silence.
+    """
     records = 0
     undecoded: Counter[str] = Counter()
+    declined: set[tuple[int, int]] = set()
     with zpf.open(path) as handle:
         for block in handle.blocks():
             if isinstance(block, Record):
                 records += 1
             elif isinstance(block, Undecoded):
                 undecoded[block.reason] += block.off_end - block.off_start
+                if block.comment and block.comment.startswith("not "):
+                    declined.add((block.session_id, block.participant_id))
     regions = ", ".join(f"{reason} {size}" for reason, size in sorted(undecoded.items()))
-    return f"{records} records; undecoded: {regions or 'none'}"
+    return (
+        f"{records} records; undecoded: {regions or 'none'}; "
+        f"{len(declined)} stream(s) declined"
+    )
 
 
 def _roles(path: Path) -> Counter[str]:

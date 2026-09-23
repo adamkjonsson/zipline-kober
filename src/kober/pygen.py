@@ -752,8 +752,9 @@ def render_expr(expr: Expr, binding: Binding) -> str:
     ``_as_bool`` exist because it discovers types at decode time; the checker
     has already proved them, so the compiled form skips them. Division by zero
     is the one failure that survives compilation, and it survives as
-    ``ZeroDivisionError`` for the entry point to turn into an ``undecodable``
-    region — the same outcome by a shorter road.
+    ``ZeroDivisionError`` for the code around the expression to turn into
+    ``Undecodable("division by zero")`` — the same outcome, and the same words,
+    as the interpreter's.
 
     Args:
         expr: The expression to render.
@@ -1348,8 +1349,8 @@ class _Function:
             return rendered
         self.emit(f"{pad}try:")
         self.emit(f"{pad}    _value = {rendered}")
-        self.emit(f"{pad}except (EvalError, ZeroDivisionError) as _exc:")
-        self.emit(f"{pad}    raise Undecodable(str(_exc), {self.stopped()}) from _exc")
+        for line in _failing(self.stopped()):
+            self.emit(f"{pad}{line}")
         return "_value"
 
     def provable(self, expr: Expr) -> bool:
@@ -1361,7 +1362,9 @@ class _Function:
         return [
             f"    if _depth > {MAX_DEPTH}:",
             *_wrap(
-                f'raise Undecodable("unit nesting passed {MAX_DEPTH} levels", {ANCHOR})',
+                f"raise Undecodable("
+                f"{_literal(f'unit nesting passed {MAX_DEPTH} levels at {self.obj.unit!r}')}, "
+                f"{ANCHOR})",
                 8,
                 hang=4,
             ),
@@ -1376,18 +1379,26 @@ class _Function:
         """
         lines: list[str] = []
         binding = self.binding(len(self.obj.fields))
-        unit = _literal(self.obj.unit)
+        # Worded as the interpreter words them, since a stream declined on one
+        # quotes it in the file (`kober.stage`) and the two files must agree.
+        confirmed = _literal(f"unit {self.obj.unit!r} did not confirm")
+        rejected = _literal(f"unit {self.obj.unit!r} rejected the input")
         where = self.stopped()
-        if self.obj.confirm is not None:
-            lines.append(f"    if not ({render_expr(self.obj.confirm, binding)}):")
-            lines.append(
-                f'        raise Undecodable(f"unit {{{unit}}} did not confirm", {where})'
-            )
-        if self.obj.reject is not None:
-            lines.append(f"    if {render_expr(self.obj.reject, binding)}:")
-            lines.append(
-                f'        raise Undecodable(f"unit {{{unit}}} rejected the input", {where})'
-            )
+        for expr, holds, message in (
+            (self.obj.confirm, False, confirmed),
+            (self.obj.reject, True, rejected),
+        ):
+            if expr is None:
+                continue
+            rendered = render_expr(expr, binding)
+            if _fallible(rendered):
+                # Taken in a `try` as any other fallible expression is, so a
+                # division by zero in a guard fails where the interpreter says.
+                lines.extend(["    try:", f"        _guard = {rendered}"])
+                lines.extend(f"    {line}" for line in _failing(where))
+                rendered = "_guard"
+            test = rendered if holds else f"not ({rendered})"
+            lines.extend([f"    if {test}:", f"        raise Undecodable({message}, {where})"])
         if lines:
             lines.append("")
         return lines
@@ -1895,9 +1906,11 @@ class _Function:
             # the field is not a reason to check: it decides whether the loop
             # runs, not whether an iteration of it gets anywhere.
             self.emit(f"{inner}if {ANCHOR} == _before:")
-            self.emit(
-                f'{inner}    raise Undecodable("a repetition consumed no input", {ANCHOR})'
+            spun = _literal(
+                f"repeated field {item.name!r} consumed no input; the repetition cannot "
+                "terminate"
             )
+            self.emit(f"{inner}    raise Undecodable({spun}, {ANCHOR})")
         if isinstance(item.repeat, Until):
             self.index_of = index
             condition = self.evaluate(
@@ -2418,6 +2431,29 @@ class _Function:
     def emit(self, line: str) -> None:
         """Append one line of the body."""
         self.lines.append(line)
+
+
+def _failing(where: str) -> list[str]:
+    """Return the handlers that turn a failed expression into ``Undecodable``.
+
+    Worded as the interpreter words it, and for division by zero fixed rather
+    than taken from Python: its text changed between versions, and a stream the
+    driver declines quotes it in the output (:mod:`kober.stage`), where the two
+    implementations have to agree on every Python this project supports.
+
+    Args:
+        where: The position expression to report the failure at.
+
+    Returns:
+        The ``except`` clauses, unindented, for the ``try`` just emitted.
+
+    """
+    return [
+        "except ZeroDivisionError as _exc:",
+        f'    raise Undecodable("division by zero", {where}) from _exc',
+        "except EvalError as _exc:",
+        f"    raise Undecodable(str(_exc), {where}) from _exc",
+    ]
 
 
 def _fallible(rendered: str) -> bool:

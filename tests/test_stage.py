@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import struct
-from typing import TYPE_CHECKING
+import sys
+from pathlib import Path
+from types import ModuleType
 
 import pytest
 import zpf
-from zpfcompare import assert_conformant
+from zpfcompare import assert_conformant, blocks
 
 from kober.decoder import Decoder
 from kober.errors import SpecError
+from kober.pygen import render_spec
 from kober.spec import Emit, Spec
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from kober.stage import run_compiled
 
 # Four-byte messages: a u16 length-ish tag and a u16 body, so several fit in
 # one run and a boundary can be put anywhere.
@@ -537,3 +538,201 @@ def test_a_seam_is_still_written_under_a_unit_sequence(tmp_path: Path):
     assert_conformant(sink, source)
     seams = [b for b in read_blocks(sink) if isinstance(b, zpf.Discontinuity)]
     assert [s.reason for s in seams] == ["stream-gap"]
+
+
+# --- stream confirmation (#32) ---------------------------------------------
+
+#: A protocol with a magic byte, and three kinds of message in it: one that is
+#: this protocol, one whose magic disagrees, and one cut short.
+TOY = Spec.from_yaml("""
+name: toy
+version: "1"
+entry: m
+input: either
+units:
+  m:
+    fields:
+      - {name: version, type: {int: {bits: 8}}}
+      - {name: magic, type: {int: {bits: 8}}, const: 0x42}
+      - {name: body, type: {int: {bits: 8}}}
+""")
+GOOD = bytes([1, 0x42, 7])
+FOREIGN = bytes([1, 0, 7])
+SHORT = bytes([1, 0x42])
+NOT_TOY = "not toy: expected 66, read 0, stopped at offset {}"
+HTTP = Spec.from_file(Path(__file__).resolve().parent.parent / "examples" / "http.yaml")
+
+
+def both(spec: Spec, source: Path, tmp_path: Path, emit: Emit) -> list[tuple[object, ...]]:
+    """Decode with both drivers, require the same file, and return what it says."""
+    interpreted = tmp_path / f"interpreted.{emit.value}.zpf"
+    Decoder(spec, emit=emit).run(source, interpreted, produced_by="t", produced_at=1)
+    module = ModuleType(f"toy_{spec.name}_{emit.value}_{len(sys.modules)}")
+    sys.modules[module.__name__] = module
+    exec(render_spec(spec, emit=emit), module.__dict__)
+    compiled = tmp_path / f"compiled.{emit.value}.zpf"
+    run_compiled(module, source, compiled, produced_by="t", produced_at=1)
+    written = blocks(interpreted)
+    assert blocks(compiled) == written
+    assert_conformant(interpreted, source)
+    return [block for block in written if block[0] != "participant"]
+
+
+def regions(written: list[tuple[object, ...]]) -> list[tuple[object, ...]]:
+    """Return the undecoded regions as ``(start, end, reason, comment)``."""
+    return [(b[2], b[3], b[1], b[4]) for b in written if b[0] == "undecoded"]
+
+
+@pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD], ids=lambda e: e.value)
+def test_a_foreign_datagram_stream_is_declined_and_keeps_no_record(tmp_path: Path, emit: Emit):
+    """#32: a magic that disagrees before anything has decoded declines the stream.
+
+    What was tried is ``undecodable`` — kober tried, and failed — and what came
+    after is ``skipped``, declined without being tried. Both say why. At field
+    granularity no record is written for ``version``, which read cleanly before
+    the magic failed: that partial tree is the fabricated one ``const`` exists
+    to prevent, and holding it until the stream confirms is what keeps it out.
+    """
+    source = tmp_path / "in.zpf"
+    datagrams(source, [FOREIGN, GOOD, GOOD])
+    written = both(TOY, source, tmp_path, emit)
+    assert [b for b in written if b[0] == "record"] == []
+    comment = NOT_TOY.format(2)
+    assert regions(written) == [(0, 3, "undecodable", comment), (3, 9, "skipped", comment)]
+
+
+def test_a_declined_byte_stream_is_not_tried_again_after_a_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Before #32 every gap was a fresh attempt; a declined stream has had its one."""
+    source = tmp_path / "in.zpf"
+    write_transport(
+        source,
+        [(1000, FOREIGN * 2, 1001), (2000, GOOD, 1011), (3000, GOOD, 1017)],
+    )
+    tries = []
+    original = Decoder.decode_one
+    monkeypatch.setattr(
+        Decoder, "decode_one", lambda self, cursor: tries.append(1) or original(self, cursor)
+    )
+    written = both(TOY, source, tmp_path, Emit.MESSAGE)
+    comment = NOT_TOY.format(2)
+    assert regions(written) == [
+        (0, 6, "undecodable", comment),
+        (6, 10, "gap", None),
+        (10, 13, "skipped", comment),
+        (13, 16, "gap", None),
+        (16, 19, "skipped", comment),
+    ]
+    assert len(tries) == 1
+
+
+def test_a_stream_in_the_right_protocol_whose_first_message_fails_is_declined_too(
+    tmp_path: Path,
+):
+    """The trade-off #32 accepts, pinned so that changing it is a decision.
+
+    A corrupt first message in the right protocol and a first message in the
+    wrong one are the same bytes to a decoder: nothing has confirmed the stream
+    yet, so there is nothing to tell them apart with. Both decline, and the
+    good messages after it are ``skipped``. None of the real captures this
+    project tests against has such a stream (``plans/VERDICT-PHASE-PLAN.md``
+    §2); the cost is accepted for what it buys on the streams that are foreign.
+    """
+    source = tmp_path / "in.zpf"
+    datagrams(source, [FOREIGN, GOOD, GOOD, GOOD])
+    written = both(TOY, source, tmp_path, Emit.MESSAGE)
+    assert [b for b in written if b[0] == "record"] == []
+    assert {region[2] for region in regions(written)} == {"undecodable", "skipped"}
+
+
+def test_a_stream_that_only_ever_runs_out_is_declined_at_its_end(tmp_path: Path):
+    """Plain text under the HTTP spec: every attempt is ``truncated``, never ``undecodable``.
+
+    The spec looks for the end of a start line that never comes. Left alone,
+    that is a file claiming a hole (``truncated`` is hole-class) in a capture
+    that had none — ``packet_loss`` under ``http.yaml`` was 71617 bytes of it.
+    A stream is confirmed by a whole message, so one that ends without any is
+    declined, and every run that was tried is ``undecodable`` whole.
+    """
+    source = tmp_path / "in.zpf"
+    text = b"There is a flower within my heart, Daisy, Daisy"
+    write_transport(source, [(1000, text, 1001), (2000, text, 1001 + len(text) + 10)])
+    written = both(HTTP, source, tmp_path, Emit.FIELD)
+    comment = "not http: no message decoded; every attempt ran out of input"
+    size = len(text)
+    assert [b for b in written if b[0] == "record"] == []
+    assert regions(written) == [
+        (0, size, "undecodable", comment),
+        (size, size + 10, "gap", None),
+        (size + 10, 2 * size + 10, "undecodable", comment),
+    ]
+
+
+def test_a_real_stream_whose_only_message_was_cut_short_is_declined(tmp_path: Path):
+    """The other half of the trade-off, and the one Adam accepted by name.
+
+    A capture that stopped inside the only HTTP message of a stream looks, to a
+    decoder, exactly like a stream that was never HTTP: no whole message, and
+    every attempt ran out. It used to say ``truncated`` — true of this stream,
+    false of every foreign one — and now says ``not http``. The bytes alone
+    cannot tell the two apart, and the foreign streams are the common case.
+    """
+    source = tmp_path / "in.zpf"
+    write_transport(source, [(1000, b"GET / HTTP/1.1\r\nHost: example.com\r\n", 1001)])
+    written = both(HTTP, source, tmp_path, Emit.MESSAGE)
+    assert [region[2] for region in regions(written)] == ["undecodable"]
+    assert str(regions(written)[0][3]).startswith("not http: ")
+
+
+def test_a_failure_after_confirmation_is_what_it_always_was(tmp_path: Path):
+    """After a whole message, a failure is a desync in the right protocol.
+
+    It ends that message, is ``undecodable`` with no comment, and the driver
+    tries again at the next datagram — exactly the 0.3.0 behaviour.
+    """
+    source = tmp_path / "in.zpf"
+    datagrams(source, [GOOD, FOREIGN, GOOD])
+    written = both(TOY, source, tmp_path, Emit.MESSAGE)
+    assert [b[4] for b in written if b[0] == "record"] == [((0, 3),), ((6, 9),)]
+    assert regions(written) == [(3, 6, "undecodable", None)]
+
+
+@pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD], ids=lambda e: e.value)
+def test_a_short_first_message_then_a_whole_one_writes_what_it_always_did(
+    tmp_path: Path, emit: Emit
+):
+    """Held, then released unchanged: a stream that confirms is not rewritten.
+
+    ``truncated`` says nothing about the protocol, so it neither confirms nor
+    declines. What it wrote is held until the whole message after it confirms
+    the stream, and then written exactly as it would have been.
+    """
+    source = tmp_path / "in.zpf"
+    datagrams(source, [SHORT, GOOD])
+    written = both(TOY, source, tmp_path, emit)
+    records = [(b[2], b[4]) for b in written if b[0] == "record"]
+    if emit is Emit.MESSAGE:
+        assert regions(written) == [(0, 2, "truncated", None)]
+        assert records == [(None, ((2, 5),))]
+    else:
+        # The short message's own fields were real, and are kept; `body` ran
+        # out with nothing to cite, so there is no region at all.
+        assert regions(written) == []
+        assert [role for role, _ in records] == [
+            "toy.version",
+            "toy.magic",
+            "toy.version",
+            "toy.magic",
+            "toy.body",
+        ]
+
+
+def test_a_short_first_message_then_a_foreign_one_keeps_nothing(tmp_path: Path):
+    """Held, then declined: the short message's fields go with the stream."""
+    source = tmp_path / "in.zpf"
+    datagrams(source, [SHORT, FOREIGN, GOOD])
+    written = both(TOY, source, tmp_path, Emit.FIELD)
+    comment = NOT_TOY.format(4)
+    assert [b for b in written if b[0] == "record"] == []
+    assert regions(written) == [(0, 5, "undecodable", comment), (5, 8, "skipped", comment)]

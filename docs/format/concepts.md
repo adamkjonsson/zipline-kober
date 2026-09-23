@@ -208,6 +208,71 @@ right. A message that reads one byte too few leaves the next message
 misaligned — and a message that reads to the end of the run swallows every
 message behind it.
 
+## What a spec meets in someone else's stream
+
+A capture holds many streams, and a spec is usually right about few of them.
+A DNS spec run over a capture meets HTTP, TLS and whatever else was on the
+wire; an HTTP spec meets DNS. kober does not guess which streams are which
+from ports. It lets **the first message decide**.
+
+A stream is **confirmed** by its first whole message: one that decoded from its
+start to its end with nothing failing. From then on, a failure is corruption in
+the right protocol. That message ends, and the driver tries again after the next
+gap or at the next datagram, as it always has.
+
+Until that first whole message, nothing kober writes for the stream is kept,
+and a stream that fails first is **declined**. That means either a message
+that is `undecodable` (a `const` that disagrees, a `confirm` that does not
+hold, a `switch` with no case), or the stream ending without any whole
+message. A declined stream holds no record at all, not even the fields that
+read cleanly before the failure. Its bytes are named instead:
+
+| Region | Reason | Why |
+| --- | --- | --- |
+| Every run or datagram tried before the decision | `undecodable` | It was tried, and it failed. |
+| Every one after it | `skipped` | It was declined on purpose, never tried. |
+| A hole in the capture | `gap` | As everywhere. |
+
+Every `undecodable` and `skipped` region of a declined stream carries a comment
+saying why, in one of two forms:
+
+```text
+not dns: no case for 7 and no default, stopped at offset 3
+not http: no message decoded; every attempt ran out of input
+```
+
+The second is a stream that never failed outright, which is what plain text
+looks like to the HTTP spec: a start line whose line ending never arrives.
+Without the decline, that would be recorded as `truncated`, which says the
+capture had a hole where it had none.
+
+Both reasons say the bytes **exist**, so a later stage, or another spec, can
+still read them. `skipped` says *declined*, `undecodable` says *tried and
+failed*, and a count of unparsed bytes sees only the attempt.
+
+```{important}
+**The trade-off is deliberate.** The bytes of a stream alone cannot tell a
+foreign stream from one in the right protocol that begins badly, so two kinds of
+stream in the right protocol are declined too:
+
+- one whose **first message is corrupt**, or uses a case the spec does not
+  describe yet. Its later, good messages are `skipped`.
+- one whose **only message was cut short**, by a capture that stopped or a
+  loss before anything completed. It used to be `truncated`, and is
+  `not http: no message decoded; …` now.
+
+Neither occurs in the real captures this project tests against. The nearest is
+a request direction consisting of the bare line `GET\r\n`, with no version and
+no end, which is declined, and not wrongly. If your spec is still being
+written, make its first message decode whole before reading anything into what
+it declines. `tools/pipeline.py` reports how many streams each run declined, so
+a change shows up as a number.
+```
+
+There is no setting to turn this off. A decoder that believed a stream's first
+failure was corruption would write a field tree for every foreign stream it
+met, which is what `const` and `confirm` exist to prevent.
+
 ## What a spec cannot say
 
 Worth knowing early, because each is a deliberate line rather than an omission.

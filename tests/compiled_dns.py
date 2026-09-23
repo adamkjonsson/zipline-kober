@@ -302,7 +302,7 @@ def _decode_message(
 
     """
     if _depth > 64:
-        raise Undecodable("unit nesting passed 64 levels", _at)
+        raise Undecodable("unit nesting passed 64 levels at 'message'", _at)
 
     _b = _base + _at
     _extent = _b
@@ -517,7 +517,7 @@ def _decode_flags(
 
     """
     if _depth > 64:
-        raise Undecodable("unit nesting passed 64 levels", _at)
+        raise Undecodable("unit nesting passed 64 levels at 'flags'", _at)
 
     _b = _base + _at
     _extent = _b
@@ -656,7 +656,7 @@ def _decode_question(
 
     """
     if _depth > 64:
-        raise Undecodable("unit nesting passed 64 levels", _at)
+        raise Undecodable("unit nesting passed 64 levels at 'question'", _at)
 
     _b = _base + _at
     _extent = _b
@@ -733,7 +733,7 @@ def _decode_rr(
 
     """
     if _depth > 64:
-        raise Undecodable("unit nesting passed 64 levels", _at)
+        raise Undecodable("unit nesting passed 64 levels at 'rr'", _at)
 
     _b = _base + _at
     _extent = _b
@@ -861,7 +861,7 @@ def _decode_name(
 
     """
     if _depth > 64:
-        raise Undecodable("unit nesting passed 64 levels", _at)
+        raise Undecodable("unit nesting passed 64 levels at 'name'", _at)
 
     _b = _base + _at
     _extent = _b
@@ -931,7 +931,7 @@ def _decode_label(
 
     """
     if _depth > 64:
-        raise Undecodable("unit nesting passed 64 levels", _at)
+        raise Undecodable("unit nesting passed 64 levels at 'label'", _at)
 
     _b = _base + _at
     _extent = _b
@@ -1033,7 +1033,7 @@ def _decode_compressed(
 
     """
     if _depth > 64:
-        raise Undecodable("unit nesting passed 64 levels", _at)
+        raise Undecodable("unit nesting passed 64 levels at 'compressed'", _at)
 
     _b = _base + _at
     _extent = _b

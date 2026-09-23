@@ -31,6 +31,55 @@ minor bump here too.
   every spec that passes `check`. `kober.ops.FieldPlan` carries each field's
   entry as `starved`, so a backend can name the fault.
 
+### Changed
+
+- **Breaking: a stream in another protocol is declined, not retried**
+  ([#32](https://github.com/adamkjonsson/zipline-kober/issues/32)). A stream is
+  now confirmed by its first whole message, and nothing written for it is
+  kept until then. One that meets an `undecodable` first (a `const` that
+  disagrees, a `confirm` that does not hold, a `switch` with no case), or that
+  ends without a whole message, is declined:
+  - it keeps **no record**, including the fields that read cleanly before the
+    failure;
+  - every run or datagram tried is marked `undecodable` whole, and every one
+    after is `skipped` without being tried;
+  - each of those regions carries a comment such as `not dns: no case for 7
+    and no default, stopped at offset 3`, or `not http: no message decoded;
+    every attempt ran out of input`.
+
+  A stream that confirms writes exactly what it did before, and a failure after
+  confirmation is handled as before. **What a file says about a foreign stream
+  changes**:
+  - a foreign UDP stream used to be one `undecodable` region per datagram, each
+    a fresh attempt, and is now one attempt;
+  - at field granularity, the partial field tree before a failure is no
+    longer written;
+  - a stream that only ever ran out, such as plain text under the HTTP spec,
+    is `undecodable` rather than `truncated`, so it no longer claims a hole.
+
+  A consumer that counted `undecodable` or `truncated` bytes for foreign
+  streams should read the region's comment instead. **Two kinds of stream in
+  the right protocol are declined too**, because nothing tells them apart
+  from a foreign one: one whose first message is `undecodable`, and one whose
+  only message was cut short. This is deliberate, and documented in
+  `docs/format/concepts.md` (*What a spec meets in someone else's stream*) and
+  `DESIGN.md` §3.1. No setting turns it off. `tools/pipeline.py` reports how
+  many streams each output declined.
+- **Both implementations word an `undecodable` failure the same way**, because
+  a declined stream quotes it in the output.
+  - The interpreter no longer prefixes a failed condition (`condition failed:
+    …`) or guard (`confirm could not be decided: …`), and says `division by
+    zero` for `%` as for `/`, as Python 3.14 does.
+  - A generated module words a failed `confirm`/`reject`, a runaway
+    repetition and the nesting limit as the interpreter does, and no longer
+    takes the text of a division by zero from Python, whose wording changed
+    between versions.
+  - A division by zero inside a `confirm` or `reject` now fails where the
+    interpreter says it does, instead of escaping as a bare
+    `ZeroDivisionError` to the entry point.
+  - Modules compiled by an earlier 0.4.0 development build should be
+    regenerated.
+
 ### Fixed
 
 - **An `emit` on the entry unit now wins over `--emit` in both backends**

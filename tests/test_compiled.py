@@ -281,6 +281,11 @@ def compare(spec: Spec, data: bytes, base: int = 0) -> None:
         )
         assert REASONS[type(exc)] == tree.status.value, f"different reasons for {data!r}"
         assert stopped == tree.off_end, f"stopped at {stopped}, interpreter at {tree.off_end}"
+        if tree.status is NodeStatus.UNDECODABLE:
+            # Quoted in the comment on a stream the driver declines, so a
+            # difference in wording is a difference in the file. `truncated`
+            # is never quoted, and its wording is free to differ.
+            assert str(exc) == tree.detail, f"different details for {data!r}"
         return
 
     assert tree.status is NodeStatus.OK, (
@@ -904,6 +909,50 @@ def test_a_file_from_an_entry_marked_field_is_the_same_file_both_ways(tmp_path: 
     assert written == blocks(from_interpreter)
     assert {block[2] for block in written if block[0] == "participant"} == {zpf.Adjacency.UNITS}
     assert_conformant(from_compiler, source)
+
+
+#: Every place an expression is evaluated, each dividing by a value off the
+#: wire: what a unit adds, and what its field list ends with.
+FAILING_AT = {
+    "condition": ("", '- {name: y, type: {int: {bits: 8}}, condition: "10 / x == 1"}'),
+    "size": ("", '- {name: y, type: {bytes: {size: {expr: "10 / x"}}}}'),
+    "count": ("", '- {name: y, type: {int: {bits: 8}}, repeat: {count: "10 / x"}}'),
+    "until": ("", '- {name: y, type: {int: {bits: 8}}, repeat: {until: "10 / x == y"}}'),
+    "computed": ("", '- {name: y, type: {computed: "10 / x"}}'),
+    "modulo": ("", '- {name: y, type: {computed: "10 % x"}}'),
+    "dispatch": (
+        "",
+        '- {name: y, type: {switch: {dispatch: "10 / x", cases: {1: {int: {bits: 8}}}}}}',
+    ),
+    "confirm": ('confirm: "10 / x == 1"', ""),
+    "reject": ('reject: "10 / x == 1"', ""),
+}
+
+
+@pytest.mark.parametrize("where", sorted(FAILING_AT))
+def test_an_expression_that_fails_is_worded_the_same_in_both(where: str):
+    """Same reason, same offset, and the same words, wherever the expression is.
+
+    The words matter since #32: a stream declined on a failure quotes its detail
+    in the output, and the two drivers' files must be identical. The two
+    implementations had drifted in four of these — the interpreter prefixed a
+    condition's and a guard's failure, said ``modulo by zero`` where a compiled
+    module could only say ``division``, and a compiled module took the text of
+    a division by zero from Python, whose wording changed at 3.14.
+    """
+    unit, field = FAILING_AT[where]
+    spec = inline(
+        "name: t\nversion: \"1\"\nentry: m\nunits:\n  m:\n"
+        + (f"    {unit}\n" if unit else "")
+        + "    fields:\n      - {name: x, type: {int: {bits: 8}}}\n"
+        + (f"      {field}\n" if field else "")
+    )
+    data = b"\x00\x01\x02"
+    tree = Decoder(spec).decode_bytes(data)
+    assert (tree.status, tree.detail) == (NodeStatus.UNDECODABLE, "division by zero")
+    compare(spec, data)
+    for emit in (Emit.FIELD, Emit.MESSAGE):
+        writes(spec, data, emit)
 
 
 # --- a field the spec leaves no bytes for (#43) ----------------------------
@@ -1947,12 +1996,12 @@ def test_a_conditional_repeat_of_a_consuming_element_needs_no_progress_guard():
     can never fire here — its absence is invisible to any decode.
     """
     source = render(Plan.from_spec(inline(CONDITIONAL_REPEAT)))
-    assert "a repetition consumed no input" not in source
+    assert "the repetition cannot terminate" not in source
     # And with the same shape over an element that reads nothing, it is there.
     reading_nothing = CONDITIONAL_REPEAT.replace(
         '{unit: item}', '{computed: "flag"}'
     ).replace('repeat: {to_end: true}', 'repeat: {count: "flag"}')
-    assert "a repetition consumed no input" in render(Plan.from_spec(inline(reading_nothing)))
+    assert "the repetition cannot terminate" in render(Plan.from_spec(inline(reading_nothing)))
 
 
 @pytest.mark.parametrize(

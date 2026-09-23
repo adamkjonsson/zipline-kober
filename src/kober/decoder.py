@@ -445,13 +445,13 @@ class Decoder:
                 if not evaluate(unit.confirm, env):
                     return NodeStatus.UNDECODABLE, f"unit {unit.name!r} did not confirm"
             except EvalError as exc:
-                return NodeStatus.UNDECODABLE, f"confirm could not be decided: {exc}"
+                return NodeStatus.UNDECODABLE, str(exc)
         if unit.reject is not None:
             try:
                 if evaluate(unit.reject, env):
                     return NodeStatus.UNDECODABLE, f"unit {unit.name!r} rejected the input"
             except EvalError as exc:
-                return NodeStatus.UNDECODABLE, f"reject could not be decided: {exc}"
+                return NodeStatus.UNDECODABLE, str(exc)
         return NodeStatus.OK, None
 
     # --- fields ------------------------------------------------------------
@@ -463,7 +463,7 @@ class Decoder:
             try:
                 present = evaluate(item.condition, env)
             except EvalError as exc:
-                raise _Stop(NodeStatus.UNDECODABLE, f"condition failed: {exc}") from exc
+                raise _Stop(NodeStatus.UNDECODABLE, str(exc)) from exc
             if not present:
                 # Absent, not empty: a field that is not there consumes
                 # nothing and gets no node, so it creates no empty span.

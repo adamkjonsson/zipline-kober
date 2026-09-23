@@ -31,10 +31,32 @@ for. Message granularity declares nothing: its records do join, the
 :class:`~zpf.Seam` after a hole is the honest per-seam form, and leaving the
 value unset lets a stage chained over a unit sequence carry that forward
 instead of contradicting its input. See ``_adjacency``.
+
+**A stream is confirmed before anything it holds is believed.** Zeek's rule for
+dynamic protocol detection, applied per stream: until one whole message has
+decoded, the stream may not be in this protocol at all, and a failure then is
+evidence of the wrong protocol rather than of a corrupt message in the right
+one. So until the first whole message, everything written for the stream is
+held back. The first whole message **confirms** it and releases what was held,
+unchanged. An ``undecodable`` before that **declines** the stream, and so does
+reaching its end without a whole message — a spec reading a foreign stream does
+not always fail ``undecodable``; one looking for a line ending in plain text
+runs out, and ``truncated`` would claim a hole the capture never had. A
+declined stream keeps no record: every run or datagram that was tried is
+``undecodable`` across its whole extent, every one after the decline is
+``skipped`` without being tried, and both carry a comment saying why
+(``not dns: …``). Gaps stay gaps. After confirmation nothing changes: a failure
+is a desync in the right protocol, worth resynchronising after, and the
+driver does exactly what it always did. See ``_Writer``.
+
+The trade-off is deliberate: a stream in the right protocol whose only message
+was cut short, or whose first message the spec cannot read, is declined too.
+The bytes alone cannot tell that from a stream in another protocol.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import zpf
@@ -55,11 +77,11 @@ if TYPE_CHECKING:
     from kober.decoder import Decoder
     from kober.runtime import Sink
 
-    #: One message, decoded from a cursor into a sink. Returns the ``reason=``
-    #: for what it could not decode, or ``None`` for a whole message. The seam
-    #: between this project's two implementations: the loop around it does not
-    #: care which one it is calling.
-    _Step = Callable[[Cursor, Sink, bytes, int], str | None]
+    #: One message, decoded from a cursor into a sink. Returns what went wrong,
+    #: or ``None`` for a whole message. The seam between this project's two
+    #: implementations: the loop around it does not care which one it is
+    #: calling.
+    _Step = Callable[[Cursor, Sink, bytes, int], "_Verdict | None"]
 
 #: Reason recorded for a hole the capture never contained.
 GAP_REASON = NodeStatus.GAP.value
@@ -67,6 +89,22 @@ GAP_REASON = NodeStatus.GAP.value
 #: Why two output records either side of a lost region do not join
 #: (``DESIGN.md`` §5).
 SEAM_REASON = "stream-gap"
+
+
+@dataclass(frozen=True)
+class _Verdict:
+    """Why one message did not decode.
+
+    Attributes:
+        reason: The ``reason=`` for the region it leaves undecoded.
+        detail: What went wrong, as the decoder said it. Quoted in the comment
+            of a stream it declines, so both implementations must say it the
+            same way — the differential holds them to that.
+
+    """
+
+    reason: str
+    detail: str
 
 
 def _seam_for(reason: str) -> zpf.Seam | None:
@@ -144,7 +182,7 @@ def decode_stream(decoder: Decoder, stage: zpf.DecodeStage, stream: object) -> N
 
     """
     _check_shape(decoder.spec.input, decoder.spec.name, stream)
-    _drive(_interpreted(decoder), _Writer(stage, stream), stream)
+    _drive(_interpreted(decoder), _Writer(stage, stream, decoder.spec.name), stream)
 
 
 def decode_stream_compiled(module: object, stage: zpf.DecodeStage, stream: object) -> None:
@@ -161,7 +199,7 @@ def decode_stream_compiled(module: object, stage: zpf.DecodeStage, stream: objec
         stream: One of ``stage.streams()``.
 
     """
-    _drive(_compiled(module), _Writer(stage, stream), stream)
+    _drive(_compiled(module), _Writer(stage, stream, module.NAME), stream)
 
 
 def _check_shape(shape: InputShape, name: str, stream: object) -> None:
@@ -226,16 +264,99 @@ class _Writer:
     case. The run's completion time is the only honest answer available — the
     value was computed from a message that completed then — and it is used
     *only* here, never in place of a derivable one.
+
+    **Until the stream is confirmed, nothing is written.** Everything is held,
+    run by run and gap by gap, in order, with each record's timestamp fixed
+    when it was held. :meth:`confirm` releases it unchanged, so a stream that
+    confirms writes exactly what it would have written without any of this.
+    :meth:`decline` discards the held records and marks each held run
+    ``undecodable`` whole, with the comment — the discarded records cited
+    those bytes, and something has to name them now. The cost is memory in
+    proportion to the unconfirmed prefix, which for a stream that never
+    confirms is the whole stream, because the decline that ends it cannot come
+    before its end. A cap would mean writing records for a stream that may be
+    in another protocol, which is what holding exists to prevent.
     """
 
-    def __init__(self, stage: zpf.DecodeStage, stream: object) -> None:
+    def __init__(self, stage: zpf.DecodeStage, stream: object, name: str) -> None:
         self.stage = stage
         self.stream = stream
+        #: The spec's name, for the comment on a declined stream.
+        self.name = name
         #: Completion time of the run being decoded, for the empty-range case
         #: above. Never passed for a record that cites bytes.
         self.ts = 0
-        self._pending: tuple[int, int, str] | None = None
+        #: Whether a whole message has decoded. Until it has, everything is held.
+        self.confirmed = False
+        #: The comment every region of a declined stream carries, once it is.
+        self.declined: str | None = None
+        #: While unconfirmed: each run as ``(start, end, writes)``, and each gap
+        #: as ``(start, end, None)``, in stream order.
+        self._held: list[tuple[int, int, list[tuple[object, ...]] | None]] = []
+        self._pending: tuple[int, int, str, str | None] | None = None
         self._seam: zpf.Seam | None = None
+
+    # --- what the driver says ------------------------------------------------
+
+    def begin(self, off_start: int, off_end: int) -> None:
+        """Note that a run or datagram is about to be tried."""
+        if not self.confirmed:
+            self._held.append((off_start, off_end, []))
+
+    def gap(self, off_start: int, off_end: int) -> None:
+        """Mark a hole the capture never contained."""
+        if self.confirmed or self.declined is not None:
+            self._undecoded(off_start, off_end, GAP_REASON)
+        else:
+            self._held.append((off_start, off_end, None))
+
+    def skip(self, off_start: int, off_end: int) -> None:
+        """Mark a run or datagram of a declined stream, never tried."""
+        self._undecoded(off_start, off_end, NodeStatus.SKIPPED.value, self.declined)
+
+    def confirm(self) -> None:
+        """Write everything held, as it was: a whole message has decoded."""
+        if self.confirmed:
+            return
+        self.confirmed = True
+        for off_start, off_end, writes in self._held:
+            if writes is None:
+                self._undecoded(off_start, off_end, GAP_REASON)
+                continue
+            for write in writes:
+                if write[0] == "record":
+                    self._record(*write[1:])
+                else:
+                    self._undecoded(*write[1:])
+        self._held.clear()
+
+    def failed(self, verdict: _Verdict, stopped: int) -> None:
+        """Decline the stream if a message failed before any had decoded whole."""
+        if self.confirmed or verdict.reason != NodeStatus.UNDECODABLE.value:
+            return
+        self.decline(f"not {self.name}: {verdict.detail}, stopped at offset {stopped}")
+
+    def decline(self, comment: str) -> None:
+        """Decide the stream is not in this protocol: name what was tried, keep nothing."""
+        self.declined = comment
+        for off_start, off_end, writes in self._held:
+            reason = GAP_REASON if writes is None else NodeStatus.UNDECODABLE.value
+            self._undecoded(off_start, off_end, reason, None if writes is None else comment)
+        self._held.clear()
+
+    def finish(self) -> None:
+        """End the stream: decline it if nothing ever decoded, then write what is left."""
+        if not self.confirmed and self.declined is None:
+            if any(writes is not None for _, _, writes in self._held):
+                self.decline(
+                    f"not {self.name}: no message decoded; every attempt ran out of input"
+                )
+            else:
+                # Nothing was tried — the stream is gaps, or nothing at all.
+                self.confirm()
+        self.flush()
+
+    # --- the sink a decode writes through -----------------------------------
 
     def record(
         self,
@@ -246,11 +367,36 @@ class _Writer:
         role: str | None,
     ) -> None:
         """Write one record citing ``[off_start, off_end)``."""
+        ts = self.ts if off_end <= off_start else None
+        if self.confirmed:
+            self._record(payload, content_type, off_start, off_end, role, ts)
+        else:
+            write = ("record", payload, content_type, off_start, off_end, role, ts)
+            self._held[-1][2].append(write)
+
+    def undecoded(self, off_start: int, off_end: int, reason: str) -> None:
+        """Mark ``[off_start, off_end)`` as not decoded, and say why."""
+        if self.confirmed:
+            self._undecoded(off_start, off_end, reason)
+        else:
+            self._held[-1][2].append(("undecoded", off_start, off_end, reason))
+
+    # --- the file -------------------------------------------------------------
+
+    def _record(
+        self,
+        payload: bytes,
+        content_type: str,
+        off_start: int,
+        off_end: int,
+        role: str | None,
+        ts: int | None,
+    ) -> None:
         self.flush()
         self.stage.record(
             self.stream,
             payload,
-            ts=self.ts if off_end <= off_start else None,
+            ts=ts,
             content_type=content_type,
             role=role,
             cites=(off_start, off_end),
@@ -258,24 +404,29 @@ class _Writer:
         )
         self._seam = None
 
-    def undecoded(self, off_start: int, off_end: int, reason: str) -> None:
-        """Mark ``[off_start, off_end)`` as not decoded, and say why."""
+    def _undecoded(
+        self, off_start: int, off_end: int, reason: str, comment: str | None = None
+    ) -> None:
         if off_end <= off_start:
             return
         pending = self._pending
-        if pending is not None and pending[2] == reason and pending[1] >= off_start:
-            self._pending = (pending[0], max(pending[1], off_end), reason)
+        if (
+            pending is not None
+            and pending[2:] == (reason, comment)
+            and pending[1] >= off_start
+        ):
+            self._pending = (pending[0], max(pending[1], off_end), reason, comment)
             return
         self.flush()
-        self._pending = (off_start, off_end, reason)
+        self._pending = (off_start, off_end, reason, comment)
 
     def flush(self) -> None:
         """Write out the region still being coalesced, if there is one."""
         if self._pending is None:
             return
-        off_start, off_end, reason = self._pending
+        off_start, off_end, reason, comment = self._pending
         self._pending = None
-        self.stage.undecoded(self.stream, off_start, off_end, reason=reason)
+        self.stage.undecoded(self.stream, off_start, off_end, reason=reason, comment=comment)
         self._seam = _seam_for(reason) or self._seam
 
 
@@ -288,7 +439,7 @@ def _interpreted(decoder: Decoder) -> _Step:
     the two producers meet the same writer.
     """
 
-    def step(cursor: Cursor, sink: Sink, data: bytes, base: int) -> str | None:
+    def step(cursor: Cursor, sink: Sink, data: bytes, base: int) -> _Verdict | None:
         tree = decoder.decode_one(cursor)
         emissions, unclaimed = plan(decoder.spec, tree, data, emit=decoder.emit, base=base)
         for record in emissions:
@@ -301,7 +452,9 @@ def _interpreted(decoder: Decoder) -> _Step:
             )
         for region in unclaimed:
             sink.undecoded(region.off_start, region.off_end, region.reason)
-        return None if tree.status is NodeStatus.OK else tree.status.value
+        if tree.status is NodeStatus.OK:
+            return None
+        return _Verdict(tree.status.value, tree.detail or tree.status.value)
 
     return step
 
@@ -313,13 +466,13 @@ def _compiled(module: object) -> _Step:
     hand on here — only the failure to name, which it reports by raising.
     """
 
-    def step(cursor: Cursor, sink: Sink, data: bytes, base: int) -> str | None:
+    def step(cursor: Cursor, sink: Sink, data: bytes, base: int) -> _Verdict | None:
         try:
             module.decode_from(cursor, sink)
-        except TruncatedRead:
-            return NodeStatus.TRUNCATED.value
-        except (EvalError, Undecodable, ZeroDivisionError):
-            return NodeStatus.UNDECODABLE.value
+        except TruncatedRead as exc:
+            return _Verdict(NodeStatus.TRUNCATED.value, str(exc))
+        except (EvalError, Undecodable, ZeroDivisionError) as exc:
+            return _Verdict(NodeStatus.UNDECODABLE.value, str(exc))
         return None
 
     return step
@@ -331,16 +484,20 @@ def _drive(step: _Step, writer: _Writer, stream: object) -> None:
         _drive_stream(step, writer, stream)
     else:
         _drive_datagrams(step, writer, stream)
-    writer.flush()
+    writer.finish()
 
 
 def _drive_stream(step: _Step, writer: _Writer, stream: object) -> None:
     """Decode a byte-oriented stream, run by run, marking the holes between."""
     for chunk in stream.chunks():
         if isinstance(chunk, Gap):
-            writer.undecoded(chunk.off_start, chunk.off_end, GAP_REASON)
+            writer.gap(chunk.off_start, chunk.off_end)
+            continue
+        if writer.declined is not None:
+            writer.skip(chunk.off_start, chunk.off_start + len(chunk.data))
             continue
         writer.ts = chunk.ts
+        writer.begin(chunk.off_start, chunk.off_start + len(chunk.data))
         _decode_run(step, writer, chunk.data, chunk.off_start)
 
 
@@ -350,17 +507,19 @@ def _decode_run(step: _Step, writer: _Writer, data: bytes, base: int) -> None:
     end = base + len(data)
     while not cursor.at_end():
         before = cursor.tell()
-        reason = step(cursor, writer, data, base)
-        if reason is not None:
-            # The decode stopped here and said why; the rest of the run is the
-            # tail a message deliberately leaves to whoever owns the run.
-            writer.undecoded(_stopped_at(cursor, base), end, reason)
-            return
-        if cursor.tell() == before:
+        verdict = step(cursor, writer, data, base)
+        if verdict is None and cursor.tell() == before:
             # A message that consumes nothing would loop forever. It cannot be
             # decoded and neither can what follows it.
-            writer.undecoded(_stopped_at(cursor, base), end, NodeStatus.UNDECODABLE.value)
+            verdict = _Verdict(NodeStatus.UNDECODABLE.value, "a message consumed no input")
+        if verdict is not None:
+            # The decode stopped here and said why; the rest of the run is the
+            # tail a message deliberately leaves to whoever owns the run.
+            stopped = _stopped_at(cursor, base)
+            writer.undecoded(stopped, end, verdict.reason)
+            writer.failed(verdict, stopped)
             return
+        writer.confirm()
 
 
 def _drive_datagrams(step: _Step, writer: _Writer, stream: object) -> None:
@@ -370,18 +529,27 @@ def _drive_datagrams(step: _Step, writer: _Writer, stream: object) -> None:
     to straddle — the reason chained stages are the simple case.
     """
     for datagram in stream.datagrams():
+        if writer.declined is not None:
+            writer.skip(datagram.off_start, datagram.off_end)
+            continue
         writer.ts = datagram.ts
+        writer.begin(datagram.off_start, datagram.off_end)
         cursor = Cursor(datagram.data, datagram.off_start)
-        reason = step(cursor, writer, datagram.data, datagram.off_start)
+        verdict = step(cursor, writer, datagram.data, datagram.off_start)
+        stopped = _stopped_at(cursor, datagram.off_start)
         # Whatever the message did not claim is this datagram's alone; a
         # following message cannot use it, so it is accounted for here. A
         # truncated datagram is a hole, so the *next* datagram's records do not
         # join these — across datagrams just as within a stream.
         writer.undecoded(
-            _stopped_at(cursor, datagram.off_start),
+            stopped,
             datagram.off_end,
-            reason or NodeStatus.SKIPPED.value,
+            NodeStatus.SKIPPED.value if verdict is None else verdict.reason,
         )
+        if verdict is None:
+            writer.confirm()
+        else:
+            writer.failed(verdict, stopped)
 
 
 def _stopped_at(cursor: Cursor, base: int) -> int:

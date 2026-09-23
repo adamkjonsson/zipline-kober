@@ -15,7 +15,11 @@ differ.
 
 from __future__ import annotations
 
+import random
+import sys
+from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -30,16 +34,20 @@ from fuzzing import (
     const_cases,
     fill_cases,
     framing_cases,
+    mutate,
     pointer_cases,
     select_cases,
     starved_cases,
     variants,
 )
+from zpf.reassembly import Gap
 
+from kober import stage
 from kober.cursor import Cursor
 from kober.decoder import Decoder
 from kober.emit import plan
 from kober.node import Node, NodeStatus
+from kober.pygen import render_spec
 from kober.spec import Emit, Field, Select, Spec
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
@@ -711,4 +719,187 @@ def test_a_repetitions_own_expressions_never_raise(seed: int):
             exc.add_note(f"escaped a decode: seed={seed} on {data!r}")
             raise
         check_tree(tree, data)
+
+
+# --- the stage driver: stream confirmation (#32) ---------------------------
+#
+# The first fuzzing of the driver in the suite. It needs streams — runs, gaps,
+# datagrams — rather than one buffer, so they are built as the small objects
+# the driver reads, and the driver writes to a stage that only records what it
+# was told. The reference is 0.3.0's driver loop, kept here: what a stream that
+# confirms writes must not have changed at all.
+
+TOY = """
+name: toy
+version: "1"
+entry: m
+input: either
+units:
+  m:
+    fields:
+      - {name: version, type: {int: {bits: 8}}}
+      - {name: magic, type: {int: {bits: 8}}, const: 0x42}
+      - {name: body, type: {int: {bits: 8}}}
+"""
+TOY_MESSAGES = (bytes([1, 0x42, 7]), bytes([1, 0, 7]), bytes([1, 0x42]))
+
+
+@dataclass
+class _Chunk:
+    data: bytes
+    off_start: int
+    ts: int
+
+
+@dataclass
+class _Datagram:
+    data: bytes
+    off_start: int
+    off_end: int
+    ts: int
+
+
+@dataclass
+class _Stream:
+    is_stream_oriented: bool
+    items: list[object]
+
+    def chunks(self) -> list[object]:
+        return self.items
+
+    def datagrams(self) -> list[object]:
+        return self.items
+
+
+class _Recording:
+    """A stage that keeps what the driver wrote, in order."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
+    def record(self, stream: object, payload: bytes, **kwargs: Any) -> None:
+        self.calls.append(("record", payload, tuple(sorted(kwargs.items(), key=str))))
+
+    def undecoded(
+        self, stream: object, off_start: int, off_end: int, *, reason: str, comment: Any = None
+    ) -> None:
+        self.calls.append(("undecoded", off_start, off_end, reason, comment))
+
+
+def _toy_stream(rng: random.Random) -> _Stream:
+    """Build one random stream: runs or datagrams of good, foreign and short messages."""
+    oriented = rng.random() < 0.5
+    items: list[object] = []
+    offset = 0
+    for index in range(rng.randint(1, 6)):
+        if oriented and items and rng.random() < 0.3:
+            width = rng.randint(1, 4)
+            items.append(Gap(offset, offset + width))
+            offset += width
+            continue
+        parts = [rng.choice(TOY_MESSAGES) for _ in range(rng.randint(1, 3) if oriented else 1)]
+        data = b"".join(parts)
+        if rng.random() < 0.2:
+            data = mutate(data, rng) or b"\x00"
+        if oriented:
+            items.append(_Chunk(data, offset, 1000 + index))
+        else:
+            items.append(_Datagram(data, offset, offset + len(data), 1000 + index))
+        offset += len(data)
+    return _Stream(oriented, items)
+
+
+def _reference(step: Any, writer: Any, stream: _Stream, verdicts: list[str]) -> None:
+    """0.3.0's driver loop: try every run and every datagram, whatever came before."""
+    ok, undecodable, skipped = "ok", NodeStatus.UNDECODABLE.value, NodeStatus.SKIPPED.value
+
+    def run_of(data: bytes, base: int) -> None:
+        cursor = Cursor(data, base)
+        end = base + len(data)
+        while not cursor.at_end():
+            before = cursor.tell()
+            verdict = step(cursor, writer, data, base)
+            verdicts.append(ok if verdict is None else verdict.reason)
+            if verdict is not None:
+                writer.undecoded(stage._stopped_at(cursor, base), end, verdict.reason)
+                return
+            if cursor.tell() == before:
+                writer.undecoded(stage._stopped_at(cursor, base), end, undecodable)
+                return
+
+    for item in stream.items:
+        if isinstance(item, Gap):
+            writer.undecoded(item.off_start, item.off_end, stage.GAP_REASON)
+        elif stream.is_stream_oriented:
+            writer.ts = item.ts
+            run_of(item.data, item.off_start)
+        else:
+            writer.ts = item.ts
+            cursor = Cursor(item.data, item.off_start)
+            verdict = step(cursor, writer, item.data, item.off_start)
+            verdicts.append(ok if verdict is None else verdict.reason)
+            reason = skipped if verdict is None else verdict.reason
+            writer.undecoded(stage._stopped_at(cursor, item.off_start), item.off_end, reason)
+    writer.flush()
+
+
+def _declines(verdicts: list[str]) -> bool:
+    """Whether a stream with these verdicts, in order, is one #32 declines."""
+    for verdict in verdicts:
+        if verdict == "ok":
+            return False
+        if verdict == NodeStatus.UNDECODABLE.value:
+            return True
+    return bool(verdicts)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_stream_is_declined_exactly_when_it_should_be_and_otherwise_unchanged(seed: int):
+    """The promises #32 makes, over every shape of stream the driver meets.
+
+    A stream that confirms — a whole message before any ``undecodable`` —
+    writes exactly what 0.3.0 wrote. A stream that does not is declined: no
+    record, every byte ``undecodable``, ``skipped`` or ``gap``, ``skipped``
+    only after the attempt, and every non-gap region saying why. Both drivers
+    write the same thing.
+    """
+    spec = Spec.from_yaml(TOY)
+    module = ModuleType(f"toy_fuzz_{seed}")
+    sys.modules[module.__name__] = module
+    exec(render_spec(spec), module.__dict__)
+    steps = (stage._interpreted(Decoder(spec)), stage._compiled(module))
+    rng = random.Random(seed)
+    declined = confirmed = 0
+    for _ in range(300):
+        stream = _toy_stream(rng)
+        outputs = []
+        for step in steps:
+            sink = _Recording()
+            stage._drive(step, stage._Writer(sink, stream, "toy"), stream)
+            outputs.append(sink.calls)
+        assert outputs[0] == outputs[1], f"the drivers disagree on {stream!r}"
+        written = outputs[0]
+
+        reference, verdicts = _Recording(), []
+        writer = stage._Writer(reference, stream, "toy")
+        writer.confirm()
+        _reference(steps[0], writer, stream, verdicts)
+
+        if not _declines(verdicts):
+            confirmed += 1
+            assert written == reference.calls, f"a confirmed stream changed: {stream!r}"
+            continue
+        declined += 1
+        assert [c for c in written if c[0] == "record"] == [], f"a record from {stream!r}"
+        regions = [c for c in written if c[0] == "undecoded"]
+        assert {r[3] for r in regions} <= {"undecodable", "skipped", "gap"}, stream
+        assert all(r[4] and r[4].startswith("not toy: ") for r in regions if r[3] != "gap")
+        tried = [r[1] for r in regions if r[3] == "undecodable"]
+        assert all(r[1] > min(tried) for r in regions if r[3] == "skipped"), stream
+        extent = sum(
+            len(item.data) if isinstance(item, _Chunk) else item.off_end - item.off_start
+            for item in stream.items
+        )
+        assert sum(r[2] - r[1] for r in regions) == extent, f"bytes unnamed in {stream!r}"
+    assert declined and confirmed, "the batch did not reach both outcomes"
 

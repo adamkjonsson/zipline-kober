@@ -116,6 +116,15 @@ or named as `undecodable`, `truncated`, `gap`, or `skipped` — never both, and
 never silently. An undecodable region is a conformant result rather than a
 failure, so `run` reports it and still succeeds.
 
+A stream is **confirmed** by its first whole message, and nothing kober writes
+for it is kept until then. One that fails before that, or ends without one, is
+taken to be in another protocol and is **declined**: no record for any of it,
+what was tried marked `undecodable` and the rest `skipped`, each region saying
+why (`not dns: …`). A stream in the right protocol whose first message is
+corrupt, or whose only message was cut short, is declined too. The bytes cannot
+tell it apart from a foreign one ([What a spec meets in someone else's
+stream](docs/format/concepts.md)).
+
 A field-granularity file also says what its records are: a **unit sequence**
 (`adjacency=units`, spec 0.21), meaning no two adjacent records may be assumed
 to join — `flags.qr` is *inside* `flags`, not after it. A message-granularity
