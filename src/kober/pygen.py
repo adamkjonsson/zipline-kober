@@ -1615,7 +1615,47 @@ class _Function:
         return all(value.kind is Kind.OBJECT for value in item.types)
 
     def present(self, index: int, item: FieldPlan, target: str | None, indent: int) -> None:
-        """Emit a field's read, at whatever indentation its condition left."""
+        """Emit a field's read, at whatever indentation its condition left.
+
+        A field the terminal rule leaves no bytes for — reachable only in a spec
+        run with ``check=False`` — has its read wrapped, so that a short read
+        starting with nothing left is reported ``undecodable`` with the reason
+        rather than ``truncated``, as the interpreter reports it
+        (:func:`kober.check.starved_fields`). Every other field is emitted
+        exactly as it would be without this, so a spec that passes ``check``
+        compiles to the same source.
+        """
+        starved = item.starved
+        if starved is None or starved.elements:
+            self.unguarded(index, item, target, indent)
+            return
+        pad = " " * indent
+        flag = f"_starved_{index}"
+        self.emit(f"{pad}{flag} = {self.nothing_left()}")
+        self.emit(f"{pad}try:")
+        self.unguarded(index, item, target, indent + 4)
+        self.starve(flag, starved.detail, indent)
+
+    def nothing_left(self) -> str:
+        """Return an expression for whether the position is at the end of the run.
+
+        In bits, as the interpreter's ``cursor.at_end()`` asks it: a position
+        part-way into the last byte still has bits to read.
+        """
+        if self.delta == 0:
+            return f"{ANCHOR} >= _size"
+        return f"{ANCHOR} * 8 + {self.delta} >= _size * 8"
+
+    def starve(self, flag: str, detail: str, indent: int) -> None:
+        """Close a starved read's ``try``: a short read from nothing is a spec fault."""
+        pad = " " * indent
+        self.emit(f"{pad}except TruncatedRead as _exc:")
+        self.emit(f"{pad}    if not {flag}:")
+        self.emit(f"{pad}        raise")
+        self.emit(f"{pad}    raise Undecodable({_literal(detail)}, _exc.at) from _exc")
+
+    def unguarded(self, index: int, item: FieldPlan, target: str | None, indent: int) -> None:
+        """Emit a field's read with nothing around it."""
         pad = " " * indent
         if self.redirected(item):
             self.pointer(index, item, target, indent)
@@ -1806,6 +1846,8 @@ class _Function:
             self.emit(f"{pad}{_spans_local(item.name)}: list[tuple[int, int]] = []")
         if indexed and not counted:
             self.emit(f"{pad}_index = 0")
+        if item.starved is not None and item.starved.elements:
+            self.emit(f"{pad}_rs_{index} = {ANCHOR}")
         if counted:
             self.count(index, item.repeat, indent, indexed=indexed)
         elif isinstance(item.repeat, ToEnd):
@@ -1819,7 +1861,18 @@ class _Function:
         marked = not self.container(item) and (self.emits(item) or self.skips(item))
         if marked:
             self.emit(f"{inner}_emark = {ORIGIN}")
-        self.value(index, item, ELEMENT_LOCAL, indent + 4, self.element_path(item))
+        starved = item.starved if item.starved is not None and item.starved.elements else None
+        if starved is None:
+            self.value(index, item, ELEMENT_LOCAL, indent + 4, self.element_path(item))
+        else:
+            # A repetition that reads to the end: its first element takes
+            # everything, so a later one starts with nothing left. The loop's
+            # top is settled, so the anchor is exact here.
+            flag = f"_starved_{index}"
+            self.emit(f"{inner}{flag} = {ANCHOR} >= _size and {ANCHOR} > _rs_{index}")
+            self.emit(f"{inner}try:")
+            self.value(index, item, ELEMENT_LOCAL, indent + 8, self.element_path(item))
+            self.starve(flag, starved.detail, indent + 4)
         if marked:
             self.emit(f"{inner}_es, _ee = _emark, {self.end()}")
             self.account(

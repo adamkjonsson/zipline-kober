@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING
 
-from kober.check import fill_widths, require_valid
+from kober.check import Starved, fill_widths, require_valid, starved_fields
 from kober.cursor import Cursor
 from kober.errors import EvalError, TruncatedRead
 from kober.expr import ExprValue, evaluate
@@ -104,6 +104,23 @@ class _Read:
     hops: int = 0
 
 
+def _starved(node: Node, starved: Starved) -> Node:
+    """Name a starved field's short read for what it is.
+
+    Called only for a field the terminal rule leaves no bytes for, and only when
+    it started with nothing left to read — which is what a field after a
+    ``remaining`` always meets, and what honestly short input almost never does.
+    A ``truncated`` there says the input was cut short, and it was not: every
+    byte arrived and the spec read them into the field before. ``truncated`` is
+    hole-class, so leaving it would put a false break in a stream that had none
+    — the reason a short read inside a ``pointer`` target is converted too
+    (``DESIGN.md`` §11.5). Any other status is left alone.
+    """
+    if node.status is not NodeStatus.TRUNCATED:
+        return node
+    return replace(node, status=NodeStatus.UNDECODABLE, detail=starved.detail)
+
+
 def _indexed(name: str | None, elements: list[Node]) -> list[Node]:
     """Name a repetition's elements ``field[0]``, ``field[1]``, and so on.
 
@@ -145,6 +162,11 @@ class _Frame:
     #: the loop that knows which field it belongs to — and the frame is already
     #: the thing that travels that distance.
     fill: int | None = None
+    #: Whether the field being decoded is one the terminal rule leaves no bytes
+    #: for (:func:`kober.check.starved_fields`), and why. Set per field for the
+    #: reason :attr:`fill` is: a repetition's elements are decoded below the
+    #: loop that knows which field they belong to.
+    starved: Starved | None = None
 
     def root(self) -> _Frame:
         """Return the outermost frame."""
@@ -242,6 +264,10 @@ class Decoder:
         #: spec does not fix, which only reaches here under ``check=False`` and
         #: becomes an ``undecodable`` field rather than a guess.
         self._fills = fill_widths(spec)
+        #: The fields a spec that ``check`` would refuse leaves no bytes for,
+        #: by ``(unit, field index)`` — precomputed for the reason
+        #: :attr:`_fills` is. Empty for every spec that passes ``check``.
+        self._starved = starved_fields(spec)
 
     def decode_bytes(self, data: bytes, *, base: int = 0) -> Node:
         """Decode one buffer as a single instance of the entry unit.
@@ -374,9 +400,13 @@ class Decoder:
         try:
             for index, item in enumerate(unit.fields):
                 frame.fill = self._fills.get((unit.name, index))
+                frame.starved = self._starved.get((unit.name, index))
+                empty = cursor.at_end()
                 child = self._field(item, frame, cursor, read)
                 if child is None:
                     continue
+                if empty and frame.starved is not None and not frame.starved.elements:
+                    child = _starved(child, frame.starved)
                 children.append(child)
                 if item.name is not None:
                     frame.named[item.name] = child
@@ -484,13 +514,18 @@ class Decoder:
             if wanted < 0:
                 raise _Stop(NodeStatus.UNDECODABLE, f"negative repeat count {wanted}")
 
+        start = cursor.tell()
+        starved = frame.starved if frame.starved is not None and frame.starved.elements else None
         while True:
             if wanted is not None and count >= wanted:
                 return
             if isinstance(repeat, ToEnd) and cursor.at_end():
                 return
             before = cursor.tell()
+            empty = cursor.at_end()
             element = self._one(item, item.type, frame, cursor, read)
+            if starved is not None and empty and before > start:
+                element = _starved(element, starved)
             yield element
             count += 1
             if element.status is not NodeStatus.OK:

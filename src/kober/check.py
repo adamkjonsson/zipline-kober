@@ -121,6 +121,27 @@ class Finding:
         return f"{self.severity.value}: {self.where}: {self.message}"
 
 
+@dataclass(frozen=True)
+class Starved:
+    """A field the spec leaves no bytes for, and why.
+
+    What :func:`starved_fields` reports for one field, and what both backends
+    need in order to name the fault correctly when a spec that ``check`` would
+    refuse is run anyway.
+
+    Attributes:
+        detail: The explanation a decode reports: which field ran out, and
+            which field before it read to the end of the message.
+        elements: Whether it is the field's own elements after the first that
+            are starved, rather than the whole field — a repeated field that
+            reads to the end, whose first element takes everything.
+
+    """
+
+    detail: str
+    elements: bool = False
+
+
 def check(spec: Spec) -> tuple[Finding, ...]:
     """Validate a spec against everything that needs the whole spec in view.
 
@@ -349,6 +370,84 @@ def _reaches_end(item: Field, terminal: dict[str, str]) -> str | None:
         if isinstance(kind, UnitRef) and kind.unit in terminal:
             return f"{label}.{terminal[kind.unit]}"
     return None
+
+
+def starved_fields(spec: Spec) -> dict[tuple[str, int], Starved]:
+    """Return every field the terminal rule leaves no bytes for, by position.
+
+    The fields ``check`` refuses a spec over: anything that reads input after a
+    field that reads to the end of the message — its own ``remaining``, or a
+    unit that is terminal (:func:`terminal_units`) — in the same unit, and the
+    elements after the first of a repeated one. Keyed ``(unit name, field
+    index)`` like :func:`fill_widths`, and precomputed by both backends for the
+    same reason: a spec run with ``check=False`` reaches the fault at decode
+    time, and there the field that runs out reports ``truncated`` — a
+    hole-class verdict claiming the input was cut short, when it arrived whole
+    and the spec read it wrongly. Knowing which fields are starved lets a
+    backend say ``undecodable`` instead, as a ``pointer`` target already does
+    (``DESIGN.md`` §11.5).
+
+    A spec that passes ``check`` has no starved field, so this is empty for
+    every spec a backend normally runs.
+
+    Args:
+        spec: The spec.
+
+    Returns:
+        For each starved field, the explanation to report.
+
+    Example:
+        >>> starved_fields(spec)
+        {('message', 2): Starved(detail="'crc' has no bytes left: ...", elements=False)}
+
+    """
+    terminal = terminal_units(spec)
+    found: dict[tuple[str, int], Starved] = {}
+    for unit in spec.units.values():
+        for index, item in enumerate(unit.fields):
+            label = item.name or f"<anonymous {index}>"
+            phrase = _terminal_phrase(label, item, terminal)
+            if phrase is None:
+                continue
+            if item.repeat is not None:
+                found.setdefault(
+                    (unit.name, index),
+                    Starved(
+                        f"the elements of {label!r} after the first have no bytes left: "
+                        f"{phrase}",
+                        elements=True,
+                    ),
+                )
+            for position, later in enumerate(unit.fields):
+                if position > index and _reads_input(later.type):
+                    name = later.name or f"<anonymous {position}>"
+                    found[unit.name, position] = Starved(f"{name!r} has no bytes left: {phrase}")
+    return found
+
+
+def _terminal_phrase(label: str, item: Field, terminal: dict[str, str]) -> str | None:
+    """Say how a field reads to the end of the message, or ``None`` if it does not.
+
+    Only what counts at the reference site: the field's own ``remaining``, or a
+    reference to a terminal unit. Its own ``fill`` does not, since a fill's
+    trailer is in the same unit and sizing against it is what ``fill`` is for.
+    One wording, shared by ``check``'s error and the decode-time verdict, so the
+    two name the same cause the same way.
+    """
+    if any(isinstance(_size_of(kind), Remaining) for kind in _walk_types_read(item.type)):
+        return f"{label!r} reads to the end of the message"
+    through = next(
+        (
+            (kind.unit, terminal[kind.unit])
+            for kind in _walk_types_read(item.type)
+            if isinstance(kind, UnitRef) and kind.unit in terminal
+        ),
+        None,
+    )
+    if through is None:
+        return None
+    target, path = through
+    return f"{label!r} is unit {target!r}, which reads to the end of the message through {path!r}"
 
 
 def _walk_types_read(kind: FieldType) -> Iterator[FieldType]:
@@ -780,18 +879,8 @@ class _Checker:
         """Apply the terminal rule to one field, at its position in ``unit``."""
         label = item.name or f"<anonymous {index}>"
         where = f"{self.spec.name}.{unit.name}.{label}"
-        own = any(
-            isinstance(_size_of(kind), Remaining) for kind in _walk_types_read(item.type)
-        )
-        through = next(
-            (
-                (kind.unit, terminal[kind.unit])
-                for kind in _walk_types_read(item.type)
-                if isinstance(kind, UnitRef) and kind.unit in terminal
-            ),
-            None,
-        )
-        if not own and through is None:
+        phrase = _terminal_phrase(label, item, terminal)
+        if phrase is None:
             return
         if item.repeat is not None:
             self.error(
@@ -810,19 +899,9 @@ class _Checker:
         )
         if starved is None:
             return
-        if own:
-            self.error(
-                where,
-                f"{label!r} reads to the end of the message, but {starved!r} is "
-                "decoded after it and would have no bytes left",
-            )
-            return
-        target, path = through
         self.error(
             where,
-            f"{label!r} is unit {target!r}, which reads to the end of the message "
-            f"through {path!r}, but {starved!r} is decoded after it and would have "
-            "no bytes left",
+            f"{phrase}, but {starved!r} is decoded after it and would have no bytes left",
         )
 
     def _check_field(self, unit: Unit, index: int, item: Field) -> None:

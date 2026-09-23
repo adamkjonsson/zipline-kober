@@ -523,6 +523,16 @@ regions and none of them raise. A short read *inside* a target is converted to
 `undecodable` rather than propagated as `truncated`, because `truncated` is
 hole-class (§5) and would claim the stream had a gap it did not have.
 
+The same principle has a second application, outside `pointer`. A spec that
+breaks the terminal rule — a field that reads input after one that reads to
+the end of the message — is refused by `check`, but `check=False` runs it, and
+there the starved field's short read is the spec's fault and not the input's.
+Both backends precompute the starved fields (`kober.check.starved_fields`, as
+they do `fill_widths`) and report such a read `undecodable` with the reason.
+They do so only when the field started with nothing left to read, since
+`check` ignores conditions and a `remaining` that was absent from a message
+starves nothing: a field after it that runs out is really `truncated`.
+
 #### `Select` — asking a question about a repetition, revision 9
 
 ```python

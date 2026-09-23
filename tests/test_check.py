@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from kober.check import Severity, check, terminal_units, trailing_width
+from kober.check import Severity, Starved, check, starved_fields, terminal_units, trailing_width
 from kober.expr import ExprType, parse
 from kober.loader import from_yaml
 from kober.spec import (
@@ -1765,3 +1767,83 @@ def test_a_remaining_inside_a_pointer_target_starves_nothing():
     )
     assert check(spec) == ()
     assert "message" not in terminal_units(spec)
+
+
+# --- starved_fields: what the terminal rule means at decode time (#43) -------
+
+SHIPPED = sorted(
+    [
+        *(Path(__file__).resolve().parent.parent / "examples").glob("*.yaml"),
+        *(Path(__file__).resolve().parent / "packeteer").glob("*.yaml"),
+    ]
+)
+
+
+@pytest.mark.parametrize("path", SHIPPED, ids=lambda path: path.name)
+def test_no_shipped_spec_has_a_starved_field(path: Path):
+    """What makes the decode-time conversion invisible to every spec that checks clean."""
+    assert starved_fields(Spec.from_file(path)) == {}
+
+
+def test_the_fields_after_a_remaining_are_starved_and_a_computed_is_not():
+    """Every field that reads after it, not only the first one ``check`` names.
+
+    A condition can leave the first absent, and then it is the next that runs
+    out; ``computed`` reads nothing where it stands and cannot.
+    """
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    bits("count"),
+                    to_end("data", Remaining()),
+                    Field(name="doubled", type=Computed(expr=parse("count * 2"))),
+                    bits("crc", 16),
+                    bits("tail"),
+                ],
+            )
+        ]
+    )
+    reason = "'data' reads to the end of the message"
+    assert starved_fields(spec) == {
+        ("message", 3): Starved(f"'crc' has no bytes left: {reason}"),
+        ("message", 4): Starved(f"'tail' has no bytes left: {reason}"),
+    }
+
+
+def test_a_field_after_a_terminal_unit_is_starved_with_the_path_through_it():
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[Field(name="body", type=UnitRef(unit="inner")), bits("trailer", 32)],
+            ),
+            inner(to_end("data", Fill()), bits("tag")),
+        ]
+    )
+    assert starved_fields(spec) == {
+        ("message", 1): Starved(
+            "'trailer' has no bytes left: 'body' is unit 'inner', which reads to the end "
+            "of the message through 'data'"
+        )
+    }
+
+
+def test_a_repeated_terminal_field_starves_its_own_later_elements():
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[Field(name="recs", type=UnitRef(unit="inner"), repeat=Count(parse("2")))],
+            ),
+            inner(bits("tag"), to_end("data", Remaining())),
+        ]
+    )
+    assert starved_fields(spec) == {
+        ("message", 0): Starved(
+            "the elements of 'recs' after the first have no bytes left: 'recs' is unit "
+            "'inner', which reads to the end of the message through 'data'",
+            elements=True,
+        )
+    }

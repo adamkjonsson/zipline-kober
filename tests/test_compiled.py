@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+import re
 import struct
 import sys
 from pathlib import Path
@@ -33,11 +34,14 @@ from fuzzing import (
     SEEDS,
     SELECT_MESSAGE,
     SELECT_SPEC,
+    STARVED_MESSAGE,
+    STARVED_SPECS,
     cases,
     const_cases,
     framing_cases,
     pointer_cases,
     select_cases,
+    starved_cases,
     variants,
 )
 from zpf.blocks import UNDECODED_REASONS
@@ -96,7 +100,7 @@ HTTP_MESSAGES = [
 _MODULES: dict[str, ModuleType] = {}
 
 
-def compiled(spec: Spec, emit: Emit = Emit.MESSAGE) -> ModuleType:
+def compiled(spec: Spec, emit: Emit = Emit.MESSAGE, *, check: bool = True) -> ModuleType:
     """Compile a spec and import the module, without going through a file.
 
     Registered in ``sys.modules`` because ``dataclasses`` looks a class's module
@@ -104,7 +108,7 @@ def compiled(spec: Spec, emit: Emit = Emit.MESSAGE) -> ModuleType:
     also true of a generated module a consumer imports normally, so nothing is
     being papered over.
     """
-    source = render(Plan.from_spec(spec), emit=emit)
+    source = render(Plan.from_spec(spec, check=check), emit=emit)
     if source in _MODULES:
         return _MODULES[source]
     name = f"compiled_{spec.name}_{len(_MODULES)}"
@@ -222,7 +226,7 @@ def merged(regions: list[Unclaimed]) -> list[Unclaimed]:
 
 
 def interpreted(
-    spec: Spec, data: bytes, emit: Emit, base: int = 0
+    spec: Spec, data: bytes, emit: Emit, base: int = 0, *, check: bool = True
 ) -> tuple[list[Emission], list[Unclaimed]]:
     """Return what the interpreter would write for ``data``, tail included.
 
@@ -230,7 +234,7 @@ def interpreted(
     so the driver's part is done here — otherwise the two sides would be compared
     over different amounts of input.
     """
-    tree = Decoder(spec).decode_bytes(data, base=base)
+    tree = Decoder(spec, check=check).decode_bytes(data, base=base)
     emissions, unclaimed = plan(spec, tree, data, emit=emit, base=base)
     end = base + len(data)
     if tree.off_end < end:
@@ -240,18 +244,20 @@ def interpreted(
 
 
 def emitted(
-    spec: Spec, data: bytes, emit: Emit, base: int = 0
+    spec: Spec, data: bytes, emit: Emit, base: int = 0, *, check: bool = True
 ) -> tuple[list[Emission], list[Unclaimed]]:
     """Return what the generated module writes for ``data``."""
     sink = RecordingSink()
-    compiled(spec, emit).decode(data, base=base, sink=sink)
+    compiled(spec, emit, check=check).decode(data, base=base, sink=sink)
     sink.finish()
     return sink.records, sink.regions
 
 
-def writes(spec: Spec, data: bytes, emit: Emit, base: int = 0) -> None:
+def writes(spec: Spec, data: bytes, emit: Emit, base: int = 0, *, check: bool = True) -> None:
     """Require both implementations to write the same thing for ``data``."""
-    assert emitted(spec, data, emit, base) == interpreted(spec, data, emit, base)
+    assert emitted(spec, data, emit, base, check=check) == interpreted(
+        spec, data, emit, base, check=check
+    )
 
 
 def compare(spec: Spec, data: bytes, base: int = 0) -> None:
@@ -898,6 +904,105 @@ def test_a_file_from_an_entry_marked_field_is_the_same_file_both_ways(tmp_path: 
     assert written == blocks(from_interpreter)
     assert {block[2] for block in written if block[0] == "participant"} == {zpf.Adjacency.UNITS}
     assert_conformant(from_compiler, source)
+
+
+# --- a field the spec leaves no bytes for (#43) ----------------------------
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+@pytest.mark.parametrize("name", sorted(STARVED_SPECS))
+def test_a_starved_field_is_undecodable_not_truncated(name: str, emit: Emit):
+    """Regression for #43: the input was whole, and the spec read it wrongly.
+
+    ``truncated`` is hole-class: it says bytes never arrived, and a file that
+    says so declares a break in a stream that had none. The bytes the starved
+    field needed were read, and cited, by the field before it — so what is true
+    is ``undecodable``, with the reason. Both backends, through the same
+    comparison every other differential uses.
+    """
+    source, detail, _ = STARVED_SPECS[name]
+    spec = inline(source)
+    data = STARVED_MESSAGE
+    tree = Decoder(spec, check=False).decode_bytes(data)
+    assert (tree.status, tree.detail) == (NodeStatus.UNDECODABLE, detail)
+    with pytest.raises(Undecodable, match=re.escape(detail)):
+        compiled(spec, emit, check=False).decode_from(Cursor(data, 0))
+    written, unclaimed = interpreted(spec, data, emit, check=False)
+    assert all(region.reason != "truncated" for region in unclaimed)
+    if emit is Emit.MESSAGE:
+        assert written == []
+        assert [(u.off_start, u.off_end, u.reason) for u in unclaimed] == [(0, 5, "undecodable")]
+    writes(spec, data, emit, check=False)
+
+
+def test_a_starved_field_is_named_only_when_nothing_was_left():
+    """Short input is still short input, under the same refused spec.
+
+    ``check`` does not look at conditions, so it lists ``crc`` as starved even
+    though ``body`` is absent whenever ``flag`` is not 1. Then nothing read to
+    the end, and a ``crc`` cut short by a short message is a real
+    ``truncated``. The guard is that a starved field is converted only when it
+    started with nothing left, which is what follows a real ``remaining`` and
+    is not what follows a missing one.
+    """
+    spec = inline("""
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: flag, type: {int: {bits: 8}}}
+              - {name: body, type: {bytes: {size: {remaining: {}}}}, condition: "flag == 1"}
+              - {name: crc, type: {int: {bits: 16}}}
+    """)
+    cases = ((b"\x00\xaa", NodeStatus.TRUNCATED), (b"\x01\xaa", NodeStatus.UNDECODABLE))
+    for data, status in cases:
+        assert Decoder(spec, check=False).decode_bytes(data).status is status, data
+        for emit in (Emit.FIELD, Emit.MESSAGE):
+            writes(spec, data, emit, check=False)
+
+
+def test_the_first_element_of_a_repeated_terminal_unit_may_still_run_out():
+    """Only the elements *after* the first are starved; the first is ordinary.
+
+    Over one byte, ``n`` takes it and the first element's ``tag`` starts with
+    nothing left — because the message ended, not because a field before it
+    read to the end, which is exactly what ``truncated`` means. Asserted on each
+    backend directly as well as through the output, since at field granularity
+    the zero-width failure leaves no region to compare.
+    """
+    spec = inline(STARVED_SPECS["repeated terminal unit"][0])
+    data = b"\x01"
+    assert Decoder(spec, check=False).decode_bytes(data).status is NodeStatus.TRUNCATED
+    with pytest.raises(TruncatedRead):
+        compiled(spec, Emit.MESSAGE, check=False).decode_from(Cursor(data, 0))
+    for emit in (Emit.FIELD, Emit.MESSAGE):
+        writes(spec, data, emit, check=False)
+
+
+def test_a_fill_on_a_short_run_is_still_truncated():
+    """The ordinary use of ``fill``, which passes ``check``, is not touched.
+
+    A run too short for the trailer fails at the fill itself, before anything is
+    starved — the case the phase plan feared a broader rule would misname.
+    """
+    spec = awkward("fill")
+    tree = Decoder(spec).decode_bytes(b"\x03HE")
+    assert tree.status is NodeStatus.TRUNCATED
+    writes(spec, b"\x03HE", Emit.FIELD)
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+@pytest.mark.parametrize("name", sorted(STARVED_SPECS))
+def test_the_two_agree_on_starved_fields_over_mutated_input(name: str, emit: Emit):
+    """Same verdict, same offset, same regions, whatever the input does to the guard."""
+    spec = inline(STARVED_SPECS[name][0])
+    for data in starved_cases(3):
+        try:
+            writes(spec, data, emit, check=False)
+        except AssertionError as exc:
+            exc.add_note(f"disagreed: {name!r} {emit.value} on {data!r}")
+            raise
 
 
 # --- through a real decode stage --------------------------------------------

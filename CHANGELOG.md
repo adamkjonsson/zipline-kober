@@ -22,6 +22,15 @@ minor bump here too.
 
 ## [Unreleased]
 
+### Added
+
+- `kober.check.starved_fields()` and `kober.check.Starved`: the fields the
+  terminal rule leaves no bytes for, keyed `(unit, field index)` like
+  `fill_widths()`, with the explanation a decode reports
+  ([#43](https://github.com/adamkjonsson/zipline-kober/issues/43)). Empty for
+  every spec that passes `check`. `kober.ops.FieldPlan` carries each field's
+  entry as `starved`, so a backend can name the fault.
+
 ### Fixed
 
 - **An `emit` on the entry unit now wins over `--emit` in both backends**
@@ -39,6 +48,18 @@ minor bump here too.
   only for a spec with `emit` on its entry unit**, and no shipped example has
   one. A module compiled from such a spec should be regenerated with
   `kober compile`.
+- **A field the spec leaves no bytes for is `undecodable`, not `truncated`**
+  ([#43](https://github.com/adamkjonsson/zipline-kober/issues/43)). A spec
+  that reads anything after a `remaining`, or after a unit that reads to the
+  end of the message, is refused by `check` since 0.3.0. Run anyway with
+  `Decoder(spec, check=False)`, the field after it used to report
+  `truncated`. That verdict is hole-class and claims the input was cut short,
+  when it arrived whole and the spec gave its bytes away. Both backends now
+  report `undecodable` with the reason, e.g. `'crc' has no bytes left: 'body'
+  reads to the end of the message`, as a `pointer` target already did.
+  Reachable **only with `check=False`**. They do so only when the field
+  started with nothing left, so a short message is still `truncated` where
+  the field that would have read to the end was absent.
 
 ### Documentation
 

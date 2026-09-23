@@ -25,12 +25,14 @@ from fuzzing import (
     FILL_TRAILING,
     SEEDS,
     SELECT_SPEC,
+    STARVED_SPECS,
     cases,
     const_cases,
     fill_cases,
     framing_cases,
     pointer_cases,
     select_cases,
+    starved_cases,
 )
 
 from kober.cursor import Cursor
@@ -647,3 +649,33 @@ def test_a_constant_never_makes_a_byte_both_cited_and_undecoded(seed: int, emit:
             f"const {emit.value}: {len(overlap)} byte(s) both cited and marked "
             f"undecoded on {data!r}"
         )
+
+
+# --- a spec the terminal rule refuses, run anyway (#43) ----------------------
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+@pytest.mark.parametrize("name", sorted(STARVED_SPECS))
+def test_a_message_read_to_its_end_is_never_called_truncated(name: str, seed: int):
+    """Once a field has read to the end of the message, the input was not short.
+
+    Whatever runs out after it ran out because the spec gave its bytes away, so
+    ``truncated`` — a claim that bytes never arrived — would be false for every
+    such input. The invariant is asserted over the mutated batch rather than one
+    example because the guard that decides it (the starved field started with
+    nothing left) is a claim about every input, and the batch is checked to have
+    reached the case at all, so the test cannot pass by never getting there.
+    """
+    source, _, terminal = STARVED_SPECS[name]
+    decoder = Decoder(Spec.from_yaml(source), check=False)
+    reached = 0
+    for data in starved_cases(seed):
+        tree = decoder.decode_bytes(data)
+        if not any(node.name == terminal and node.status is NodeStatus.OK for node in tree.walk()):
+            continue
+        reached += 1
+        assert tree.status is not NodeStatus.TRUNCATED, (
+            f"{name}: {terminal!r} read to the end and the message still said "
+            f"truncated on {data!r}: {tree.detail}"
+        )
+    assert reached, f"{name}: no variant decoded {terminal!r} whole"
