@@ -45,7 +45,7 @@ from zpfcompare import assert_conformant, blocks
 
 from kober.cli import main
 from kober.decoder import Decoder
-from kober.emit import Emission, Unclaimed, plan
+from kober.emit import Emission, Unclaimed, plan, root_emit
 from kober.errors import CompileError, EvalError, TruncatedRead, Undecodable
 from kober.node import Node, NodeStatus
 from kober.ops import Plan
@@ -821,6 +821,85 @@ def test_a_unit_reached_at_two_granularities_is_refused():
         compiled(spec, Emit.FIELD)
 
 
+def entry_at(granularity: Emit) -> Spec:
+    """Return a two-field spec whose entry unit names its own granularity."""
+    return inline(f"""
+        name: t
+        version: "1"
+        entry: m
+        units:
+          m:
+            emit: {granularity.value}
+            fields:
+              - {{name: tag, type: {{int: {{bits: 16}}}}}}
+              - {{name: body, type: {{int: {{bits: 16}}}}}}
+    """)
+
+
+#: What each granularity writes for ``entry_at`` over four bytes: the records,
+#: then the regions.
+AT_ENTRY = {
+    Emit.FIELD: ([("prim:u16", "t.tag", 0, 2), ("prim:u16", "t.body", 2, 4)], []),
+    Emit.MESSAGE: ([("dec:t-message", None, 0, 4)], []),
+    Emit.NONE: ([], [(0, 4, "skipped")]),
+}
+
+
+@pytest.mark.parametrize("default", list(Emit), ids=lambda e: f"decoder-{e.value}")
+@pytest.mark.parametrize("own", list(Emit), ids=lambda e: f"entry-{e.value}")
+def test_the_entry_units_own_emit_wins_over_the_decoders(own: Emit, default: Emit):
+    """Regression for #40: field, then unit, then enclosing unit, then decoder.
+
+    The entry unit is a unit, so its own ``emit`` wins over the decoder's for
+    the whole message. Every nested unit already worked that way; the entry did
+    not, in either backend. The interpreter branched on the entry's setting and
+    then walked the leaves with the decoder's, so an entry marked ``field`` was
+    walked at ``--emit none`` and every leaf skipped. The compiler never read
+    the entry's setting at all, so at ``--emit message`` it wrote one message
+    record where the entry asked for fields. Each backend is asserted on its own
+    as well as against the other, so that when they disagree the failure says
+    which one is wrong.
+    """
+    spec = entry_at(own)
+    data = bytes.fromhex("12345678")
+    records, regions = AT_ENTRY[own]
+    for side in (interpreted, emitted):
+        written, unclaimed = side(spec, data, default)
+        assert [(r.content_type, r.role, r.off_start, r.off_end) for r in written] == records, (
+            side.__name__
+        )
+        assert [(u.off_start, u.off_end, u.reason) for u in unclaimed] == regions, side.__name__
+    writes(spec, data, default)
+
+
+@pytest.mark.parametrize("default", list(Emit), ids=lambda e: f"decoder-{e.value}")
+def test_a_module_records_the_granularity_its_entry_resolved_to(default: Emit):
+    """``EMIT`` is what the entry resolved to, not the flag the compiler was given.
+
+    It is what the stage driver declares the output's adjacency from, so it has
+    to agree with what the interpreter's driver derives from the same spec.
+    """
+    spec = entry_at(Emit.FIELD)
+    assert compiled(spec, default).EMIT == root_emit(spec, default).value == "field"
+
+
+def test_a_file_from_an_entry_marked_field_is_the_same_file_both_ways(tmp_path: Path):
+    """The whole file, participant line included, at the granularity #40 broke."""
+    spec = entry_at(Emit.FIELD)
+    source = tmp_path / "transport.zpf"
+    write_transport(source, bytes.fromhex("12345678"), bytes.fromhex("9abc"))
+    from_compiler = tmp_path / "compiled.zpf"
+    run_stage(spec, Emit.MESSAGE, source, from_compiler)
+    from_interpreter = tmp_path / "interpreted.zpf"
+    Decoder(spec, emit=Emit.MESSAGE).run(
+        source, from_interpreter, produced_by="kober compiler", produced_at=1_700_000_000
+    )
+    written = blocks(from_compiler)
+    assert written == blocks(from_interpreter)
+    assert {block[2] for block in written if block[0] == "participant"} == {zpf.Adjacency.UNITS}
+    assert_conformant(from_compiler, source)
+
+
 # --- through a real decode stage --------------------------------------------
 
 
@@ -1188,6 +1267,27 @@ AWKWARD["text arithmetic"] = """
             condition: "lower(size) == size"
 """
 
+AWKWARD["entry granularity"] = """
+    name: entry
+    version: "1"
+    entry: m
+    units:
+      m:
+        emit: field
+        fields:
+          - {name: kind, type: {int: {bits: 8}}}
+          - {name: quiet, type: {unit: inner}, emit: none}
+          - {name: loud, type: {unit: other}}
+          - {name: tail, type: {bytes: {size: {remaining: true}}}}
+      inner:
+        fields:
+          - {name: a, type: {int: {bits: 4}}}
+          - {name: b, type: {int: {bits: 4}}}
+      other:
+        fields:
+          - {name: c, type: {int: {bits: 16}}}
+"""
+
 AWKWARD_SEEDS: dict[str, bytes] = {
     "bitfields": bytes(range(1, 12)),
     "signed and wide": bytes(range(0x80, 0x90)),
@@ -1202,6 +1302,7 @@ AWKWARD_SEEDS: dict[str, bytes] = {
     # real owner name makes when it points into an earlier record's rdata.
     "back-reference": bytes([0xAA, 0xBB, 0xCC, 0xDD, 1, 9, 9, 9]),
     "text arithmetic": b"1a\r\n" + b"x" * 26 + b"rest",
+    "entry granularity": bytes([7, 0xA5, 0x12, 0x34]) + b"tail",
 }
 
 

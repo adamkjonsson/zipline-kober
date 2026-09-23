@@ -22,6 +22,24 @@ minor bump here too.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An `emit` on the entry unit now wins over `--emit` in both backends**
+  ([#40](https://github.com/adamkjonsson/zipline-kober/issues/40)). The
+  documented chain is field → unit → enclosing unit → decoder, and every
+  nested unit followed it, but the entry unit did not. The interpreter chose
+  the whole message's output from the entry's setting and then walked its
+  fields with the decoder's, so an entry marked `emit: field` wrote nothing at
+  `--emit none`. The compiler never read the entry's setting at all, so at
+  `--emit message` it wrote one message record where the interpreter wrote
+  fields. `--emit` is now the default it was documented as, and both backends
+  build the whole message at the entry's own granularity when it names one. A
+  generated module's `EMIT` records that granularity rather than the flag,
+  and so does the participant adjacency derived from it. **Output changes
+  only for a spec with `emit` on its entry unit**, and no shipped example has
+  one. A module compiled from such a spec should be regenerated with
+  `kober compile`.
+
 ### Documentation
 
 - **The deeper pipeline is a script**, `tools/pipeline.py`

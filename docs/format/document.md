@@ -206,7 +206,11 @@ nothing and produces no node.
 
 `emit` is `message`, `field`, or `none`, and resolves **field → unit →
 enclosing unit → decoder**. A field naming its own granularity therefore wins
-over the unit holding it.
+over the unit holding it, and a unit's wins over the decoder's — **the entry
+unit's included**. `kober run --emit` and `kober compile --emit` set the
+decoder's granularity, which is only the default: an entry unit that says
+`emit: field` is decoded at field granularity whatever the flag says, by the
+interpreter and by a compiled module alike.
 
 - `message` — one record per top-level unit instance, payload the message
   bytes.

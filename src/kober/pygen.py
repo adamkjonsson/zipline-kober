@@ -846,6 +846,29 @@ def _group(text: str, level: int, limit: int) -> str:
 # --- emission --------------------------------------------------------------
 
 
+def _root_granularity(plan: Plan, default: Emit) -> Emit:
+    """Return the granularity in force at the entry unit.
+
+    The entry unit's own ``emit`` if it has one, else the decoder's — what
+    :func:`kober.emit.root_emit` answers for the interpreter, read off the plan.
+    It is the granularity of the whole module: whether it writes one record per
+    message, walks to the leaves, or writes nothing, whether its functions carry
+    a sink at all, and what it records in ``EMIT``. The entry is a unit like any
+    other, so its setting wins over the decoder's exactly as a nested unit's
+    does; resolving it here, once, is what keeps every one of those decisions
+    agreeing with the interpreter's.
+
+    Args:
+        plan: The plan being compiled.
+        default: The granularity the decoder was asked for.
+
+    Returns:
+        The granularity the module is built at.
+
+    """
+    return plan.object(plan.entry).emit or default
+
+
 def granularity(plan: Plan, default: Emit) -> Mapping[str, Emit]:
     """Return the granularity in force inside each unit.
 
@@ -853,7 +876,9 @@ def granularity(plan: Plan, default: Emit) -> Mapping[str, Emit]:
     own ``emit`` wins, then its unit's, then whatever encloses it, then the
     decoder's. A compiler resolves it once, which is the same rule read from the
     other end — and it can, because what a unit inherits is decided by the sites
-    that reference it.
+    that reference it. The entry unit is referenced by no site, so it starts
+    from its own ``emit`` if it names one and from ``default`` only if it does
+    not; that one granularity is what the whole module is built at.
 
     Args:
         plan: The plan being compiled.
@@ -870,7 +895,7 @@ def granularity(plan: Plan, default: Emit) -> Mapping[str, Emit]:
             picking one.
 
     """
-    inside: dict[str, Emit] = {plan.entry: default}
+    inside: dict[str, Emit] = {plan.entry: _root_granularity(plan, default)}
     pending = [plan.entry]
     while pending:
         unit = pending.pop()
@@ -2383,7 +2408,8 @@ def render_decoder(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.
     Args:
         plan: The plan to render.
         names: Its resolved identifiers, built if not supplied.
-        emit: The granularity to compile for. **A compile-time choice**, which
+        emit: The decoder's granularity; the entry unit's own ``emit`` wins
+            over it (as :func:`granularity` resolves it). **A compile-time choice**, which
             is the phase plan's answer to Q1's open sub-question: at
             ``MESSAGE`` these functions build no field paths and take no sink at
             all, and at ``FIELD`` the path is threaded through every one of
@@ -2397,6 +2423,7 @@ def render_decoder(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.
 
     """
     names = names or Names(plan)
+    emit = _root_granularity(plan, emit)
     inside = granularity(plan, emit)
     functions: list[str] = []
     for obj in plan.objects:
@@ -2446,13 +2473,15 @@ def render_entry(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.ME
     Args:
         plan: The plan to render.
         names: Its resolved identifiers, built if not supplied.
-        emit: The granularity to compile for.
+        emit: The decoder's granularity; the entry unit's own ``emit`` wins
+            over it (as :func:`granularity` resolves it).
 
     Returns:
         Python source for the entry points, without a trailing newline.
 
     """
     names = names or Names(plan)
+    emit = _root_granularity(plan, emit)
     cls = names.class_of(plan.entry)
     unit = _safe(plan.entry)
     arguments = ["cur"]
@@ -2992,8 +3021,9 @@ def render(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.MESSAGE)
     Args:
         plan: The plan to render.
         names: Its resolved identifiers, built if not supplied.
-        emit: The granularity to compile for, which decides what the module
-            emits and therefore what it is shaped like.
+        emit: The decoder's granularity, which decides what the module emits
+            and therefore what it is shaped like — unless the entry unit names
+            its own, which wins (as :func:`granularity` resolves it).
 
     Returns:
         Python source, newline terminated.
@@ -3005,6 +3035,7 @@ def render(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.MESSAGE)
 
     """
     names = names or Names(plan)
+    emit = _root_granularity(plan, emit)
     granularity(plan, emit)
     title = f"Decoder for the ``{_safe(plan.name)}`` specification, version {_safe(plan.version)}."
     lines = [f'"""{title}']
@@ -3055,7 +3086,7 @@ def render_spec(spec: Spec, *, emit: Emit = Emit.MESSAGE, check: bool = True) ->
 
     Args:
         spec: The spec to compile.
-        emit: The granularity to compile for.
+        emit: The decoder's granularity; the entry unit's own ``emit`` wins.
         check: Validate it before compiling, as
             :meth:`kober.ops.Plan.from_spec` does.
 
