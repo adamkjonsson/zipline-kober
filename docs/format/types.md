@@ -385,21 +385,32 @@ and may be used without declaring them. A spec using an **extended** name
 declares it under `transforms`, which is how it says it is not portable; a
 backend may decline one.
 
-| Name | Tier | Defined by | What it is |
-| --- | --- | --- | --- |
-| `gzip` | core | RFC 1952 | The gzip file format. |
-| `deflate` | core | RFC 1950 | The zlib format: DEFLATE with a header and a checksum. |
-| `deflate-raw` | core | RFC 1951 | DEFLATE with no header. |
-| `br` | extended | RFC 7932 | Brotli. |
-| `zstd` | extended | RFC 8878 | Zstandard. |
-| `bzip2` | extended | bzip2 1.0.6 file format | bzip2. |
-| `xz` | extended | The .xz File Format 1.2.1 | xz, LZMA2 in a container. |
+| Name | Tier | Defined by | What it is | Bound by kober |
+| --- | --- | --- | --- | --- |
+| `gzip` | core | RFC 1952 | The gzip file format. | yes |
+| `deflate` | core | RFC 1950 | The zlib format: DEFLATE with a header and a checksum. | yes |
+| `deflate-raw` | core | RFC 1951 | DEFLATE with no header. | yes |
+| `br` | extended | RFC 7932 | Brotli. | no: the standard library has no Brotli |
+| `zstd` | extended | RFC 8878 | Zstandard. | on Python 3.14 and later |
+| `bzip2` | extended | bzip2 1.0.6 file format | bzip2. | yes |
+| `xz` | extended | The .xz File Format 1.2.1 | xz, LZMA2 in a container. | yes |
 
 `deflate` is the zlib format, as it is in HTTP's `Content-Encoding` and in the
 browser's `DecompressionStream`; raw DEFLATE is `deflate-raw`. So a header's
 value can be used as it stands.
 
 Any other name is the spec's own, a cipher say, declared with its parameters.
+
+**What a name is bound to is the program's business, not the spec's.** kober
+binds what the Python standard library can run, and a program adds the rest
+with {func}`kober.transforms.register`, or a {class}`kober.transforms.Registry`
+of its own: a cipher, which the standard library has none of, or `br` from a
+Brotli package. A transform is a callable taking the source's bytes, `limit`,
+and the spec's `args` by name, and returning at most `limit` bytes. What it
+raises makes the source `undecodable`, and its message is never written out: a
+cipher's error text can hold a key. A name a spec uses that nothing binds is
+refused before any input is read, saying whether it is a well-known name this
+backend does not bind or a name of the spec's own that nothing registered.
 
 ## `const`
 

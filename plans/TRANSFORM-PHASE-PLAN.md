@@ -8,7 +8,8 @@ between two defensible designs, the choice is listed under *Decisions the
 spike leaves open*, and *Decided, 2026-09-26* records the answers.
 *Stage 1b* ([#49](https://github.com/adamkjonsson/zipline-kober/issues/49)),
 *Stage 1c* ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50)) and
-Stage 2 are done, and their results are recorded there. Next is Stage 3.
+Stages 2 and 3 are done, and their results are recorded there. Next is
+Stage 4.
 
 > **Written 2026-09-19** against `0.3.0`, `DESIGN.md` revision 9, `zpf` 0.5.0
 > (spec 0.21), packeteer 0.16.0. The prompt was a question — *zipline is ready
@@ -1145,6 +1146,44 @@ Two things, and Q7 says why they are two:
   rather than looking like a typo.
 
 The test cipher lives in `tests/`, not in the package.
+
+**Done, 2026-09-26.** In `kober.transforms`, beside the name table Stage 2
+brought forward, with these differences:
+
+- **A `Registry` class, with a default.** The plan named module functions,
+  `register(name, fn)` and `lookup(name)`. They exist, acting on
+  `transforms.DEFAULT`, and a program or a test can hold a registry of its own
+  rather than change the process's. Rebinding a name needs `replace=True`.
+- **`Registry.bind(spec)`** is where a missing binding fails, before any
+  input, with `UnboundTransformError` (a `SpecError`, as Q6 wanted). It names
+  every missing name and says which kind: a well-known one this backend does
+  not bind, with the interpreter's version, or a spec's own that nothing
+  registered. That is acceptance 8's distinction, live with `br`.
+- **`apply()` is in `kober.transforms`, not `ops.py`.** It is the one place a
+  transform runs, for both backends, so Stage 6's generated code calls it
+  here. It holds any output to `limit`, refuses a result that is not bytes,
+  and words every failure: a shipped codec's own message, and for a caller's
+  callable only its exception's class name. Q6 had passed a caller's
+  `TransformError` message through. It is reworded too, since a cipher's text
+  is not kober's to trust.
+- **The bound set moves with the interpreter**, as Stage 1 found: `zstd` is
+  bound on Python 3.14 and later, where `compression.zstd` exists. So the
+  plan's "`br` and `zstd` are names this backend does not bind" is now true
+  of `br` alone, on this machine's 3.14.
+- **Formats that allow several members read them all**: gzip, bzip2, xz and
+  zstd. The deflate formats refuse trailing bytes.
+- **A zstd frame without a checksum can decode corrupt data to different
+  bytes without noticing.** That is the format's, not kober's, and a sender
+  that cares sets the checksum. The tests do.
+- **zstd's errors derive from nothing more specific than `Exception`**, so
+  each codec declares what it raises for bad data; without that a corrupt
+  zstd body read as "raised ZstdError" instead of kober's wording.
+
+45 tests. The three that guard real risks were each watched failing against
+the implementation they exist to catch: a codec that inflates and then checks
+(the bomb test, measured with `tracemalloc` at a 1 MiB limit against 64 MiB of
+zeros), zstd's error left unmapped, and `apply` passing a caller's message on.
+Nothing decodes differently yet; the decoder uses the binding from Stage 4.
 
 ### Stage 4 — the interpreter
 

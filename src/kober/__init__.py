@@ -41,7 +41,9 @@ from kober.errors import (
     Refused,
     SpecError,
     Stopped,
+    TransformError,
     TruncatedRead,
+    UnboundTransformError,
     Undecodable,
 )
 from kober.expr import ExprType, shift_left, shift_right
@@ -128,11 +130,13 @@ from kober.stage import (
     run,
     run_compiled,
 )
+from kober.transforms import WELL_KNOWN, Registry
 
 __all__ = [
     "MAX_INT_BITS",
     "PRIM_WIDTHS",
     "TEXT_CONTENT_TYPE",
+    "WELL_KNOWN",
     "Binding",
     "Branch",
     "BytesType",
@@ -171,6 +175,7 @@ __all__ = [
     "Plan",
     "Pointer",
     "Refused",
+    "Registry",
     "Remaining",
     "Repeat",
     "Select",
@@ -189,7 +194,9 @@ __all__ = [
     "ToEnd",
     "Transform",
     "TransformDecl",
+    "TransformError",
     "TruncatedRead",
+    "UnboundTransformError",
     "Unclaimed",
     "Undecodable",
     "Unit",

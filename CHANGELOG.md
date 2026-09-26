@@ -45,6 +45,20 @@ minor bump here too.
   declared. **In this development version the decoder does not yet decode
   them** (a message that reaches one is `undecodable`), and `kober compile`
   refuses a spec with one.
+- **The Python binding for transforms**, `kober.transforms`
+  ([#46](https://github.com/adamkjonsson/zipline-kober/issues/46)). A
+  `Registry` binds names to callables; `Registry.standard()`, and the default
+  registry `register` and `lookup` act on, bind `gzip`, `deflate`,
+  `deflate-raw`, `bzip2` and `xz` from the standard library, and `zstd` where
+  it has one (Python 3.14 and later). `br` is not bound, since the standard
+  library has no Brotli, and a program registers one. Every codec is held to
+  its `limit` as it inflates, so a decompression bomb stops at the limit in
+  memory the limit bounds. `Registry.bind(spec)` refuses before any input is
+  read with `UnboundTransformError`, saying whether a missing name is a
+  well-known one this backend does not bind or the spec's own. `apply` runs
+  one and raises `TransformError` in kober's own words: a codec's message is
+  kober's, and a caller's callable is reported by its exception's class only,
+  never its text, which could hold a key. Not yet used by the decoder.
 - **`startswith(s, prefix)` and `endswith(s, suffix)`** in the expression
   language ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50)),
   typed `(str, str) -> bool`, exact as to case, in both backends. They are what

@@ -174,6 +174,34 @@ class Refused(Undecodable):
         super().__init__(message, at, refused=True)
 
 
+class TransformError(KoberError):
+    """A transform could not produce its output from the bytes it was given.
+
+    Bad compressed data, output past the field's ``limit``, a cipher's tag
+    that did not verify. The bytes arrived and were read; what failed is the
+    transform, so a decoder reports it and never raises it
+    (:func:`kober.transforms.apply` is the one place it is raised).
+
+    Its message is **always kober's own wording**, never a codec's or a
+    callable's: it can end up in the output (a declined stream quotes a
+    failure), where two implementations must word it alike and where a
+    caller's cipher must not be able to write a key.
+    """
+
+
+class UnboundTransformError(SpecError):
+    """A spec uses a transform this process cannot run.
+
+    Raised when a decoder is set up, before any input is read, and never per
+    message: a transform nobody bound would otherwise make every message
+    ``undecodable`` and quietly mark a whole file. It says which kind of
+    missing it is, because the fixes differ: a well-known name this backend
+    does not bind (``br`` in the standard library) wants an implementation
+    registered, and a spec's own name wants the program that runs it to
+    register one.
+    """
+
+
 class CompileError(KoberError):
     """A valid spec cannot be expressed in the language being generated.
 
