@@ -6,6 +6,9 @@ a pipeline baseline). The Stage 1 spike ran on 2026-09-24 and is recorded in
 leaning is rewritten and says so. Where it turned a leaning into a choice
 between two defensible designs, the choice is listed under *Decisions the
 spike leaves open* and nothing past Stage 1 should start until those are made.
+One exception: [#49](https://github.com/adamkjonsson/zipline-kober/issues/49),
+found by the spike and added to the `0.5.0` milestone, does not depend on
+those decisions and is scheduled next (*Stage 1b*).
 
 > **Written 2026-09-19** against `0.3.0`, `DESIGN.md` revision 9, `zpf` 0.5.0
 > (spec 0.21), packeteer 0.16.0. The prompt was a question — *zipline is ready
@@ -359,9 +362,12 @@ start line, truncates, and, the stream being confirmed, writes that partial
 tree. That breaks `tools/pipeline.py`'s lossy bound (*no more start lines
 than messages sent*). packeteer's own HTTP bodies are small, so a gap had
 never landed mid-body often enough to show it. This corpus's bodies span
-dozens of pieces. It is a 0.4.0 issue in resynchronising after a gap. It
-belongs in an issue of its own, and it will fail Stage 5's pipeline input
-until it is dealt with.
+dozens of pieces. It is a 0.4.0 issue in resynchronising after a gap, filed
+as [#49](https://github.com/adamkjonsson/zipline-kober/issues/49) and added to
+the `0.5.0` milestone. Reproducing it for the issue showed the damage goes
+past the phantom line: the **next real status line is read as a header
+value**. It is scheduled as *Stage 1b*, since it fails Stage 5's pipeline
+input until it is fixed.
 2. **The output's unread tail.** A `type` that reads less than the whole
    output leaves bytes no inner node claims. The plan is silent. The spike made
    it `undecodable`, which is strict. The alternative is an inner `skipped`,
@@ -842,7 +848,9 @@ knowing before the compiler copies the mistake.
 `0.4.0` code and keep its output as the baseline. `0.4.0` found this the most
 useful decision in its plan ([`VERDICT-PHASE-PLAN.md`](VERDICT-PHASE-PLAN.md)
 §9.1). Every later stage diffs against it with `--baseline`, and for a
-transform-free spec that diff must stay empty through the whole phase.
+transform-free spec that diff must stay empty through the whole phase,
+**except for what Stage 1b moves**. #49 changes what 0.4.0 writes for a lossy
+stream, so Stage 1b is checked against this baseline and then replaces it.
 
 ### Stage 1 — settle Q1–Q10, with a spike
 
@@ -865,6 +873,31 @@ One thing it should *check* rather than try: Q7's table is one row verified
 and seven recalled. Confirm what Go, Java, .NET, Rust and the browser
 actually have before the tiering is written down, because the tier boundary
 is a promise the format has to keep.
+
+### Stage 1b — phantom messages after a gap ([#49](https://github.com/adamkjonsson/zipline-kober/issues/49))
+
+A driver fix, independent of every transform decision, and first for two
+reasons. Stage 5's lossy gzip input fails the pipeline's shape bound until it
+lands. And it moves transform-free output, so doing it before any transform
+code means one diff against the Stage 0 baseline shows exactly what it
+moved, and nothing else can be mixed into that diff.
+
+- **Decide the behaviour first**, in the issue. The issue names one
+  candidate (not believing the first message after a gap until it decodes
+  whole, confirmation per run rather than per stream) and leaves the choice
+  open. Whatever is chosen has to apply to both drivers, since both share
+  `stage.py`, and to datagram input as well as byte streams, or say why not.
+- **Tests first**, reverted-and-watched: #49's reproduction as a stage-level
+  test through both drivers, and the lossy gzip capture's shape (*no more
+  start lines than responses sent*) as the property. The stage-level fuzz
+  0.4.0 added gets streams with gaps landing inside messages.
+- **Measure against the Stage 0 baseline.** Every output the fix moves must
+  be one it means to move, checked stream by stream as 0.4.0 checked its
+  declines (`VERDICT-PHASE-PLAN.md` §9.1). Then run the pipeline again into
+  a **new baseline** (`../kober-baselines/0.5.0-stage1b`), which is what
+  every later stage keeps.
+- `CHANGELOG.md` under `Unreleased`: `Fixed`, and `Breaking:` under `Changed`
+  if what a file says about a lossy stream changes the way #32's did.
 
 ### Stage 2 — the constructs in the model, loader, and checker
 
@@ -942,8 +975,9 @@ result recorded.
   `0.4.0` it holds everything before confirmation, and an inner record is held
   and released like any other.
 - `tools/pipeline.py` gains the Q9 inputs, with an exact shape count on the
-  lossless gzip stream, and its baseline diff for every transform-free output
-  stays empty.
+  lossless gzip stream and the lossy bound on the other, which holds only
+  once Stage 1b has landed. Its diff against the Stage 1b baseline stays empty
+  for every transform-free output.
 
 ### Stage 6 — the compiler
 
@@ -1043,7 +1077,7 @@ stream.
 3. The differential passes over every corpus with transform-bearing specs in
    each, byte-identical files block for block under `blocks()`, including
    `params_digest` and region comments. `tests/compiled_dns.py` regenerates
-   with an empty diff, and `tools/pipeline.py`'s diff against the Stage 0
+   with an empty diff, and `tools/pipeline.py`'s diff against the Stage 1b
    baseline is empty for every transform-free output.
 4. The three new fuzz invariants hold and were each seen to fail against the
    broken implementation they target; the four existing ones are unchanged.
@@ -1064,6 +1098,9 @@ stream.
 9. `DESIGN.md` and the format docs say what is true of both implementations
    afterwards, and `concepts.md` no longer lists transforms as something a
    spec cannot say.
-10. **No secret reaches the file**: a `secret: true` value, and a secret in a
+10. **#49 is fixed**: no stream in any pipeline input, lossy gzip included,
+    has more start lines than messages sent, and the Stage 1b diff against
+    the Stage 0 baseline moved only what #49 meant to move.
+11. **No secret reaches the file**: a `secret: true` value, and a secret in a
     raising transform's own message, appear in no record, region comment or
     diagnostic, including a declined stream's.
