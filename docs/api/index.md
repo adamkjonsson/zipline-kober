@@ -11,6 +11,7 @@ ordered rather than alphabetically — see [Architecture](../dev/architecture.md
 :maxdepth: 1
 
 spec
+transforms
 expr
 source
 loader

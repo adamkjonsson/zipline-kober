@@ -23,6 +23,9 @@ and the interpreter use the same ones, which is what makes the two comparable.
 .. autoclass:: kober.runtime.Sink
    :members:
 
+.. autoclass:: kober.runtime.Held
+   :members:
+
 .. autodata:: kober.runtime.PRIM_WIDTHS
 
 .. autodata:: kober.runtime.TEXT_CONTENT_TYPE

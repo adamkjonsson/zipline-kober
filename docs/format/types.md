@@ -299,6 +299,108 @@ value that is not a number, say — makes the field `undecodable`, exactly as an
 unevaluable size does. It is not quietly treated as "no match", because that
 would report the author's default as though it were read from the input.
 
+### `concat`
+
+```yaml
+- name: chunks
+  unit: chunk
+  until: "chunks.length == 0"
+- name: joined
+  concat: chunks.data
+```
+
+The bytes of one field of every element of a repetition, joined in order: what
+a chunked HTTP body carries, as one value. `concat` names the repeated field
+and the field of each element, as `repeated.member`. The repeated field is
+declared earlier in the same unit, its elements are units, and the member is a
+single bytes field.
+
+It reads nothing and moves no position; the repetition has already read every
+byte. At field granularity it cites the **hull** of what it joined, from the
+first non-empty member's first byte to the last one's last. The size lines and
+line endings between the pieces are cited twice, once by their own fields and
+once here, which the format allows. An empty member, such as the last chunk's
+data, cites nothing.
+
+Its value is bytes, so a later field can reference it, and a `transform` can
+read it. That is the point of it being a field: a `switch` with a `concat`
+case and a `bytes` case gives one field that holds a body however it was
+framed.
+
+A `concat` cannot repeat.
+
+### `transform`
+
+```yaml
+- name: content
+  transform:
+    from: body
+    with: gzip
+    limit: 16777216
+    type: {unit: document}
+```
+
+Bytes already decoded, after a named transform, and optionally what they
+are.
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `from` | **yes** | An earlier field that is bytes on every branch (`bytes`, a `concat`, a `transform` with no `type`, or a `switch` of those), or a `bytes` parameter. |
+| `with` | **yes** | The transform. A core name, or one declared under the document's [`transforms`](document.md#transforms). |
+| `limit` | **yes** | The most bytes the output may have. |
+| `args` | no | The transform's parameters, as expressions, by name. Exactly those the declaration lists. |
+| `type` | no | What the output is. Decoded in the output's own offset space. |
+| `content_type` | no | The record label for an output kept as bytes: `prim:…`, `mime:type/subtype` or `dec:…`. Only without `type`. |
+
+It reads nothing where it stands. Like `select`, it reads a field already
+decoded, never the position, so a transform may follow a field that reads to
+the end of the message. `limit` is required because a transform with no bound
+is not total: a kilobyte of gzip inflates to a gigabyte.
+
+With a `type`, the output is decoded as that type, from its first byte. What
+the file says about it is always about **input** bytes, since the output has
+no offset space a file can name: every record read from the output cites the
+transform's source. Without a `type`, the output is the field's value, as
+bytes, and its record is labelled `content_type`.
+
+`args` are typed against the transform's declaration by `check`, before any
+data exists and with nothing registered: a spec is valid or not the same way
+in every process. A key, which a spec cannot hold, is a
+[document parameter](document.md#params).
+
+A `transform` cannot repeat, and its source may not be `emit: none`: the
+transform's outcome is what speaks for the source's bytes.
+
+```{note}
+In this development version, `check` and `show` understand `transform` and
+`concat`, and the decoder does not yet: a message that reaches one is
+`undecodable`, and `kober compile` refuses a spec with one.
+```
+
+#### Transform names
+
+A name means a specification, not a library, so it means the same thing to
+every implementation. Names in the **core** tier are bound by every backend
+and may be used without declaring them. A spec using an **extended** name
+declares it under `transforms`, which is how it says it is not portable; a
+backend may decline one.
+
+| Name | Tier | Defined by | What it is |
+| --- | --- | --- | --- |
+| `gzip` | core | RFC 1952 | The gzip file format. |
+| `deflate` | core | RFC 1950 | The zlib format: DEFLATE with a header and a checksum. |
+| `deflate-raw` | core | RFC 1951 | DEFLATE with no header. |
+| `br` | extended | RFC 7932 | Brotli. |
+| `zstd` | extended | RFC 8878 | Zstandard. |
+| `bzip2` | extended | bzip2 1.0.6 file format | bzip2. |
+| `xz` | extended | The .xz File Format 1.2.1 | xz, LZMA2 in a container. |
+
+`deflate` is the zlib format, as it is in HTTP's `Content-Encoding` and in the
+browser's `DecompressionStream`; raw DEFLATE is `deflate-raw`. So a header's
+value can be used as it stands.
+
+Any other name is the spec's own, a cipher say, declared with its parameters.
+
 ## `const`
 
 A value the decoded field must equal — the ordinary way a decoder refuses

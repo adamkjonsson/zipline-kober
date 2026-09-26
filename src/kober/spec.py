@@ -478,8 +478,107 @@ class Select:
             raise SpecError(msg)
 
 
+@dataclass(frozen=True)
+class Concat:
+    """The bytes of one field of every element of a repetition, joined in order.
+
+    What a chunked HTTP body is: ``chunks[*].data``, scattered through a
+    repetition with a size line and a CRLF between every piece, and wanted as
+    one value. The language has no list type and gets none; this is one
+    construct with the binding inside it, the answer ``select`` gave to asking
+    a question about a repetition (``DESIGN.md`` §3.2).
+
+    **It reads nothing where it stands.** The bytes were read by the
+    repetition's own fields, so like :class:`Select` it is zero width at the
+    cursor. It cites the *hull* of what it joined: from the first non-empty
+    member's first byte to the last one's last. The size lines and CRLFs in
+    between are cited twice, once by their own fields and once here, which is
+    legal, and they did feed the result: without them there is no
+    concatenation. An empty member cites nothing, which is what keeps the
+    terminating chunk's size line out of the hull (the transform plan's Stage 1).
+
+    It is a field type, not only something ``transform`` can say, because that
+    is what lets one field hold a body however it was framed: a ``switch`` with
+    a ``concat`` case and a ``bytes`` case, and a transform that reads it by
+    one name.
+
+    Attributes:
+        repeated: The repeated field, earlier in the same unit.
+        member: The field of each element whose bytes are joined.
+
+    """
+
+    repeated: str
+    member: str
+
+    def __post_init__(self) -> None:
+        for label, value in (("repeated field", self.repeated), ("member", self.member)):
+            if not value.strip():
+                msg = f"concat {label} must not be blank"
+                raise SpecError(msg)
+
+
+@dataclass(frozen=True)
+class Transform:
+    """Bytes already decoded, after a named transform, and optionally what they are.
+
+    ``DESIGN.md`` §11.5's deferred branch, taken: the spec *names* a transform
+    and a registry supplies it, so the spec stays data and ``check`` stays
+    static. A transform maps bytes to bytes, which is why it is not a row in
+    the expression language's function table: it feeds a decode of its own,
+    measured from its output's first byte.
+
+    **It reads nothing where it stands.** Its input is a field already decoded,
+    so the cursor does not move across it, as it does not across a
+    :class:`Select`. What the file says about it is always about input bytes,
+    since the output has no offset space the file can name.
+
+    Attributes:
+        source: The earlier field, or parameter, whose bytes are transformed.
+            Spelled ``from`` in a document.
+        name: The transform. Spelled ``with`` in a document.
+        limit: The most bytes the output may have. Required: a kilobyte of
+            gzip inflates to a gigabyte, and a transform with no bound is not
+            total.
+        args: The transform's parameters, as expressions, by name.
+        type: What the output is, decoded in its own offset space; ``None``
+            to keep the output as this field's bytes.
+        content_type: The record label for the output, when ``type`` is
+            ``None``.
+
+    """
+
+    source: str
+    name: str
+    limit: int
+    args: Mapping[str, Expr] = field(default_factory=dict)
+    type: FieldType | None = None
+    content_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.source.strip():
+            msg = "transform 'from' must not be blank"
+            raise SpecError(msg)
+        if not self.name.strip():
+            msg = "transform 'with' must not be blank"
+            raise SpecError(msg)
+        if isinstance(self.limit, bool) or self.limit <= 0:
+            msg = f"transform limit must be a positive number of bytes, got {self.limit!r}"
+            raise SpecError(msg)
+        object.__setattr__(self, "args", MappingProxyType(dict(self.args)))
+
+
 FieldType = (
-    IntType | BytesType | StringType | UnitRef | Switch | Computed | Pointer | Select
+    IntType
+    | BytesType
+    | StringType
+    | UnitRef
+    | Switch
+    | Computed
+    | Pointer
+    | Select
+    | Concat
+    | Transform
 )
 
 
@@ -488,21 +587,62 @@ FieldType = (
 
 @dataclass(frozen=True)
 class Param:
-    """A value passed into a unit by whoever references it.
+    """A value passed into a unit by whoever references it, or into a whole run.
+
+    A unit's parameters are supplied by the field that references it. A
+    document's (:attr:`Spec.params`) are supplied when a decode is set up, and
+    are in scope in every unit: what a transform needs that no field holds, a
+    key above all.
 
     Attributes:
-        name: Parameter name, referable in the unit's expressions.
-        type: The type callers must supply.
+        name: Parameter name, referable in expressions.
+        type: The type the value must have.
+        secret: Whether the value must never be written anywhere: not in a
+            record, a region's comment, or a diagnostic. It is hashed into the
+            decoder's parameters digest and nothing else. Document parameters
+            only.
 
     """
 
     name: str
     type: ExprType
+    secret: bool = False
 
     def __post_init__(self) -> None:
         if not self.name.strip():
             msg = "parameter name must not be blank"
             raise SpecError(msg)
+
+
+@dataclass(frozen=True)
+class TransformDecl:
+    """A transform a spec uses, declared so ``check`` can type its arguments.
+
+    The spec declares the interface and the registry supplies the
+    implementation, and the two are checked at different times. Typing
+    ``args`` against whatever a process has registered would make a spec valid
+    in one process and invalid in another; typing it against this makes it the
+    same everywhere, with no registry loaded.
+
+    A core name (:data:`kober.transforms.WELL_KNOWN`) needs no declaration.
+    Any other name does, an extended one included: declaring it is how a spec
+    says it is not portable, where an author can see it.
+
+    Attributes:
+        name: The transform's name, as ``with`` spells it.
+        params: Each parameter's name and type. A well-known transform has
+            none.
+
+    """
+
+    name: str
+    params: Mapping[str, ExprType] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            msg = "transform name must not be blank"
+            raise SpecError(msg)
+        object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
 
 
 @dataclass(frozen=True)
@@ -666,6 +806,10 @@ class Spec:
             this format. Recognised, unused, and reported by
             :func:`kober.check.check` as warnings. Compared, unlike
             :attr:`sources`: they are something the document *said*.
+        transforms: The transforms this spec declares, by name
+            (:class:`TransformDecl`).
+        params: Values supplied when a decode is set up, in scope in every
+            unit: a key, say.
 
     """
 
@@ -678,6 +822,8 @@ class Spec:
     doc: str | None = None
     sources: SourceMap = field(default_factory=SourceMap, compare=False, repr=False)
     foreign: Sequence[Foreign] = ()
+    transforms: Mapping[str, TransformDecl] = field(default_factory=dict)
+    params: Sequence[Param] = ()
 
     def __post_init__(self) -> None:
         for label, value in (("name", self.name), ("version", self.version)):
@@ -695,6 +841,13 @@ class Spec:
         object.__setattr__(self, "units", MappingProxyType(dict(self.units)))
         object.__setattr__(self, "enums", MappingProxyType(dict(self.enums)))
         object.__setattr__(self, "foreign", tuple(self.foreign))
+        mismatched = [key for key, decl in self.transforms.items() if key != decl.name]
+        if mismatched:
+            listed = ", ".join(sorted(mismatched))
+            msg = f"transform key does not match its name: {listed}"
+            raise SpecError(msg)
+        object.__setattr__(self, "transforms", MappingProxyType(dict(self.transforms)))
+        object.__setattr__(self, "params", tuple(self.params))
 
     # The loader imports this module, so these import it back lazily. Keeping
     # the constructors here is worth that: `Spec.from_file` is the API

@@ -47,6 +47,7 @@ from kober.expr import SCOPE_WORDS, ExprType, IntLiteral, Ref, infer_type, refer
 from kober.spec import (
     BytesType,
     Computed,
+    Concat,
     Count,
     Emit,
     Fill,
@@ -58,6 +59,7 @@ from kober.spec import (
     StringType,
     Switch,
     Terminated,
+    Transform,
     UnitRef,
     Until,
 )
@@ -838,6 +840,15 @@ def _value(spec: Spec, unit: str, index: int, kind: FieldType) -> ValueType:
         return _pointer(spec, unit, index, kind)
     if isinstance(kind, Select):
         return _select(spec, unit, index, kind)
+    if isinstance(kind, (Concat, Transform)):
+        # Valid, and decoded by the interpreter; the compiler learns them in
+        # the transform phase's Stage 6. Refused by name rather than crashing.
+        construct = "concat" if isinstance(kind, Concat) else "transform"
+        msg = (
+            f"unit {unit!r} has a {construct}, which the compiler does not support yet; "
+            "decode this spec with the interpreter"
+        )
+        raise CompileError(msg)
     msg = f"unsupported field type {type(kind).__name__} in unit {unit!r}"
     raise TypeError(msg)
 

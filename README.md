@@ -57,6 +57,8 @@ decoder ends up guessing.
 | `computed` | A value derived from earlier fields. Reads nothing; cites the fields its expression read. |
 | `pointer` | *Read this type at that offset, and carry on where you were.* Real DNS needs it — an answer's owner name is usually two bytes meaning "the name at offset 12". |
 | `select` | Ask a question about a **repeated** field and get one scalar back. What lets an HTTP message frame its own body by asking whether any header said `chunked`. |
+| `concat` | One field of every element of a repetition, joined into one value: a chunked body as the bytes it carries. Reads nothing. |
+| `transform` | Bytes already decoded, after a named transform (`gzip`, or a cipher the spec declares), and optionally what they decode as, in an offset space of their own. Reads nothing, and a `limit` bounds its output. |
 
 Fields repeat by count, by a condition tested after each element, or to the end
 of the run; they can be conditional; and a field can carry a `const` — a magic

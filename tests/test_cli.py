@@ -580,3 +580,28 @@ units:
         assert line.startswith("│"), f"line escaped the tree: {line!r}"
     assert any("(+1 more paragraph)" in line for line in body)
     assert "The second, which must not appear." not in "\n".join(body)
+
+
+def test_show_counts_a_unit_reached_only_through_a_pointer_as_reachable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """A pointer's target is reached, as `check` and the decoder both agree.
+
+    `show` walked switch cases and nothing else, so it reported the target's
+    unit unreachable.
+    """
+    document = """
+    name: p
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - {name: at, type: {int: {bits: 8}}}
+          - {name: target, type: {pointer: {at: "0", type: {unit: label}}}}
+      label:
+        fields:
+          - {name: size, type: {int: {bits: 8}}}
+    """
+    main(["show", write(tmp_path, document)])
+    assert "not reachable" not in capsys.readouterr().out

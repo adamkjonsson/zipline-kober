@@ -36,6 +36,8 @@ units:
 | `input` | no | `stream`, `datagram`, or `either` (the default). |
 | `endian` | no | Byte order for every integer below, unless it says otherwise. |
 | `doc` | no | Free text. |
+| `transforms` | no | The transforms the spec uses that are not core, and their parameters. |
+| `params` | no | Values supplied when a decode is set up, in scope in every unit. |
 
 Anything else is an error. That is deliberate: a misspelled key that loads and
 does nothing is a decoder silently doing the wrong thing.
@@ -99,6 +101,40 @@ It is checked in one direction only: a `datagram` spec run over a byte stream
 is **refused**, because it has no framing to find message boundaries with and
 would produce a confident tree over the wrong bytes. A `stream` spec over
 datagrams is allowed — each datagram is one self-contained message.
+
+### `transforms`
+
+```yaml
+transforms:
+  br: {}
+  aes-gcm: {params: {key: bytes, nonce: bytes, aad: bytes}}
+```
+
+Each transform a [`transform`](types.md#transform) field uses that is not in the
+core tier, by name, with its parameters and their types. An extended name such
+as `br` takes none, and declaring it is how the spec says it relies on one a
+backend may decline. A name of the spec's own, such as a cipher, lists what its
+`args` must supply. A declaration nothing uses is a warning.
+
+What a name is bound to is decided by the program that runs the spec, not by
+the spec: `check` reads this block, never a registry.
+
+### `params`
+
+```yaml
+params:
+  key: {type: bytes, secret: true}
+  window: int
+```
+
+Values supplied when a decode is set up rather than read from the input: a key
+above all, which a spec that is checked in cannot hold. Each is in scope in
+every unit under its name, so `args: {key: key}` is ordinary. `name: type` is
+the short form. A parameter may not share a name with any field or unit
+parameter.
+
+`secret: true` marks a value that must never be written anywhere: not in a
+record, a region's comment, or a diagnostic.
 
 ## Units
 

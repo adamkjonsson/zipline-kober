@@ -6,9 +6,9 @@ a pipeline baseline). The Stage 1 spike ran on 2026-09-24 and is recorded in
 leaning is rewritten and says so. Where it turned a leaning into a choice
 between two defensible designs, the choice is listed under *Decisions the
 spike leaves open*, and *Decided, 2026-09-26* records the answers.
-*Stage 1b* ([#49](https://github.com/adamkjonsson/zipline-kober/issues/49))
-and *Stage 1c* ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50))
-are done, and their results are recorded there. Next is Stage 2.
+*Stage 1b* ([#49](https://github.com/adamkjonsson/zipline-kober/issues/49)),
+*Stage 1c* ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50)) and
+Stage 2 are done, and their results are recorded there. Next is Stage 3.
 
 > **Written 2026-09-19** against `0.3.0`, `DESIGN.md` revision 9, `zpf` 0.5.0
 > (spec 0.21), packeteer 0.16.0. The prompt was a question — *zipline is ready
@@ -1081,6 +1081,48 @@ with no phantom, and so now meets the lossy bound Stage 5 needs.
 - **No rule here consults a binding** — that is Q7's split, and
   it is what keeps `check` answering the same way against every backend.
 - `kober show` renders `content: gzip(body) → json_document`.
+
+**Done, 2026-09-26.** As listed above, with these differences, each decided
+while building it:
+
+- **The name table arrived here, not in Stage 3**, because `check` needs it to
+  tell a well-known name from an unknown one: `kober.transforms.WELL_KNOWN`,
+  each name with its normative reference and tier. Stage 3 adds the binding
+  to the same module.
+- **A core name may be used undeclared; an extended or custom one must be
+  declared** under `transforms:`, which is how Q7.2 wanted a spec to say it is
+  not portable. A well-known name declared with parameters is an error, and a
+  declared name nothing uses is a warning.
+- **`from:` names a field or a parameter, and nothing else.** Q2's inline
+  `from: {concat: …}` is dropped: Stage 1 showed that `concat` as a field,
+  and a `switch` holding a body however it was framed, is what a transform
+  needs. A source must be *bytes on every branch*: `bytes`, `concat`, a
+  type-less `transform`, or a `switch` of those. That rule is separate from
+  expression typing, since a switch cannot be referenced in an expression.
+- **A repeated transform or concat is refused.** The plan said "the way a
+  repeated pointer is", and nothing refused a repeated pointer: every
+  zero-width field that repeats fails at run time with "consumed no input".
+  The new constructs are refused statically. `computed`, `select` and
+  `pointer` have the same hole, which predates this phase and is filed as
+  [#51](https://github.com/adamkjonsson/zipline-kober/issues/51).
+- **Document `params:` are in scope in every unit**, and may not share a name
+  with any field or unit parameter, so nothing is shadowed. `secret` is
+  allowed on document parameters only.
+- A typed transform is referenced as the type it decodes to (`content.text`),
+  a type-less one and a `concat` as bytes.
+- **Until Stages 4 and 6**, a message reaching a transform is `undecodable`
+  ("not implemented by this decoder"), and the compiler raises a
+  `CompileError` naming the construct, rather than the `TypeError` it raised
+  for an unknown type.
+- Found on the way and fixed: **`show` reported a unit reached only through
+  a `pointer` as unreachable**
+  ([#52](https://github.com/adamkjonsson/zipline-kober/issues/52)), because its own walk followed switch cases
+  and nothing else. It now follows pointers and transform outputs, and
+  expands a transform's output unit in place.
+
+41 checker tests cover every rule, each case pinned to its message. Nothing
+decodes differently: the pipeline moved 0 of 64 outputs against the Stage 1c
+baseline, and `compiled_dns.py` is unchanged.
 
 ### Stage 3 — the well-known names, the registry, and the bound set
 

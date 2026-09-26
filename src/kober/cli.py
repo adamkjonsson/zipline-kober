@@ -45,6 +45,7 @@ from kober.pygen import render_spec
 from kober.spec import (
     BytesType,
     Computed,
+    Concat,
     Count,
     Emit,
     Fill,
@@ -59,6 +60,7 @@ from kober.spec import (
     Switch,
     Terminated,
     ToEnd,
+    Transform,
     UnitRef,
     Until,
 )
@@ -372,13 +374,21 @@ def _doc_lines(doc: str | None, prefix: str) -> list[str]:
 
 
 def _nested(kind: FieldType) -> list[FieldType]:
-    """Return a type and every type nested in it."""
+    """Return a type and every type nested in it.
+
+    A pointer's target and a transform's output type count, as they do for
+    :func:`kober.check.check`: a unit reached only through one of them is still
+    reached. Leaving the pointer out used to make ``show`` call such a unit
+    unreachable.
+    """
     found = [kind]
     if isinstance(kind, Switch):
         for case in kind.cases.values():
             found.extend(_nested(case))
         if kind.default is not None:
             found.extend(_nested(kind.default))
+    elif isinstance(kind, Pointer) or (isinstance(kind, Transform) and kind.type is not None):
+        found.extend(_nested(kind.type))
     return found
 
 
@@ -396,7 +406,9 @@ def _unit_lines(spec: Spec, unit: Unit, prefix: str, seen: tuple[str, ...]) -> l
 
 
 def _descend(spec: Spec, kind: FieldType, prefix: str, seen: tuple[str, ...]) -> list[str]:
-    """Expand a unit reference, guarding against recursion."""
+    """Expand a unit reference, or a transform's output unit, guarding against recursion."""
+    if isinstance(kind, Transform) and kind.type is not None:
+        kind = kind.type
     if not isinstance(kind, UnitRef):
         return []
     target = spec.units.get(kind.unit)
@@ -454,6 +466,17 @@ def _render_type(kind: FieldType) -> str:
             f"select from {kind.source}{bound} where {unparse(kind.where)}"
             f" → {unparse(kind.value)} else {unparse(kind.default)}"
         )
+    if isinstance(kind, Concat):
+        return f"concat {kind.repeated}.{kind.member}"
+    if isinstance(kind, Transform):
+        args = "".join(f", {name}={unparse(value)}" for name, value in kind.args.items())
+        head = f"{kind.name}({kind.source}{args})"
+        if kind.type is not None:
+            # A unit reference renders with its own arrow; one is enough.
+            output = _render_type(kind.type).removeprefix("→ ")
+            return f"{head} → {output}, at most {kind.limit} bytes"
+        label = kind.content_type or "bytes"
+        return f"{head} → {label}, at most {kind.limit} bytes"
     if isinstance(kind, Switch):
         cases = ", ".join(f"{key!r}" for key in kind.cases)
         tail = "" if kind.default is not None else ", no default"

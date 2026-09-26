@@ -24,6 +24,27 @@ minor bump here too.
 
 ### Added
 
+- **Transforms in the spec language, checked but not yet decoded**
+  ([#46](https://github.com/adamkjonsson/zipline-kober/issues/46)). Two field
+  types and two top-level keys:
+  - `transform: {from, with, limit, args, type, content_type}`: bytes already
+    decoded, after a named transform, and optionally what they decode as.
+  - `concat: repeated.member`: one field of every element of a repetition,
+    joined, such as a chunked body.
+  - `transforms:` declares the transforms a spec uses that are not core, with
+    their parameters' types. `params:` declares values supplied when a decode
+    is set up, such as a key, with `secret: true` for one never to be written.
+
+  `check` types them against the spec alone, never a registry: a source
+  must be an earlier field that is bytes on every branch; a name must be core
+  or declared; `args` must match the declaration; `limit` is required; and a
+  transform's source may not be `emit: none`. `show` renders them. The names a
+  spec may use are `kober.transforms.WELL_KNOWN`, each defined by a
+  specification and in a tier: `gzip`, `deflate` (RFC 1950) and `deflate-raw`
+  are core, and `br`, `zstd`, `bzip2` and `xz` are extended and must be
+  declared. **In this development version the decoder does not yet decode
+  them** (a message that reaches one is `undecodable`), and `kober compile`
+  refuses a spec with one.
 - **`startswith(s, prefix)` and `endswith(s, suffix)`** in the expression
   language ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50)),
   typed `(str, str) -> bool`, exact as to case, in both backends. They are what
@@ -84,6 +105,11 @@ minor bump here too.
 
 ### Fixed
 
+- **`kober show` no longer reports a unit reached only through a `pointer` as
+  unreachable** ([#52](https://github.com/adamkjonsson/zipline-kober/issues/52)).
+  It walked switch cases and nothing else when working out
+  which units the entry reaches; `check` and the decoder always followed the
+  pointer.
 - **A generated module no longer writes a line longer than the project's
   limit for a long expression.** The compiler put every expression on one
   line, and a condition, `computed`, `select` value or guard long enough failed

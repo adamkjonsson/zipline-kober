@@ -48,6 +48,7 @@ mis-using it is a decode-time surprise the checker cannot take back.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -58,7 +59,9 @@ from kober.loader import FOREIGN_KEYS
 from kober.spec import (
     BytesType,
     Computed,
+    Concat,
     Count,
+    Emit,
     Field,
     Fill,
     Fixed,
@@ -71,10 +74,12 @@ from kober.spec import (
     StringType,
     Switch,
     Terminated,
+    Transform,
     Unit,
     UnitRef,
     Until,
 )
+from kober.transforms import WELL_KNOWN, is_core
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -428,7 +433,7 @@ def starved_fields(spec: Spec) -> dict[tuple[str, int], Starved]:
 
 #: Field types that read nothing where they stand, so a field of one of them
 #: after another field cannot move where the message ends.
-_READS_NOTHING = (Computed, Select, Pointer)
+_READS_NOTHING = (Computed, Select, Pointer, Concat, Transform)
 
 
 def message_tail_fields(spec: Spec) -> frozenset[tuple[str, int]]:
@@ -594,10 +599,11 @@ def _type_bits(  # noqa: PLR0911
     where = f"unit {unit.name!r}, field {item.name or '<anonymous>'!r}"
     if isinstance(kind, IntType):
         return kind.bits
-    if isinstance(kind, (Computed, Select, Pointer)):
-        # None of the three reads anything where it stands — a pointer's bytes
-        # are read by the ordinary fields whose citations already cover them —
-        # so none of them claims any of the trailer.
+    if isinstance(kind, (Computed, Select, Pointer, Concat, Transform)):
+        # None of them reads anything where it stands — a pointer's bytes are
+        # read by the ordinary fields whose citations already cover them, and a
+        # concat's and a transform's by the fields they name — so none of them
+        # claims any of the trailer.
         return 0
     if isinstance(kind, (BytesType, StringType)):
         if isinstance(kind.size, Fixed):
@@ -659,6 +665,29 @@ def _walk_types(kind: FieldType) -> Iterator[FieldType]:
             yield from _walk_types(kind.default)
     elif isinstance(kind, Pointer):
         yield from _walk_types(kind.type)
+    elif isinstance(kind, Transform) and kind.type is not None:
+        # The output's type, like a pointer's target, is decoded on a cursor
+        # of its own: nested for reachability and parents, and not read where
+        # the field stands (`_walk_types_read` leaves it out).
+        yield from _walk_types(kind.type)
+
+
+def _bytes_producing(kind: FieldType) -> bool:
+    """Whether every value a field of this type can take is bytes.
+
+    What a transform's ``from`` must name: ``bytes``, a ``concat``, a
+    transform with no ``type`` (its output), or a switch whose every case and
+    default is one of those, which is how one field holds a body however it
+    was framed.
+    """
+    if isinstance(kind, (BytesType, Concat)):
+        return True
+    if isinstance(kind, Transform):
+        return kind.type is None
+    if isinstance(kind, Switch):
+        cases = [*kind.cases.values(), *([kind.default] if kind.default is not None else [])]
+        return all(_bytes_producing(case) for case in cases)
+    return False
 
 
 def _size_of(kind: FieldType) -> SizeSpec | None:
@@ -674,6 +703,11 @@ def _int_range(kind: IntType) -> tuple[int, int]:
         half = 1 << (kind.bits - 1)
         return -half, half - 1
     return 0, (1 << kind.bits) - 1
+
+
+#: What a record's content type may look like, loosely: a namespace the format
+#: defines, and a name. ``prim:bytes``, ``mime:application/json``, ``dec:ip-packet``.
+_CONTENT_TYPE = re.compile(r"^(prim:[a-z0-9]+|mime:[\w.+-]+/[\w.+-]+(;.*)?|dec:[\w.-]+)$")
 
 
 def _visible_names(unit: Unit, upto: int) -> set[str]:
@@ -736,7 +770,43 @@ class _Checker:
         self._check_reachability()
         self._check_left_recursion()
         self._check_foreign()
+        self._check_declarations()
         return tuple(self.findings)
+
+    def _check_declarations(self) -> None:
+        """Check the document's ``params:`` and ``transforms:`` blocks."""
+        taken = {
+            name
+            for unit in self.spec.units.values()
+            for name in (
+                *(param.name for param in unit.params),
+                *(item.name for item in unit.fields if item.name is not None),
+            )
+        }
+        for param in self.spec.params:
+            if param.name in taken:
+                self.error(
+                    f"{self.spec.name}.params.{param.name}",
+                    f"parameter {param.name!r} has the name of a field or unit parameter, "
+                    "and a document parameter is in scope in every unit",
+                )
+        used = {
+            kind.name
+            for unit in self.spec.units.values()
+            for item in unit.fields
+            for kind in _walk_types(item.type)
+            if isinstance(kind, Transform)
+        }
+        for name, declared in self.spec.transforms.items():
+            where = f"{self.spec.name}.transforms.{name}"
+            if name in WELL_KNOWN and declared.params:
+                self.error(
+                    where,
+                    f"{name!r} is a well-known transform, defined by "
+                    f"{WELL_KNOWN[name].reference}, and takes no parameters",
+                )
+            if name not in used:
+                self.warn(where, f"transform {name!r} is declared and never used")
 
     def _check_foreign(self) -> None:
         """Report every packeteer key the spec used, and why it means nothing here.
@@ -998,6 +1068,16 @@ class _Checker:
         for kind in _walk_types(item.type):
             self._check_type(unit, kind, visible, where)
 
+        if item.repeat is not None and isinstance(item.type, (Concat, Transform)):
+            # It reads nothing where it stands, so no element can make progress:
+            # every decode would stop at the second with "consumed no input".
+            construct = "concat" if isinstance(item.type, Concat) else "transform"
+            self.error(
+                where,
+                f"a {construct} cannot repeat: it reads nothing where it stands, so "
+                "a repetition of it can never move on",
+            )
+
         if isinstance(item.type, Switch):
             self._check_switch(unit, item.type, visible, where)
 
@@ -1072,6 +1152,10 @@ class _Checker:
             self._expect(kind.at, ExprType.INT, unit, visible, where, "pointer at")
         if isinstance(kind, Select):
             self._check_select(unit, kind, visible, where)
+        if isinstance(kind, Concat):
+            self._check_concat(unit, kind, visible, where)
+        if isinstance(kind, Transform):
+            self._check_transform(unit, kind, visible, where)
         size = _size_of(kind)
         if isinstance(size, FromExpr):
             self._expect(size.expr, ExprType.INT, unit, visible, where, "size")
@@ -1147,6 +1231,150 @@ class _Checker:
                 f"select value is {projected.value} but its default is "
                 f"{fallback.value}; they must agree, because either one can end up "
                 "being the field's value",
+            )
+
+    def _check_concat(self, unit: Unit, kind: Concat, visible: set[str], where: str) -> None:
+        """Check a concat: an earlier repetition of a unit whose member is bytes."""
+        label = f"concat {kind.repeated}.{kind.member}"
+        repeated = unit.field(kind.repeated)
+        if kind.repeated not in visible or repeated is None:
+            if repeated is not None:
+                self.error(
+                    where,
+                    f"{label}: {kind.repeated!r} is declared later in unit "
+                    f"{unit.name!r}; a concat may only join a repetition already decoded",
+                )
+            else:
+                known = ", ".join(sorted(visible)) or "none"
+                self.error(
+                    where,
+                    f"{label}: unknown name {kind.repeated!r} in unit {unit.name!r}; "
+                    f"in scope: {known}",
+                )
+            return
+        if repeated.repeat is None:
+            self.error(where, f"{label}: {kind.repeated!r} is not repeated")
+            return
+        if not isinstance(repeated.type, UnitRef):
+            self.error(
+                where,
+                f"{label}: each element of {kind.repeated!r} must be a unit, so that it "
+                f"has a field {kind.member!r} to join",
+            )
+            return
+        element = self.spec.units.get(repeated.type.unit)
+        if element is None:
+            return  # reported where the repetition names it
+        member = element.field(kind.member)
+        if member is None:
+            self.error(where, f"{label}: unit {element.name!r} has no field {kind.member!r}")
+            return
+        if member.repeat is not None or not _bytes_producing(member.type):
+            self.error(
+                where,
+                f"{label}: {kind.member!r} must be a single bytes field, since its bytes "
+                "are what is joined",
+            )
+
+    def _check_transform(
+        self, unit: Unit, kind: Transform, visible: set[str], where: str
+    ) -> None:
+        """Check a transform against its source, its declaration, and its output.
+
+        **No rule here consults a binding.** Whether a process has a codec for
+        the name is a question for when a decoder is built; ``check`` answers
+        the same way everywhere, with no registry loaded (the transform plan's
+        Q3 and Q7). Its ``type`` is checked like any other nested type, by the
+        caller's walk.
+        """
+        label = f"transform from {kind.source!r} with {kind.name!r}"
+        self._check_transform_source(unit, kind, visible, where, label)
+
+        declared = self.spec.transforms.get(kind.name)
+        if declared is None and not is_core(kind.name):
+            if kind.name in WELL_KNOWN:
+                tier = WELL_KNOWN[kind.name].tier.value
+                self.error(
+                    where,
+                    f"{label}: {kind.name!r} is a well-known {tier} name, which a backend "
+                    "may decline, so a spec using it declares it under 'transforms:'",
+                )
+            else:
+                self.error(
+                    where,
+                    f"{label}: {kind.name!r} is neither a core transform nor declared "
+                    "under 'transforms:'",
+                )
+        wanted = dict(declared.params) if declared is not None else {}
+        for name in sorted(set(kind.args) - set(wanted)):
+            self.error(where, f"{label}: no parameter {name!r}")
+        for name in sorted(set(wanted) - set(kind.args)):
+            self.error(where, f"{label}: argument {name!r} is not supplied")
+        for name in sorted(set(kind.args) & set(wanted)):
+            self._expect(kind.args[name], wanted[name], unit, visible, where, f"argument {name!r}")
+
+        if kind.content_type is not None:
+            if kind.type is not None:
+                self.error(
+                    where,
+                    f"{label}: content_type labels an output kept as bytes, and this one "
+                    "is decoded as its 'type'",
+                )
+            elif not _CONTENT_TYPE.match(kind.content_type):
+                self.error(
+                    where,
+                    f"{label}: content_type {kind.content_type!r} is not a label the "
+                    "format has: 'prim:…', 'mime:type/subtype', or 'dec:…'",
+                )
+
+    def _check_transform_source(
+        self, unit: Unit, kind: Transform, visible: set[str], where: str, label: str
+    ) -> None:
+        """Check that a transform reads bytes already decoded, never the cursor."""
+        param = next(
+            (p for p in (*unit.params, *self.spec.params) if p.name == kind.source), None
+        )
+        if param is not None:
+            if param.type is not ExprType.BYTES:
+                self.error(
+                    where,
+                    f"{label}: parameter {kind.source!r} is {param.type.value}, and a "
+                    "transform reads bytes",
+                )
+            return
+        source = unit.field(kind.source)
+        if kind.source not in visible or source is None:
+            if source is not None:
+                self.error(
+                    where,
+                    f"{label}: {kind.source!r} is declared later in unit {unit.name!r}; "
+                    "a transform reads a field already decoded",
+                )
+            else:
+                known = ", ".join(sorted(visible)) or "none"
+                self.error(
+                    where,
+                    f"{label}: unknown name {kind.source!r} in unit {unit.name!r}; "
+                    f"in scope: {known}",
+                )
+            return
+        if source.repeat is not None:
+            self.error(where, f"{label}: {kind.source!r} is repeated; join it with a concat")
+        elif not _bytes_producing(source.type):
+            self.error(
+                where,
+                f"{label}: {kind.source!r} is not bytes on every branch; a transform "
+                "reads bytes: a bytes field, a concat, or a transform's output",
+            )
+        if source.emit is Emit.NONE:
+            # The transform's outcome speaks for its source's bytes (the plan's
+            # *Decided* 1a): the output's records cite them, or a failure names
+            # them. `emit: none` would name them `skipped` as well, and a byte
+            # both cited and undecoded is the one thing the format forbids.
+            self.error(
+                where,
+                f"{label}: {kind.source!r} has emit: none, and a transform's source is "
+                "written through the transform, so it needs no emit of its own",
             )
 
     def _check_unit_ref(self, unit: Unit, kind: UnitRef, visible: set[str], where: str) -> None:
@@ -1331,7 +1559,11 @@ class _Scope:
                 )
                 raise self._fail(path, message)
             return self._type_of(item, unit, tuple(rest), path, as_element=True)
-        if visible is not None and head not in visible:
+        if (
+            visible is not None
+            and head not in visible
+            and not any(param.name == head for param in self.checker.spec.params)
+        ):
             declared = unit.field(head) is not None
             if declared:
                 message = (
@@ -1350,6 +1582,14 @@ class _Scope:
                 return param.type
 
         item = unit.field(head)
+        if item is None:
+            # A document parameter is in scope in every unit. `check` refuses
+            # one named like a field or unit parameter, so nothing is shadowed.
+            for param in self.checker.spec.params:
+                if param.name == head:
+                    if rest:
+                        raise self._fail(path, f"parameter {head!r} has no fields to reference")
+                    return param.type
         if item is None:
             known = ", ".join(sorted(visible or ())) or "none"
             message = f"unknown name {head!r} in unit {unit.name!r}; in scope: {known}"
@@ -1374,6 +1614,14 @@ class _Scope:
                 f"{item.name!r} is repeated; the expression language has no list type",
             )
         kind = item.type
+        if isinstance(kind, Concat) or (isinstance(kind, Transform) and kind.type is None):
+            # Bytes: what a concat joins, and a transform's output kept as is.
+            if rest:
+                raise self._fail(path, f"{item.name!r} is bytes, so {rest[0]!r} cannot be read")
+            return ExprType.BYTES
+        if isinstance(kind, Transform) and kind.type is not None:
+            # What its output decodes as, exactly as though the field were that.
+            kind = kind.type
         if isinstance(kind, UnitRef):
             target = self.checker.spec.units.get(kind.unit)
             if target is None:
