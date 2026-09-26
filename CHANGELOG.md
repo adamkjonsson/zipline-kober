@@ -42,9 +42,14 @@ minor bump here too.
   spec may use are `kober.transforms.WELL_KNOWN`, each defined by a
   specification and in a tier: `gzip`, `deflate` (RFC 1950) and `deflate-raw`
   are core, and `br`, `zstd`, `bzip2` and `xz` are extended and must be
-  declared. **In this development version the decoder does not yet decode
-  them** (a message that reaches one is `undecodable`), and `kober compile`
-  refuses a spec with one.
+  declared. **The interpreter decodes them**: `Decoder(spec, params=…,
+  transforms=…)` takes the document's parameters, checked against their
+  declared types (`ParameterError` otherwise), and binds every transform the
+  spec uses before any input. A transform's output is decoded as its `type`
+  in its own offset space (`Node.space`), and a transform that fails leaves
+  its message whole, marked `Node.failed`. In this development version a file
+  written at field granularity does not yet contain what an output decoded
+  to, and `kober compile` refuses a spec with one.
 - **The Python binding for transforms**, `kober.transforms`
   ([#46](https://github.com/adamkjonsson/zipline-kober/issues/46)). A
   `Registry` binds names to callables; `Registry.standard()`, and the default
@@ -58,7 +63,7 @@ minor bump here too.
   well-known one this backend does not bind or the spec's own. `apply` runs
   one and raises `TransformError` in kober's own words: a codec's message is
   kober's, and a caller's callable is reported by its exception's class only,
-  never its text, which could hold a key. Not yet used by the decoder.
+  never its text, which could hold a key.
 - **`startswith(s, prefix)` and `endswith(s, suffix)`** in the expression
   language ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50)),
   typed `(str, str) -> bool`, exact as to case, in both backends. They are what

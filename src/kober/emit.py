@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 from kober.expr import references
 from kober.node import NodeStatus
 from kober.runtime import TEXT_CONTENT_TYPE, normalize_int, prim_int, prim_token
-from kober.spec import Computed, Emit, IntType, Select
+from kober.spec import Computed, Emit, IntType, Select, Transform
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -253,7 +253,10 @@ def _reason_for(tree: Node, start: int, end: int) -> str:
     reason = NodeStatus.SKIPPED.value
     best = None
     for node in tree.walk():
-        if node.status is NodeStatus.OK:
+        if node.status is NodeStatus.OK or node.space is not None:
+            # A node in a transform's output is measured there, and its offsets
+            # mean nothing against the input's: taking one for a failure over
+            # these bytes wrote a false `truncated` in the plan's Stage 1.
             continue
         if node.off_start <= start and end <= max(node.off_end, node.off_start):
             width = node.off_end - node.off_start
@@ -312,6 +315,12 @@ def _walk(
         # already named `field[0]`, `field[1]`, so counting the container too
         # would spell every repeat twice — `questions.questions[0]`.
         path = names if child.is_repetition else [*names, child.name]
+        if isinstance(child.resolved_type, Transform):
+            # Not written yet: what a transform's output cites, and what its
+            # source becomes, is the transform plan's Stage 5. Until then its
+            # source is written as any bytes field is, and nothing measured in
+            # its output reaches the file.
+            continue
         if child.refused:
             # Its guard refused it: what its fields read was a guess that did
             # not hold up, so none of it is written (`DESIGN.md` §3.1).

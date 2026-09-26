@@ -202,6 +202,17 @@ class UnboundTransformError(SpecError):
     """
 
 
+class ParameterError(KoberError, ValueError):
+    """The values supplied for a spec's ``params:`` do not match what it declares.
+
+    One missing, one the spec does not declare, or one of the wrong type.
+    Raised when a decoder is set up, before any input: a run missing a
+    parameter could not be reproduced, so it never starts. Also a
+    :class:`ValueError`, which is what a caller passing a bad argument would
+    look for. The message never quotes a value, since one may be a secret.
+    """
+
+
 class CompileError(KoberError):
     """A valid spec cannot be expressed in the language being generated.
 

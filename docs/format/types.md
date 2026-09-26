@@ -371,10 +371,18 @@ in every process. A key, which a spec cannot hold, is a
 A `transform` cannot repeat, and its source may not be `emit: none`: the
 transform's outcome is what speaks for the source's bytes.
 
+**A transform that fails does not fail its message.** Bad compressed data, an
+output past `limit`, an argument that cannot be evaluated, an output its `type`
+does not decode or does not read to its end: the message still decodes whole,
+and the transform's source is what is named `undecodable`. Its node in the
+tree says `failed`, with why. A short read inside an output is never
+`truncated`, since the input it came from arrived whole.
+
 ```{note}
-In this development version, `check` and `show` understand `transform` and
-`concat`, and the decoder does not yet: a message that reaches one is
-`undecodable`, and `kober compile` refuses a spec with one.
+In this development version the interpreter decodes `transform` and `concat`
+(`kober try` shows the result), and a file written at field granularity does
+not yet contain what a transform's output decoded to. `kober compile` refuses a
+spec with one.
 ```
 
 #### Transform names

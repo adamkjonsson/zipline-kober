@@ -25,6 +25,7 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING
 
+from kober import transforms as transforms_module
 from kober.check import (
     Starved,
     fill_widths,
@@ -33,12 +34,13 @@ from kober.check import (
     starved_fields,
 )
 from kober.cursor import Cursor
-from kober.errors import EvalError, TruncatedRead
-from kober.expr import ExprValue, evaluate
+from kober.errors import EvalError, ParameterError, TransformError, TruncatedRead
+from kober.expr import ExprType, ExprValue, evaluate, references
 from kober.node import Node, NodeStatus
 from kober.spec import (
     BytesType,
     Computed,
+    Concat,
     Count,
     Emit,
     Fill,
@@ -52,17 +54,19 @@ from kober.spec import (
     Switch,
     Terminated,
     ToEnd,
+    Transform,
     UnitRef,
     Until,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
     from datetime import datetime
     from pathlib import Path
 
     from kober.expr import Expr
     from kober.spec import Field, FieldType, Repeat, SizeSpec, Spec, Unit
+    from kober.transforms import Registry
 
 #: How deep unit references may nest before the decode is abandoned. A
 #: recursive spec over crafted input would otherwise exhaust the interpreter
@@ -127,6 +131,53 @@ def _starved(node: Node, starved: Starved) -> Node:
     return replace(node, status=NodeStatus.UNDECODABLE, detail=starved.detail)
 
 
+def _in_space(node: Node, space: str) -> Node:
+    """Mark a subtree as measured in a transform's output rather than the input."""
+    return replace(
+        node,
+        space=space,
+        children=tuple(_in_space(child, space) for child in node.children),
+    )
+
+
+#: The Python types a document parameter of each declared type may hold. A
+#: ``bool`` is an ``int`` to Python, and is refused where an integer is wanted.
+_PARAM_TYPES: Mapping[ExprType, type] = {
+    ExprType.INT: int,
+    ExprType.BOOL: bool,
+    ExprType.STR: str,
+    ExprType.BYTES: bytes,
+}
+
+
+def _document_params(spec: Spec, supplied: Mapping[str, ExprValue]) -> dict[str, ExprValue]:
+    """Check the values supplied for a spec's ``params:``, and return them.
+
+    Every declared parameter must be supplied, nothing undeclared may be, and
+    each must be of its declared type. A run missing one could not be
+    reproduced, so it never starts. A secret value's text is never put in a
+    message.
+    """
+    declared = {param.name: param for param in spec.params}
+    unknown = sorted(set(supplied) - set(declared))
+    if unknown:
+        listed = ", ".join(repr(name) for name in unknown)
+        msg = f"parameter(s) {listed} are not declared by spec {spec.name!r}"
+        raise ParameterError(msg)
+    missing = sorted(set(declared) - set(supplied))
+    if missing:
+        listed = ", ".join(repr(name) for name in missing)
+        msg = f"spec {spec.name!r} needs parameter(s) {listed}, and none was supplied"
+        raise ParameterError(msg)
+    for name, value in supplied.items():
+        wanted = declared[name].type
+        python = _PARAM_TYPES[wanted]
+        if not isinstance(value, python) or (python is int and isinstance(value, bool)):
+            msg = f"parameter {name!r} must be {wanted.value}, got {type(value).__name__}"
+            raise ParameterError(msg)
+    return dict(supplied)
+
+
 def _indexed(name: str | None, elements: list[Node]) -> list[Node]:
     """Name a repetition's elements ``field[0]``, ``field[1]``, and so on.
 
@@ -178,6 +229,9 @@ class _Frame:
     #: fixed-size or counted read of it that runs out knows where the message
     #: ends. Set per field for the reason :attr:`fill` is.
     tail: bool = False
+    #: The document's parameters (:attr:`kober.spec.Spec.params`), as supplied
+    #: to the decoder: in scope in every unit, after its own names.
+    document: Mapping[str, ExprValue] = dataclass_field(default_factory=dict)
 
     def root(self) -> _Frame:
         """Return the outermost frame."""
@@ -225,6 +279,8 @@ class _Environment:
         if head in frame.params and not rest:
             return frame.params[head]
         node = frame.named.get(head)
+        if node is None and head in frame.document and not rest:
+            return frame.document[head]
         if node is None:
             msg = f"{'.'.join(path)}: {head!r} has not been decoded"
             raise EvalError(msg)
@@ -253,8 +309,18 @@ class Decoder:
             :func:`kober.check.check` proves, so skipping it means promising
             those by hand.
 
+        params: Values for the document's ``params:``, by name: every one it
+            declares, of the type it declares. A key, above all.
+        transforms: Where the spec's transforms are bound. The default is
+            :data:`kober.transforms.DEFAULT`, which holds what the standard
+            library can run and whatever the program registered.
+
     Raises:
         SpecError: If ``check`` is set and the spec has errors.
+        UnboundTransformError: If a transform the spec uses is bound to
+            nothing in ``transforms``.
+        ParameterError: If a parameter is missing, not one the spec
+            declares, or not of its declared type.
 
     Example:
         >>> decoder = Decoder(spec)
@@ -263,11 +329,27 @@ class Decoder:
 
     """
 
-    def __init__(self, spec: Spec, *, emit: Emit = Emit.MESSAGE, check: bool = True) -> None:
+    def __init__(
+        self,
+        spec: Spec,
+        *,
+        emit: Emit = Emit.MESSAGE,
+        check: bool = True,
+        params: Mapping[str, ExprValue] | None = None,
+        transforms: Registry | None = None,
+    ) -> None:
         if check:
             require_valid(spec)
         self.spec = spec
         self.emit = emit
+        #: The document's parameters, as supplied: every one the spec declares,
+        #: of the type it declares, checked here so that a run nothing could
+        #: reproduce never starts.
+        self._params = _document_params(spec, params or {})
+        #: What each transform the spec uses is bound to, bound here so that a
+        #: transform this process cannot run fails once, before any input,
+        #: rather than making every message ``undecodable``.
+        self._transforms = (transforms or transforms_module.DEFAULT).bind(spec)
         #: What each ``fill`` field resolves to, by ``(unit, field index)``.
         #: Precomputed rather than asked per decode, and kept here rather than
         #: taken off a check result: a decoder may run with ``check=False``, so
@@ -405,7 +487,7 @@ class Decoder:
                 status=NodeStatus.UNDECODABLE,
                 detail=detail,
             )
-        frame = _Frame(unit=unit, parent=parent)
+        frame = _Frame(unit=unit, parent=parent, document=self._params)
         for param, value in zip(unit.params, args, strict=False):
             frame.params[param.name] = value
 
@@ -665,6 +747,10 @@ class Decoder:
             return self._pointer(item, kind, frame, cursor, read, env)
         if isinstance(kind, Select):
             return self._select(item, kind, frame, cursor, mark)
+        if isinstance(kind, Concat):
+            return self._concat(item, kind, frame, cursor, mark)
+        if isinstance(kind, Transform):
+            return self._transform(item, kind, frame, cursor, read, mark)
         if isinstance(kind, IntType):
             value = cursor.read_int(kind.bits, signed=kind.signed, endian=kind.endian)
             start, end = cursor.span(mark)
@@ -749,6 +835,153 @@ class Decoder:
                 detail=f"pointer target does not decode: {node.detail}",
             )
         return node
+
+    def _concat(
+        self, item: Field, kind: Concat, frame: _Frame, cursor: Cursor, mark: int
+    ) -> Node:
+        """Join one field of every element of a repetition; cite their hull.
+
+        Reads nothing where it stands. The hull runs from the first non-empty
+        member's first byte to the last one's last: an empty member cites
+        nothing, which keeps the terminating chunk's size line out of it (the
+        transform plan's Stage 1). With no member at all it cites nothing, at
+        the cursor, as a ``select`` default does.
+        """
+        container = frame.named.get(kind.repeated)
+        if container is None or not container.is_repetition:
+            msg = f"concat: {kind.repeated!r} is not a decoded repetition"
+            raise EvalError(msg)
+        pieces: list[bytes] = []
+        spans: list[tuple[int, int]] = []
+        for element in container.children:
+            member = element.find(kind.member)
+            if member is None:
+                continue
+            if not isinstance(member.value, bytes):
+                msg = f"concat: {kind.repeated}.{kind.member} is not bytes"
+                raise EvalError(msg)
+            pieces.append(member.value)
+            if member.width:
+                spans.append((member.off_start, member.off_end))
+        if spans:
+            start, end = spans[0][0], spans[-1][1]
+        else:
+            start, end = cursor.span(mark)
+        return self._leaf(item, kind, b"".join(pieces), start, end)
+
+    def _transform(
+        self,
+        item: Field,
+        kind: Transform,
+        frame: _Frame,
+        cursor: Cursor,
+        read: _Read,
+        mark: int,
+    ) -> Node:
+        """Transform bytes already decoded, and decode the output in its own space.
+
+        Reads nothing where it stands, so the position is the same after as
+        before, and the decoder's unit and field loops never see anything but
+        a field. The node cites its **source and every field its ``args``
+        read**, first to last: for a cipher whose nonce and associated data are
+        the header, that is the whole datagram (the plan's *Decided* 3).
+
+        **A transform that fails does not fail its message** (*Decided* 1).
+        Whatever went wrong, the codec, the ``limit``, an argument that could
+        not be evaluated, an output its ``type`` does not decode or does not
+        read to its end, the node is ``OK`` with no value and no children,
+        :attr:`~kober.node.Node.failed` set, and the failure as its detail. The
+        message decodes whole, so the driver goes on after it; the emitter
+        names the source's bytes ``undecodable``.
+
+        With a ``type``, the output is decoded on a second cursor from its first
+        byte, and every node decoded there carries the transform's name as its
+        :attr:`~kober.node.Node.space`: its offsets are the output's.
+        """
+        env = _Environment(frame)
+        start, end = self._transform_citation(kind, frame, cursor, mark)
+        try:
+            data = env.lookup((kind.source,))
+            if not isinstance(data, bytes):
+                msg = f"transform: {kind.source!r} is not bytes"
+                raise EvalError(msg)
+            args = {name: evaluate(expr, env) for name, expr in kind.args.items()}
+            output = transforms_module.apply(
+                kind.name, self._transforms[kind.name], data, limit=kind.limit, args=args
+            )
+        except (EvalError, TransformError) as exc:
+            return self._transform_failed(item, kind, start, end, str(exc))
+        if kind.type is None:
+            return self._leaf(item, kind, output, start, end)
+
+        second = Cursor(output, 0)
+        inner = self._one(item, kind.type, frame, second, _Read(origin=0, depth=read.depth + 1))
+        if inner.status is not NodeStatus.OK:
+            return self._transform_failed(
+                item, kind, start, end, f"{kind.name} output does not decode: {inner.detail}"
+            )
+        if not second.at_end():
+            unread = second.remaining_bytes()
+            detail = f"{kind.name} output has {unread} byte(s) its type does not read"
+            return self._transform_failed(item, kind, start, end, detail)
+        inner = _in_space(inner, item.name or kind.name)
+        if inner.children or inner.unit is not None:
+            # A unit: its fields are the transform's, measured in the output.
+            return Node(
+                name=item.name,
+                off_start=start,
+                off_end=end,
+                children=inner.children,
+                unit=inner.unit,
+                spec_field=item,
+                resolved_type=kind,
+            )
+        # A single value: the output has no structure below it, so the node is
+        # the value itself, citing the input like any leaf.
+        return Node(
+            name=item.name,
+            value=inner.value,
+            off_start=start,
+            off_end=end,
+            detail=inner.detail,
+            spec_field=item,
+            resolved_type=kind,
+        )
+
+    def _transform_citation(
+        self, kind: Transform, frame: _Frame, cursor: Cursor, mark: int
+    ) -> tuple[int, int]:
+        """Return what a transform cites: its source and its arguments' fields, first to last.
+
+        Only fields of this unit count, as for a ``computed``: a document or
+        unit parameter holds no input bytes, and ``root`` or ``parent`` reach
+        outside what this node can see. With nothing to cite, it cites nothing,
+        at the cursor.
+        """
+        spans: list[tuple[int, int]] = []
+        read = [ref.path[0] for expr in kind.args.values() for ref in references(expr)]
+        names = [kind.source, *read]
+        for name in names:
+            node = frame.named.get(name)
+            if node is not None and node.width:
+                spans.append((node.off_start, node.off_end))
+        if not spans:
+            return cursor.span(mark)
+        return min(start for start, _ in spans), max(end for _, end in spans)
+
+    def _transform_failed(
+        self, item: Field, kind: Transform, start: int, end: int, detail: str
+    ) -> Node:
+        """Build the node for a transform that produced nothing usable (*Decided* 1)."""
+        return Node(
+            name=item.name,
+            off_start=start,
+            off_end=end,
+            detail=detail,
+            spec_field=item,
+            resolved_type=kind,
+            failed=True,
+        )
 
     def _unreadable(self, item: Field, kind: FieldType, cursor: Cursor, detail: str) -> Node:
         """Build the node for a pointer that cannot be followed.

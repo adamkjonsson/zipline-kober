@@ -8,8 +8,8 @@ between two defensible designs, the choice is listed under *Decisions the
 spike leaves open*, and *Decided, 2026-09-26* records the answers.
 *Stage 1b* ([#49](https://github.com/adamkjonsson/zipline-kober/issues/49)),
 *Stage 1c* ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50)) and
-Stages 2 and 3 are done, and their results are recorded there. Next is
-Stage 4.
+Stages 2, 3 and 4 are done, and their results are recorded there. Next is
+Stage 5.
 
 > **Written 2026-09-19** against `0.3.0`, `DESIGN.md` revision 9, `zpf` 0.5.0
 > (spec 0.21), packeteer 0.16.0. The prompt was a question — *zipline is ready
@@ -1194,6 +1194,42 @@ leaves the transform node `OK` with no output and its failure as the detail,
 as a malformed string is (§3.2), so the unit and field loops never see it. A
 short inner read is not reported as `truncated` anywhere. The seam test is run
 here and the result recorded.
+
+**Done, 2026-09-26.** In `decoder.py`, as decided, with these specifics:
+
+- **The seam test passes.** `_field`, `_repeat`, `_elements`, `_one` and
+  `_constrained` are unchanged. `_value`'s dispatch gained two branches.
+  `_unit` changed one line, handing each frame the document's parameters,
+  which is Q4's plumbing rather than the transform's. `_Read` gained nothing,
+  and the second cursor is `Cursor(output, 0)` with a fresh `_Read(origin=0)`,
+  which is the `(data, base, limit)` triple the pointer phase built.
+- **`Decoder(spec, params=…, transforms=…)`.** Parameters are checked against
+  their declared types before any input, raising `ParameterError` (a
+  `KoberError` and a `ValueError`, so the CLI reports it and a caller can
+  catch the idiomatic one; it never quotes a value). `transforms` is a
+  `Registry`, `DEFAULT` unless given, and `bind` runs in the constructor, so
+  an unbound name fails once, before any input.
+- **Every failure is contained** (*Decided* 1 and 2): the codec, `limit`, an
+  argument that cannot be evaluated, an output its `type` does not decode, and
+  an unread tail. The node is `OK` with `Node.failed` set, no value, no
+  children, and the failure as its detail. A short read inside an output is
+  never `truncated` anywhere in the tree.
+- **A typed output is a container of the output unit's fields** in its own
+  space. A scalar-typed one (`type: {string: …}`) is the value itself, citing
+  the input, since its only offsets would be the whole output.
+- **The citation** is the source and every field of this unit its `args`
+  read, first to last (*Decided* 3). A parameter holds no input bytes, and a
+  transform from one cites nothing, at the cursor.
+- **The emitter is guarded until Stage 5.** Field granularity does not walk
+  into a transform, so its source is written as any bytes field is and no
+  inner node reaches a file. `_reason_for` skips nodes in another space,
+  the spike's false `truncated`, fixed here because this stage is what
+  creates such nodes; its test was watched failing without the guard.
+
+20 decoder tests, over gzip and chunked deflate bodies, a caller's cipher
+with a key from a document parameter and a nonce from a field, a pointer
+inside an output, and every kind of contained failure. The pipeline moved 0 of
+64 outputs and `compiled_dns.py` is unchanged.
 
 ### Stage 5 — emission, the stage driver, and the CLI
 
