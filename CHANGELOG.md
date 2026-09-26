@@ -47,9 +47,20 @@ minor bump here too.
   declared types (`ParameterError` otherwise), and binds every transform the
   spec uses before any input. A transform's output is decoded as its `type`
   in its own offset space (`Node.space`), and a transform that fails leaves
-  its message whole, marked `Node.failed`. In this development version a file
-  written at field granularity does not yet contain what an output decoded
-  to, and `kober compile` refuses a spec with one.
+  its message whole, marked `Node.failed`. At field granularity an output's
+  records cite the transform's source and argument fields, and the source is
+  not written as a record of its own; a failed transform names its source
+  `undecodable`, and `emit: none` names it `skipped`. A message whose
+  transform failed neither confirms nor declines its stream, and a stream in
+  which every message that decoded had one fail is declined saying so.
+  `kober run` and `kober try` take `--param NAME=VALUE`, read as the declared
+  type (`hex:…` or `file:PATH` for bytes), and `--load-transforms MODULE`,
+  which runs a module that registers transforms the standard library cannot:
+  a cipher, or `br`. `Decoder.params_digest()` is a digest of the spec, the
+  granularity and every parameter's value, a secret one included only as
+  hashed; a file does not carry it yet
+  ([python-zipline#77](https://github.com/adamkjonsson/python-zipline/issues/77)). In this development version `kober
+  compile` refuses a spec with a transform or concat.
 - **The Python binding for transforms**, `kober.transforms`
   ([#46](https://github.com/adamkjonsson/zipline-kober/issues/46)). A
   `Registry` binds names to callables; `Registry.standard()`, and the default
@@ -154,6 +165,10 @@ minor bump here too.
   `DESIGN.md` §3.1 gains *After a gap* and is revision 12. It records why a
   refused attempt is retried where it stopped rather than scanned for byte by
   byte, with the measurement.
+- `tools/pipeline.py` gains two inputs, `gzip_lossy` and `gzip_clean`: HTTP
+  responses with gzip and deflate bodies, from `tools/gzip_http.py`, carried
+  through packeteer by `tools/blob.yaml`, since its HTTP payload cannot carry
+  them. The lossless one is checked exactly against the reference reader.
 - `tools/pipeline.py` checks that every HTTP start line looks like one, not
   only how many there are. A count had hidden two phantom start lines in the
   generated HTTP stream since 0.4.0, because the same gaps also took two real

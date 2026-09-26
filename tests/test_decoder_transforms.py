@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import gzip
 import zlib
 
 import pytest
+import yaml
 from cipher import seal, xor_open
 
 from kober.decoder import Decoder
@@ -300,3 +302,65 @@ units:
     )
     _, regions = plan(built, tree, data, emit=Emit.MESSAGE)
     assert {region.reason for region in regions} == {"undecodable"}
+
+
+# --- the params digest ------------------------------------------------------------------------
+
+
+def cipher_digest(key: bytes = KEY, emit: Emit = Emit.MESSAGE, text: str = CIPHER) -> str:
+    registry = Registry.standard()
+    registry.register("xor", xor_open)
+    built = Decoder(from_yaml(text), emit=emit, params={"key": key}, transforms=registry)
+    return built.params_digest()
+
+
+def test_the_digest_is_the_same_for_the_same_configuration_however_it_was_loaded():
+    """Where a spec was read from is not what it is."""
+    registry = Registry.standard()
+    registry.register("xor", xor_open)
+    from_memory = Spec.from_dict(yaml.safe_load(CIPHER))
+    in_memory = Decoder(from_memory, params={"key": KEY}, transforms=registry).params_digest()
+    assert in_memory == cipher_digest()
+    assert cipher_digest().startswith("sha256:")
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"key": bytes(16)},
+        {"emit": Emit.FIELD},
+        {"text": CIPHER.replace("limit: 1500", "limit: 1499")},
+    ],
+    ids=["key", "granularity", "spec"],
+)
+def test_the_digest_changes_with_anything_that_changes_the_output(changed: dict):
+    assert cipher_digest(**changed) != cipher_digest()
+
+
+def test_the_digest_tells_an_integer_case_from_a_text_case():
+    """A switch keyed `1` and one keyed `"1"` are different models.
+
+    The loader reads both spellings of a document's key as the integer, since
+    JSON object keys are always text, so the difference exists only in a
+    model built in memory, which is where it is made here.
+    """
+    built = from_yaml("""
+name: t
+version: "1"
+entry: m
+units:
+  m:
+    fields:
+      - {name: kind, string: 1}
+      - name: body
+        switch: {dispatch: kind, cases: {1: {bits: 8}}, default: {bits: 16}}
+""")
+    message = built.units["m"]
+    switch = message.fields[1].type
+    as_text = dataclasses.replace(switch, cases={"1": switch.cases[1]})
+    fields = (message.fields[0], dataclasses.replace(message.fields[1], type=as_text))
+    other = dataclasses.replace(
+        built, units={"m": dataclasses.replace(message, fields=fields)}
+    )
+    ours = Decoder(built, check=False).params_digest()
+    assert ours != Decoder(other, check=False).params_digest()

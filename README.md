@@ -153,6 +153,21 @@ message  [0, 29)
 Unlike `run`, it fails when the decode did not complete — answering that is the
 point of it.
 
+A spec that declares `params:` (a key, say) takes each with `--param`, on `run`
+and `try` alike, read as its declared type: `--param key=hex:00112233` or
+`--param key=file:key.bin`. A transform the standard library cannot run, a
+cipher or `br`, is registered by a module of your own, which
+`--load-transforms ciphers.py` runs first: it is code, and it is run as code.
+From Python:
+
+```python
+from kober import Decoder, Registry, Spec
+
+transforms = Registry.standard()
+transforms.register("aes-gcm", my_aes_gcm)  # a cipher: never in the standard library
+decoder = Decoder(Spec.from_file("tunnel.yaml"), params={"key": key}, transforms=transforms)
+```
+
 ## Compiling
 
 `compile` turns a spec into a Python module with a typed API. The module reads

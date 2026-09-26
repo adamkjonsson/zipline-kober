@@ -127,7 +127,7 @@ It is one command, and **run it before a release, or after touching
 
 It needs two sibling checkouts with their own venvs, neither a dependency of
 this project — `../packeteer` and `../python-zipline-wire`, or wherever
-`--packeteer` and `--wire` say. It builds eight inputs:
+`--packeteer` and `--wire` say. It builds ten inputs:
 
 | Input | What it is for |
 | --- | --- |
@@ -135,13 +135,15 @@ this project — `../packeteer` and `../python-zipline-wire`, or wherever
 | `dns_gen` | A generated, lossy DNS stream whose response is compressed — `raw:` bytes from `tools/dns-messages.json`, since a built message carries no pointer (see *Generated DNS* below). |
 | `http_gen` | Generated chunked HTTP with trailers at `--mss 200` on a 5% lossy link: chunk boundaries across segment boundaries, and losses mid-body. |
 | `http_clean` | The same traffic with no loss, so its shape can be checked exactly. |
+| `gzip_lossy` | 30 HTTP responses, gzip, deflate and plain, length-framed and chunked, from `tools/gzip_http.py`, cut into 200-byte segments on a 5% lossy link. Its bodies are large, so a gap lands inside one routinely (#49). packeteer's HTTP payload cannot carry them, so they go through `tools/blob.yaml`, a one-field protocol of the project's own. |
+| `gzip_clean` | The same traffic with no loss, checked exactly against the reference reader. |
 | `packet_loss`, `tcp_lossy_ts`, `tcp_reorder_ts` | Real captures kept for their loss and reordering. They are not DNS or HTTP; they are driver structure. |
 | `http_stream_1` | A real HTTP capture, 2000 messages, lossless. |
 
 Each is converted with `zpfwire convert` and run through **both** example specs
 — a spec meeting a stream in another protocol is a case the driver has to
 handle too — by the interpreter and by a module compiled fresh from the spec, at
-both granularities: 64 files. For each, it checks:
+both granularities: 80 files. For each, it checks:
 
 - **Conformance and coverage**: `zpf.ConformanceChecker` and
   `zpf.check_coverage`.

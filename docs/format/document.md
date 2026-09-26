@@ -133,6 +133,11 @@ every unit under its name, so `args: {key: key}` is ordinary. `name: type` is
 the short form. A parameter may not share a name with any field or unit
 parameter.
 
+Every one is required, and a run without one does not start. From the command
+line, `--param NAME=VALUE`, read as the declared type: `bytes` as `hex:0a0b` or
+`file:PATH`, never as bare text; `int` as a decimal; `bool` as `true` or
+`false`; `str` as given. From Python, `Decoder(spec, params={...})`.
+
 `secret: true` marks a value that must never be written anywhere: not in a
 record, a region's comment, or a diagnostic.
 

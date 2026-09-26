@@ -21,8 +21,13 @@ tail rather than guessing at a reason per byte.
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
+from enum import Enum
 from typing import TYPE_CHECKING
 
 from kober import transforms as transforms_module
@@ -60,7 +65,7 @@ from kober.spec import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Iterator, Sequence
     from datetime import datetime
     from pathlib import Path
 
@@ -176,6 +181,39 @@ def _document_params(spec: Spec, supplied: Mapping[str, ExprValue]) -> dict[str,
             msg = f"parameter {name!r} must be {wanted.value}, got {type(value).__name__}"
             raise ParameterError(msg)
     return dict(supplied)
+
+
+def _canonical(value: object) -> object:
+    """Return a JSON-able form of a spec model value that two equal values share.
+
+    A dataclass is its type's name and every field that takes part in its
+    equality, which leaves out :attr:`kober.spec.Spec.sources`: where a spec was
+    read from is not what it is. A mapping is its items as pairs, sorted, and
+    not a JSON object, whose keys are always text: a switch's keys may be ``1``
+    or ``"1"``, and those are different cases.
+    """
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            "type": type(value).__name__,
+            "fields": {
+                item.name: _canonical(getattr(value, item.name))
+                for item in dataclasses.fields(value)
+                if item.compare
+            },
+        }
+    if isinstance(value, Enum):
+        return _canonical(value.value)
+    if isinstance(value, Mapping):
+        pairs = [[_canonical(key), _canonical(item)] for key, item in value.items()]
+        return sorted(pairs, key=lambda pair: json.dumps(pair, sort_keys=True))
+    if isinstance(value, (list, tuple)):
+        return [_canonical(item) for item in value]
+    if isinstance(value, bytes):
+        return {"bytes": value.hex()}
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    msg = f"cannot put {type(value).__name__} into a params digest"
+    raise TypeError(msg)
 
 
 def _indexed(name: str | None, elements: list[Node]) -> list[Node]:
@@ -364,6 +402,32 @@ class Decoder:
         #: The fields whose cut-off read tells where the message ends, for the
         #: driver to resume at after a gap (#49). Precomputed like the others.
         self._tails = message_tail_fields(spec)
+
+    def params_digest(self) -> str:
+        """Return a digest of everything that decides what this decoder writes.
+
+        The spec, the granularity, and every parameter's value: what the
+        format's Decoder Descriptor calls ``params_digest``, so a file can say
+        which configuration produced it, and a run with a different key reads
+        as a different configuration. A secret value goes into the hash and
+        nowhere else. It is a hash, so a key too short to be one could be
+        guessed from it by someone holding the spec; a real key cannot.
+
+        Computed over a canonical form of the spec model rather than its
+        source, so a spec read from YAML and the same spec built in memory
+        agree, and where it was read from does not count.
+
+        Returns:
+            ``sha256:`` and the hex digest.
+
+        """
+        document = {
+            "spec": _canonical(self.spec),
+            "emit": self.emit.value,
+            "params": {name: _canonical(value) for name, value in sorted(self._params.items())},
+        }
+        text = json.dumps(document, sort_keys=True, separators=(",", ":"))
+        return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
 
     def decode_bytes(self, data: bytes, *, base: int = 0) -> Node:
         """Decode one buffer as a single instance of the entry unit.

@@ -1259,6 +1259,55 @@ inside an output, and every kind of contained failure. The pipeline moved 0 of
   start-line check Stage 1c added. Its diff against the Stage 1b baseline stays empty
   for every transform-free output.
 
+**Done except `params_digest`, 2026-09-26.**
+
+- **Emission** (`emit.py`): a transform's source is not written as a record
+  of its own when the transform is present. An output's records cite the
+  transform's range (source and argument fields); inside an output every
+  record cites the outermost transform's range and nothing becomes a region.
+  A failed transform names its source `undecodable`; `emit: none` on a
+  transform names its source `skipped`. A scalar output is one record
+  labelled by its type, and a type-less one by `content_type` (or
+  `prim:bytes`).
+- **The driver** (`stage.py`): a new verdict, `TRANSFORM_FAILED`, for a message
+  that decoded whole with a failed transform. The run goes on after it, after
+  a gap it counts as a boundary found, and it neither confirms nor declines.
+  A stream that ends unconfirmed after one is declined with *Decided* 1e's
+  comment. `_Writer` changed only in that comment and in noting the failure.
+- **The CLI**: `--param NAME=VALUE` on `run` and `try`, read as the declared
+  type; `bytes` is `hex:…` or `file:PATH` and never bare text. No message
+  quotes a value.
+- **The pipeline** gains `gzip_lossy` and `gzip_clean` from
+  `tools/gzip_http.py` and `tools/blob.yaml`. With today's `http.yaml`, which
+  does not inflate yet (that is Stage 8, after the compiler), they exercise
+  the driver on large compressed bodies: `gzip_clean` matches the reference
+  reader exactly (30, 119, 17), and `gzip_lossy` decodes 30 start lines, all
+  genuine, within its bound. No existing output moved. The lossy bound is now
+  a per-input message count rather than a special case for `http_gen`.
+- `content_registry` needed nothing: it already takes a `Decoder`, which holds
+  the parameters and the bound transforms.
+- **`params_digest` is computed and not yet written.** `zpf` 0.5.0's
+  `decode_stage` declares the stage's decoder itself from a name or
+  `(name, version)`, and only `add_decoder` takes a digest, so the plan's "via
+  a `DecoderHandle`" cannot be done through the public API. Adam chose to fix
+  it upstream: [python-zipline#77](https://github.com/adamkjonsson/python-zipline/issues/77)
+  asks for `decode_stage(…, params_digest=…)`, in a 0.5.1 that kober then pins
+  (`>=0.5.1,<0.6`). Meanwhile `Decoder.params_digest()` exists and is tested: a
+  SHA-256 over a canonical form of the spec model (dataclass by dataclass,
+  mappings as pairs so a `1` case and a `"1"` case differ, where it was read
+  from left out), the granularity, and every parameter's value. Writing it is
+  one argument in `stage.run` once #77 lands; the compiled driver's follows
+  in Stage 6.
+- **`--load-transforms MODULE`**, added at Adam's request: the CLI could not run
+  a spec whose transform only a caller binds, a cipher. A path ending `.py` is
+  loaded from its file and anything else is imported, which is packeteer's
+  `--load-protocol` rule; it runs before the decoder is built, so what it
+  registers on the default registry is what `bind` finds. A module that
+  cannot load, or raises, is reported as a failure to load it.
+
+10 stage tests through the interpreter's driver (9 watched failing against
+Stage 4), 9 CLI tests.
+
 ### Stage 6 — the compiler
 
 Generated code calls the registry through [`ops.py`](../src/kober/ops.py), so

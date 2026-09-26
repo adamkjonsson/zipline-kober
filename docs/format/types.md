@@ -378,11 +378,22 @@ and the transform's source is what is named `undecodable`. Its node in the
 tree says `failed`, with why. A short read inside an output is never
 `truncated`, since the input it came from arrived whole.
 
+At field granularity every record read from an output cites the transform's
+source and argument fields, and the source is not written as a record of its
+own: the output speaks for it. A transform that failed names its source's bytes
+`undecodable`, and one marked `emit: none` names them `skipped`. At message
+granularity the message record holds the input as it arrived, so a failed
+transform is not visible in the file there, only in the tree.
+
+A message whose transform failed decoded whole, so the stream goes on after
+it. It neither confirms the stream nor declines it: a transform is often a
+protocol's only real check of identity, a tag that verifies, and a failure is
+evidence of neither. A stream in which every message that decoded had a
+transform fail is declined at its end, saying so.
+
 ```{note}
-In this development version the interpreter decodes `transform` and `concat`
-(`kober try` shows the result), and a file written at field granularity does
-not yet contain what a transform's output decoded to. `kober compile` refuses a
-spec with one.
+In this development version `kober compile` refuses a spec with a `transform`
+or `concat`; the interpreter decodes it.
 ```
 
 #### Transform names
@@ -412,7 +423,7 @@ Any other name is the spec's own, a cipher say, declared with its parameters.
 **What a name is bound to is the program's business, not the spec's.** kober
 binds what the Python standard library can run, and a program adds the rest
 with {func}`kober.transforms.register`, or a {class}`kober.transforms.Registry`
-of its own: a cipher, which the standard library has none of, or `br` from a
+of its own, or from the command line in a module `--load-transforms` runs: a cipher, which the standard library has none of, or `br` from a
 Brotli package. A transform is a callable taking the source's bytes, `limit`,
 and the spec's `args` by name, and returning at most `limit` bytes. What it
 raises makes the source `undecodable`, and its message is never written out: a

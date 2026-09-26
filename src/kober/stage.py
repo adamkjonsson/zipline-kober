@@ -101,6 +101,13 @@ CUT_COMMENT = "rest of a message cut by a gap"
 #: was made there, and it could not be told from the middle of a message.
 LOST_COMMENT = "no message boundary found after a gap"
 
+#: The verdict for a message that decoded whole except for a transform that
+#: failed (the transform plan's *Decided* 1). Its framing held, so the run goes
+#: on after it; but a transform is often a protocol's only real check of
+#: identity, a tag that verifies, so it neither confirms the stream nor
+#: declines it.
+TRANSFORM_FAILED = "transform-failed"
+
 
 @dataclass(frozen=True)
 class _Verdict:
@@ -312,6 +319,9 @@ class _Writer:
         #: declines, so a stream that ends unconfirmed may have had one, and
         #: then its comment must not say every attempt ran out.
         self.lost = False
+        #: The first failed transform's detail while unconfirmed: a stream that
+        #: ends unconfirmed after one is declined saying so.
+        self.transform_failure: str | None = None
         #: While unconfirmed: each run as ``(start, end, writes)``, and each gap
         #: as ``(start, end, None)``, in stream order.
         self._held: list[tuple[int, int, list[tuple[object, ...]] | None]] = []
@@ -366,10 +376,26 @@ class _Writer:
             self._undecoded(off_start, off_end, reason, None if writes is None else comment)
         self._held.clear()
 
+    def transform_failed(self, detail: str) -> None:
+        """Note a message that decoded whole except for a transform that failed."""
+        if not self.confirmed and self.transform_failure is None:
+            self.transform_failure = detail
+
     def finish(self) -> None:
         """End the stream: decline it if nothing ever decoded, then write what is left."""
         if not self.confirmed and self.declined is None:
             if any(writes is not None for _, _, writes in self._held):
+                if self.transform_failure is not None:
+                    # Every message that decoded had a transform fail. With a
+                    # wrong key that is every message, and nothing here can tell
+                    # a wrong key from a wrong protocol, so the comment says
+                    # what was seen (*Decided* 1e).
+                    self.decline(
+                        f"not {self.name}: every message that decoded had a transform "
+                        f"fail; the first: {self.transform_failure}"
+                    )
+                    self.flush()
+                    return
                 how = (
                     "ran out of input or found no message boundary after a gap"
                     if self.lost
@@ -482,6 +508,9 @@ def _interpreted(decoder: Decoder) -> _Step:
         for region in unclaimed:
             sink.undecoded(region.off_start, region.off_end, region.reason)
         if tree.status is NodeStatus.OK:
+            failed = next((node for node in tree.walk() if node.failed), None)
+            if failed is not None:
+                return _Verdict(TRANSFORM_FAILED, failed.detail or "a transform failed")
             return None
         reach = next((node.reach for node in tree.walk() if node.reach is not None), None)
         refused = any(node.refused for node in tree.walk())
@@ -585,8 +614,9 @@ def _decode_run(
             # A message that consumes nothing would loop forever. It cannot be
             # decoded and neither can what follows it.
             verdict = _Verdict(NodeStatus.UNDECODABLE.value, "a message consumed no input")
+        whole = verdict is None or verdict.reason == TRANSFORM_FAILED
         if held is not None:
-            if verdict is not None:
+            if not whole and verdict is not None:
                 attempt = base + (before >> 3)
                 stopped = _stopped_at(cursor, base)
                 if verdict.refused and attempt < stopped < end:
@@ -601,6 +631,9 @@ def _decode_run(
                 return None
             held.release()
             known = True
+        if verdict is not None and verdict.reason == TRANSFORM_FAILED:
+            writer.transform_failed(verdict.detail)
+            continue
         if verdict is not None:
             # The decode stopped here and said why; the rest of the run is the
             # tail a message deliberately leaves to whoever owns the run.
@@ -631,13 +664,16 @@ def _drive_datagrams(step: _Step, writer: _Writer, stream: object) -> None:
         # following message cannot use it, so it is accounted for here. A
         # truncated datagram is a hole, so the *next* datagram's records do not
         # join these — across datagrams just as within a stream.
+        whole = verdict is None or verdict.reason == TRANSFORM_FAILED
         writer.undecoded(
             stopped,
             datagram.off_end,
-            NodeStatus.SKIPPED.value if verdict is None else verdict.reason,
+            NodeStatus.SKIPPED.value if whole or verdict is None else verdict.reason,
         )
         if verdict is None:
             writer.confirm()
+        elif verdict.reason == TRANSFORM_FAILED:
+            writer.transform_failed(verdict.detail)
         else:
             writer.failed(verdict, stopped)
 

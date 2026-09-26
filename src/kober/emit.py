@@ -113,6 +113,9 @@ UNDECLARED_WIDTH = (Computed, Select)
 def _int_bits(node: Node) -> tuple[int, bool]:
     """Return the declared width and signedness behind an integer node."""
     kind = node.resolved_type
+    if isinstance(kind, Transform):
+        # A transform whose output is one integer: its width is the type's.
+        kind = kind.type
     if isinstance(kind, IntType):
         return kind.bits, kind.signed
     # No declared width; `kober.runtime.prim_int` sizes it by its magnitude,
@@ -308,47 +311,109 @@ def _walk(
     default: Emit,
     emissions: list[Emission],
     unclaimed: list[Unclaimed],
+    cite: tuple[int, int] | None = None,
 ) -> None:
-    """Walk a tree at field granularity, emitting one record per leaf."""
+    """Walk a tree at field granularity, emitting one record per leaf.
+
+    ``cite`` is set inside a transform's output: every record there cites it,
+    the transform's source and argument fields in the input, since the output
+    has no offsets a file can name. For the same reason nothing inside an
+    output becomes a region.
+    """
+    # A field a transform reads is written through the transform (the transform
+    # plan's *Decided* 1a): its output's records cite those bytes, or a failure
+    # names them. Only when the transform is present; a condition that leaves
+    # it out leaves the source written as any field.
+    taken = {
+        child.resolved_type.source
+        for child in node.children
+        if isinstance(child.resolved_type, Transform)
+    }
     for child in node.children:
         # A repetition contributes no path segment of its own: its elements are
         # already named `field[0]`, `field[1]`, so counting the container too
         # would spell every repeat twice — `questions.questions[0]`.
         path = names if child.is_repetition else [*names, child.name]
+        if child.name in taken:
+            continue
+        granularity = resolve_emit(child, spec, default)
         if isinstance(child.resolved_type, Transform):
-            # Not written yet: what a transform's output cites, and what its
-            # source becomes, is the transform plan's Stage 5. Until then its
-            # source is written as any bytes field is, and nothing measured in
-            # its output reaches the file.
+            _transform(spec, node, child, path, granularity, emissions, unclaimed, cite)
             continue
         if child.refused:
             # Its guard refused it: what its fields read was a guess that did
             # not hold up, so none of it is written (`DESIGN.md` §3.1).
-            if child.width:
+            if child.width and cite is None:
                 unclaimed.append(
                     Unclaimed(child.off_start, child.off_end, NodeStatus.UNDECODABLE.value)
                 )
             continue
-        granularity = resolve_emit(child, spec, default)
         if not child.is_leaf:
             # A container's setting becomes the default *inside* it rather
             # than a verdict on it, so a field that names its own granularity
             # still wins over the unit holding it — field, then unit, then
             # whatever encloses that, then the decoder.
-            _walk(spec, child, path, granularity, emissions, unclaimed)
+            _walk(spec, child, path, granularity, emissions, unclaimed, cite)
             continue
         if granularity is Emit.NONE:
             # Decoded for control flow only. The bytes were deliberately
             # passed over, which is exactly what `skipped` means — and §2
             # wants it said rather than left to auto-fill.
-            if child.width:
+            if child.width and cite is None:
                 unclaimed.append(
                     Unclaimed(child.off_start, child.off_end, NodeStatus.SKIPPED.value)
                 )
             continue
         emission = _leaf(child, path, node)
         if emission is not None:
-            emissions.append(emission)
+            emissions.append(_citing(emission, cite))
+
+
+def _citing(emission: Emission, cite: tuple[int, int] | None) -> Emission:
+    """Return a record citing ``cite`` instead of its own range, inside an output."""
+    if cite is None:
+        return emission
+    return Emission(emission.payload, emission.content_type, *cite, emission.role)
+
+
+def _transform(
+    spec: Spec,
+    parent: Node,
+    node: Node,
+    path: list[str | None],
+    granularity: Emit,
+    emissions: list[Emission],
+    unclaimed: list[Unclaimed],
+    cite: tuple[int, int] | None,
+) -> None:
+    """Write what a transform's outcome says about its source (*Decided* 1).
+
+    On success its output's records cite the transform's range, its source and
+    argument fields. On failure its **source's** bytes are one ``undecodable``
+    region: the argument fields keep their own records. With ``emit: none``,
+    the source is ``skipped``. Inside another output none of the regions can be
+    named, and every record cites the outermost transform's range.
+    """
+    kind = node.resolved_type
+    source = parent.find(kind.source) if isinstance(kind, Transform) else None
+    named = source is not None and source.width > 0 and cite is None
+    if granularity is Emit.NONE or node.failed:
+        if named and source is not None:
+            reason = NodeStatus.SKIPPED if granularity is Emit.NONE else NodeStatus.UNDECODABLE
+            unclaimed.append(Unclaimed(source.off_start, source.off_end, reason.value))
+        return
+    outer = cite if cite is not None else (node.off_start, node.off_end)
+    if node.children:
+        _walk(spec, node, path, granularity, emissions, unclaimed, outer)
+        return
+    emission = _leaf(node, path, parent)
+    if emission is None:
+        return
+    if isinstance(kind, Transform) and kind.type is None:
+        emission = Emission(
+            emission.payload, kind.content_type or "prim:bytes", 0, 0, emission.role
+        )
+    emissions.append(_citing(emission, outer))
 
 
 def _leaf(node: Node, path: list[str | None], parent: Node) -> Emission | None:

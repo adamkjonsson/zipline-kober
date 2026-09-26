@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import importlib.util
 import json
 import sys
@@ -10,8 +11,11 @@ from typing import Any
 
 import pytest
 import zpf
+from cipher import seal
 
+from kober import transforms as transforms_module
 from kober.cli import FAILED, OK, build_parser, main
+from kober.transforms import Registry
 
 GOOD = """
 name: dns
@@ -605,3 +609,165 @@ def test_show_counts_a_unit_reached_only_through_a_pointer_as_reachable(
     """
     main(["show", write(tmp_path, document)])
     assert "not reachable" not in capsys.readouterr().out
+
+
+# --- --param (transforms, Stage 5) ------------------------------------------------------
+
+PARAMS_SPEC = """
+name: p
+version: "1"
+entry: m
+params:
+  salt: bytes
+  shift: int
+  loud: bool
+  label: str
+units:
+  m:
+    fields:
+      - {name: n, bits: 8}
+      - {name: body, bytes: {size: {expr: n}}}
+      - name: inflated
+        transform: {from: body, with: gzip, limit: 100, type: {string: {size: {remaining: true}}}}
+      - {name: scaled, computed: "n + shift"}
+      - {name: tagged, computed: "loud and label == 'x' and salt == salt"}
+"""
+
+
+def test_try_reads_each_param_as_its_declared_type(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    body = gzip.compress(b"hello", mtime=0)
+    salt = tmp_path / "salt.bin"
+    salt.write_bytes(b"\x01\x02")
+    code = main(
+        [
+            "try", write(tmp_path, PARAMS_SPEC), "--hex", (bytes([len(body)]) + body).hex(),
+            "--param", f"salt=file:{salt}", "--param", "shift=10",
+            "--param", "loud=true", "--param", "label=x",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == OK, out
+    assert "inflated = 'hello'" in out
+    assert f"scaled = {len(body) + 10}" in out
+    assert "tagged = True" in out
+
+
+@pytest.mark.parametrize(
+    ("param", "fragment"),
+    [
+        ("salt=0102", "a bytes value is hex:… or file:PATH"),
+        ("salt=hex:zz", "--param salt: not valid hex"),
+        ("shift=ten", "--param shift: not a decimal integer"),
+        ("loud=yes", "--param loud: a bool is true or false"),
+        ("colour=red", "declares no such parameter"),
+        ("noequals", "--param takes NAME=VALUE"),
+    ],
+)
+def test_a_malformed_param_is_refused_without_quoting_its_value(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], param: str, fragment: str
+):
+    code = main(["try", write(tmp_path, PARAMS_SPEC), "--hex", "00", "--param", param])
+    err = capsys.readouterr().err
+    assert code == FAILED
+    assert fragment in err
+    value = param.partition("=")[2]
+    if value and value not in fragment:
+        assert value not in err, "a value may be a secret and is never quoted"
+
+
+def test_a_missing_param_is_refused_before_any_input(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    code = main(["try", write(tmp_path, PARAMS_SPEC), "--hex", "00", "--param", "shift=1"])
+    assert code == FAILED
+    assert "needs parameter(s) 'label', 'loud', 'salt'" in capsys.readouterr().err
+
+
+# --- --load-transforms --------------------------------------------------------------------
+
+TUNNEL_SPEC = """
+name: tunnel
+version: "1"
+entry: datagram
+transforms:
+  xor: {params: {key: bytes, nonce: bytes}}
+params:
+  key: {type: bytes, secret: true}
+units:
+  datagram:
+    fields:
+      - {name: nonce, bytes: 8}
+      - {name: sealed, bytes: {size: {remaining: true}}}
+      - name: inner
+        transform: {from: sealed, with: xor, limit: 1500, args: {key: key, nonce: nonce}}
+"""
+
+
+@pytest.fixture
+def fresh_registry(monkeypatch: pytest.MonkeyPatch) -> Registry:
+    """Give the test a default registry of its own, so its registrations stay its own."""
+    registry = Registry.standard()
+    monkeypatch.setattr(transforms_module, "DEFAULT", registry)
+    return registry
+
+
+def test_load_transforms_runs_a_module_that_registers_a_cipher(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], fresh_registry: Registry
+):
+    module = tmp_path / "ciphers.py"
+    module.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
+        "from cipher import xor_open\n"
+        "from kober.transforms import register\n"
+        "register('xor', xor_open)\n"
+    )
+    key = bytes(range(16))
+    datagram = b"nonce-01" + seal(b"inner", key=key, nonce=b"nonce-01")
+    code = main(
+        [
+            "try", write(tmp_path, TUNNEL_SPEC), "--hex", datagram.hex(),
+            "--param", f"key=hex:{key.hex()}", "--load-transforms", str(module),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == OK, out
+    assert "inner = b'inner'" in out
+    assert fresh_registry.lookup("xor") is not None
+
+
+def test_without_the_module_the_spec_says_what_is_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], fresh_registry: Registry
+):
+    code = main(["try", write(tmp_path, TUNNEL_SPEC), "--hex", "00", "--param", "key=hex:00"])
+    assert code == FAILED
+    assert "'xor' is the spec's own and nothing is registered" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("source", "fragment"),
+    [(None, "FileNotFoundError"), ("raise RuntimeError('broken')", "RuntimeError: broken")],
+    ids=["missing", "raises"],
+)
+def test_a_module_that_cannot_load_is_a_failure(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    fresh_registry: Registry,
+    source: str | None,
+    fragment: str,
+):
+    module = tmp_path / "broken.py"
+    if source is not None:
+        module.write_text(source)
+    code = main(
+        [
+            "try", write(tmp_path, TUNNEL_SPEC), "--hex", "00",
+            "--param", "key=hex:00", "--load-transforms", str(module),
+        ]
+    )
+    err = capsys.readouterr().err
+    assert code == FAILED
+    assert f"--load-transforms {module}" in err
+    assert fragment in err
