@@ -21,13 +21,9 @@ tail rather than guessing at a reason per byte.
 
 from __future__ import annotations
 
-import dataclasses
-import hashlib
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
-from enum import Enum
 from typing import TYPE_CHECKING
 
 from kober import transforms as transforms_module
@@ -39,9 +35,10 @@ from kober.check import (
     starved_fields,
 )
 from kober.cursor import Cursor
-from kober.errors import EvalError, ParameterError, TransformError, TruncatedRead
-from kober.expr import ExprType, ExprValue, evaluate, references
+from kober.errors import EvalError, TransformError, TruncatedRead
+from kober.expr import ExprValue, evaluate, references
 from kober.node import Node, NodeStatus
+from kober.runtime import document_params, params_digest
 from kober.spec import (
     BytesType,
     Computed,
@@ -143,77 +140,6 @@ def _in_space(node: Node, space: str) -> Node:
         space=space,
         children=tuple(_in_space(child, space) for child in node.children),
     )
-
-
-#: The Python types a document parameter of each declared type may hold. A
-#: ``bool`` is an ``int`` to Python, and is refused where an integer is wanted.
-_PARAM_TYPES: Mapping[ExprType, type] = {
-    ExprType.INT: int,
-    ExprType.BOOL: bool,
-    ExprType.STR: str,
-    ExprType.BYTES: bytes,
-}
-
-
-def _document_params(spec: Spec, supplied: Mapping[str, ExprValue]) -> dict[str, ExprValue]:
-    """Check the values supplied for a spec's ``params:``, and return them.
-
-    Every declared parameter must be supplied, nothing undeclared may be, and
-    each must be of its declared type. A run missing one could not be
-    reproduced, so it never starts. A secret value's text is never put in a
-    message.
-    """
-    declared = {param.name: param for param in spec.params}
-    unknown = sorted(set(supplied) - set(declared))
-    if unknown:
-        listed = ", ".join(repr(name) for name in unknown)
-        msg = f"parameter(s) {listed} are not declared by spec {spec.name!r}"
-        raise ParameterError(msg)
-    missing = sorted(set(declared) - set(supplied))
-    if missing:
-        listed = ", ".join(repr(name) for name in missing)
-        msg = f"spec {spec.name!r} needs parameter(s) {listed}, and none was supplied"
-        raise ParameterError(msg)
-    for name, value in supplied.items():
-        wanted = declared[name].type
-        python = _PARAM_TYPES[wanted]
-        if not isinstance(value, python) or (python is int and isinstance(value, bool)):
-            msg = f"parameter {name!r} must be {wanted.value}, got {type(value).__name__}"
-            raise ParameterError(msg)
-    return dict(supplied)
-
-
-def _canonical(value: object) -> object:
-    """Return a JSON-able form of a spec model value that two equal values share.
-
-    A dataclass is its type's name and every field that takes part in its
-    equality, which leaves out :attr:`kober.spec.Spec.sources`: where a spec was
-    read from is not what it is. A mapping is its items as pairs, sorted, and
-    not a JSON object, whose keys are always text: a switch's keys may be ``1``
-    or ``"1"``, and those are different cases.
-    """
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {
-            "type": type(value).__name__,
-            "fields": {
-                item.name: _canonical(getattr(value, item.name))
-                for item in dataclasses.fields(value)
-                if item.compare
-            },
-        }
-    if isinstance(value, Enum):
-        return _canonical(value.value)
-    if isinstance(value, Mapping):
-        pairs = [[_canonical(key), _canonical(item)] for key, item in value.items()]
-        return sorted(pairs, key=lambda pair: json.dumps(pair, sort_keys=True))
-    if isinstance(value, (list, tuple)):
-        return [_canonical(item) for item in value]
-    if isinstance(value, bytes):
-        return {"bytes": value.hex()}
-    if value is None or isinstance(value, (bool, int, str)):
-        return value
-    msg = f"cannot put {type(value).__name__} into a params digest"
-    raise TypeError(msg)
 
 
 def _indexed(name: str | None, elements: list[Node]) -> list[Node]:
@@ -383,7 +309,11 @@ class Decoder:
         #: The document's parameters, as supplied: every one the spec declares,
         #: of the type it declares, checked here so that a run nothing could
         #: reproduce never starts.
-        self._params = _document_params(spec, params or {})
+        self._params = document_params(
+            spec.name,
+            {param.name: param.type.value for param in spec.params},
+            params or {},
+        )
         #: What each transform the spec uses is bound to, bound here so that a
         #: transform this process cannot run fails once, before any input,
         #: rather than making every message ``undecodable``.
@@ -421,13 +351,7 @@ class Decoder:
             ``sha256:`` and the hex digest.
 
         """
-        document = {
-            "spec": _canonical(self.spec),
-            "emit": self.emit.value,
-            "params": {name: _canonical(value) for name, value in sorted(self._params.items())},
-        }
-        text = json.dumps(document, sort_keys=True, separators=(",", ":"))
-        return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+        return params_digest(self.spec.digest(), self.emit.value, self._params)
 
     def decode_bytes(self, data: bytes, *, base: int = 0) -> Node:
         """Decode one buffer as a single instance of the entry unit.
@@ -981,8 +905,13 @@ class Decoder:
         second = Cursor(output, 0)
         inner = self._one(item, kind.type, frame, second, _Read(origin=0, depth=read.depth + 1))
         if inner.status is not NodeStatus.OK:
+            # Truncation is said in words of its own: where it happened inside the
+            # output means little to a reader, and the compiled module does not know.
+            why = inner.detail
+            if inner.status is NodeStatus.TRUNCATED:
+                why = "it ends before its type does"
             return self._transform_failed(
-                item, kind, start, end, f"{kind.name} output does not decode: {inner.detail}"
+                item, kind, start, end, f"{kind.name} output does not decode: {why}"
             )
         if not second.at_end():
             unread = second.remaining_bytes()

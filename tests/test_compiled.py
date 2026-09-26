@@ -36,6 +36,8 @@ from fuzzing import (
     SELECT_SPEC,
     STARVED_MESSAGE,
     STARVED_SPECS,
+    TRANSFORM_MESSAGES,
+    TRANSFORM_SPEC,
     cases,
     const_cases,
     framing_cases,
@@ -55,7 +57,7 @@ from kober.loader import from_dict
 from kober.node import Node, NodeStatus
 from kober.ops import Plan
 from kober.pygen import Names, render, render_spec
-from kober.runtime import Cursor, span
+from kober.runtime import Cursor, TransformFailed, span
 from kober.spec import Emit, Spec
 from kober.stage import run_compiled
 
@@ -297,9 +299,23 @@ def compare(spec: Spec, data: bytes, base: int = 0) -> None:
     same(plan, names, plan.entry, value, tree, "")
 
 
-def same(plan: Plan, names: Names, unit: str, value: object, node: Node, where: str) -> None:
-    """Require one decoded object and one tree node to say the same thing."""
-    assert span(value) == (node.off_start, node.off_end), f"{where or unit}: different extent"
+def same(
+    plan: Plan,
+    names: Names,
+    unit: str,
+    value: object,
+    node: Node,
+    where: str,
+    *,
+    extent: bool = True,
+) -> None:
+    """Require one decoded object and one tree node to say the same thing.
+
+    ``extent`` is false for a transform's output: the node cites the input,
+    and the object is measured in the output, so only its fields compare.
+    """
+    if extent:
+        assert span(value) == (node.off_start, node.off_end), f"{where or unit}: different extent"
     obj: ObjectPlan = plan.object(unit)
     for item in obj.fields:
         if item.name is None:
@@ -332,10 +348,16 @@ def nested(
     plan: Plan, names: Names, item: Any, value: object, node: Node, where: str
 ) -> None:
     """Compare one value, descending into it if it is a decoded object."""
+    if isinstance(value, TransformFailed):
+        assert node.failed, f"{where}: the interpreter's transform did not fail"
+        assert value.detail == node.detail, f"{where}: failed for different reasons"
+        return
+    assert not node.failed, f"{where}: the interpreter's transform failed: {node.detail}"
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         unit = node.unit
         assert unit is not None, f"{where}: the interpreter has no unit here"
-        same(plan, names, unit, value, node, where)
+        output = any(kind.transform is not None for kind in item.types)
+        same(plan, names, unit, value, node, where, extent=not output)
         return
     assert value == node.value, f"{where}: {value!r} against {node.value!r}"
 
@@ -1477,6 +1499,29 @@ AWKWARD["prefixes"] = """
             condition: "startswith(lower(line), 'http/') or endswith(line, '')"
 """
 
+AWKWARD["transform"] = TRANSFORM_SPEC
+AWKWARD["transform framed by length"] = TRANSFORM_SPEC
+
+#: A concat with nothing transforming it: the joined bytes are a record of
+#: their own, citing the hull of the members.
+AWKWARD["concat"] = """
+    name: joined
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - name: parts
+            type: {unit: part}
+            until: "parts.size == 0"
+          - {name: all, concat: parts.data}
+          - {name: tail, type: {bytes: {size: {remaining: true}}}}
+      part:
+        fields:
+          - {name: size, type: {int: {bits: 8}}}
+          - {name: data, type: {bytes: {size: {expr: size}}}}
+"""
+
 AWKWARD_SEEDS: dict[str, bytes] = {
     "bitfields": bytes(range(1, 12)),
     "signed and wide": bytes(range(0x80, 0x90)),
@@ -1494,6 +1539,9 @@ AWKWARD_SEEDS: dict[str, bytes] = {
     "entry granularity": bytes([7, 0xA5, 0x12, 0x34]) + b"tail",
     "guards": bytes([1, 7, 2, 3]),
     "prefixes": b"HTTP/1.1 200 OK\r\nbody",
+    "transform": TRANSFORM_MESSAGES[0],
+    "transform framed by length": TRANSFORM_MESSAGES[1],
+    "concat": bytes([2]) + b"ab" + bytes([1]) + b"c" + bytes([0]) + b"tail",
 }
 
 

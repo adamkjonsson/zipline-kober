@@ -381,8 +381,10 @@ tree says `failed`, with why. A short read inside an output is never
 At field granularity every record read from an output cites the transform's
 source and argument fields, and the source is not written as a record of its
 own: the output speaks for it. A transform that failed names its source's bytes
-`undecodable`, and one marked `emit: none` names them `skipped`. At message
-granularity the message record holds the input as it arrived, so a failed
+`undecodable`, and one marked `emit: none` names them `skipped`. A source that
+is a `concat` is the exception, and names nothing: its bytes are its members',
+which keep their own records, and its range also covers the framing between
+them. At message granularity the message record holds the input as it arrived, so a failed
 transform is not visible in the file there, only in the tree.
 
 A message whose transform failed decoded whole, so the stream goes on after
@@ -391,10 +393,15 @@ protocol's only real check of identity, a tag that verifies, and a failure is
 evidence of neither. A stream in which every message that decoded had a
 transform fail is declined at its end, saying so.
 
-```{note}
-In this development version `kober compile` refuses a spec with a `transform`
-or `concat`; the interpreter decodes it.
-```
+`kober compile` compiles both, and the module writes the same file as the
+interpreter. It decodes a transform's output only when its `type` is a unit,
+by calling that unit's function over the output. Any other `type` is refused
+with a `CompileError`; wrap it in a unit, or decode with the interpreter. A
+generated module binds its transforms when it is imported, from the registry
+`kober.transforms.register` fills, so a program registers a cipher before
+importing the module. A failed transform leaves a
+`kober.runtime.TransformFailed` in its field, saying why in the interpreter's
+words.
 
 #### Transform names
 

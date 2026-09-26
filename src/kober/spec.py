@@ -25,6 +25,10 @@ mutated behind its owner's back.
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
@@ -34,7 +38,7 @@ from kober.errors import SpecError
 from kober.source import SourceMap
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
     from pathlib import Path
 
     from kober.expr import Expr, ExprType
@@ -849,6 +853,22 @@ class Spec:
         object.__setattr__(self, "transforms", MappingProxyType(dict(self.transforms)))
         object.__setattr__(self, "params", tuple(self.params))
 
+    def digest(self) -> str:
+        """Return a digest of what this spec is, for a decode's ``params_digest``.
+
+        Over a canonical form of the model rather than its source, so a spec
+        read from YAML and the same spec built in memory agree, and where it was
+        read from does not count. :func:`kober.runtime.params_digest` combines
+        it with the granularity and the parameters; a generated module embeds
+        it, so both backends write the same digest.
+
+        Returns:
+            The hex SHA-256.
+
+        """
+        text = json.dumps(_canonical(self), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(text.encode()).hexdigest()
+
     # The loader imports this module, so these import it back lazily. Keeping
     # the constructors here is worth that: `Spec.from_file` is the API
     # `DESIGN.md` §6 promises, and a caller should not have to know which
@@ -971,3 +991,36 @@ class Spec:
             known = ", ".join(sorted(self.units)) or "none"
             msg = f"no unit named {name!r}; known units: {known}"
             raise SpecError(msg) from None
+
+
+def _canonical(value: object) -> object:
+    """Return a JSON-able form of a spec model value that two equal values share.
+
+    A dataclass is its type's name and every field that takes part in its
+    equality, which leaves out :attr:`kober.spec.Spec.sources`: where a spec was
+    read from is not what it is. A mapping is its items as pairs, sorted, and
+    not a JSON object, whose keys are always text: a switch's keys may be ``1``
+    or ``"1"``, and those are different cases.
+    """
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            "type": type(value).__name__,
+            "fields": {
+                item.name: _canonical(getattr(value, item.name))
+                for item in dataclasses.fields(value)
+                if item.compare
+            },
+        }
+    if isinstance(value, Enum):
+        return _canonical(value.value)
+    if isinstance(value, Mapping):
+        pairs = [[_canonical(key), _canonical(item)] for key, item in value.items()]
+        return sorted(pairs, key=lambda pair: json.dumps(pair, sort_keys=True))
+    if isinstance(value, (list, tuple)):
+        return [_canonical(item) for item in value]
+    if isinstance(value, bytes):
+        return {"bytes": value.hex()}
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    msg = f"cannot put {type(value).__name__} into a params digest"
+    raise TypeError(msg)

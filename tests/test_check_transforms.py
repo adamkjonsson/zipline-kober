@@ -368,7 +368,25 @@ def test_show_renders_a_transform_and_a_concat(
     assert "not reachable" not in out
 
 
-def test_the_compiler_refuses_a_transform_by_name_until_it_supports_one():
-    """A valid spec it cannot compile yet is a `CompileError`, not a crash."""
-    with pytest.raises(CompileError, match="does not support yet"):
-        render_spec(spec())
+def test_the_compiler_compiles_a_transform_and_a_concat():
+    """Both are compiled: a unit output, a bytes output, and a join."""
+    source = render_spec(
+        spec(
+            textwrap.dedent(CONTENT)
+            + "\n- name: raw\n  transform: {from: body, with: gzip, limit: 9}"
+            + "\n- {name: joined, concat: chunks.data}"
+        )
+    )
+    assert "run_transform(" in source
+    assert "concat(" in source
+
+
+def test_the_compiler_refuses_a_transform_whose_type_is_not_a_unit():
+    """Its output is decoded by calling a unit's function; a scalar has none."""
+    built = spec("""\
+        - name: content
+          transform: {from: body, with: gzip, limit: 64, type: {string: {size: {remaining: true}}}}
+        """)
+    assert errors(built) == [], "the interpreter decodes it: the spec is valid"
+    with pytest.raises(CompileError, match="only as a unit"):
+        render_spec(built)

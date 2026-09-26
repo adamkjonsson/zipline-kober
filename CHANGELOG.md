@@ -24,7 +24,7 @@ minor bump here too.
 
 ### Added
 
-- **Transforms in the spec language, checked but not yet decoded**
+- **Transforms in the spec language, decoded by both backends**
   ([#46](https://github.com/adamkjonsson/zipline-kober/issues/46)). Two field
   types and two top-level keys:
   - `transform: {from, with, limit, args, type, content_type}`: bytes already
@@ -50,7 +50,9 @@ minor bump here too.
   its message whole, marked `Node.failed`. At field granularity an output's
   records cite the transform's source and argument fields, and the source is
   not written as a record of its own; a failed transform names its source
-  `undecodable`, and `emit: none` names it `skipped`. A message whose
+  `undecodable`, and `emit: none` names it `skipped`. A source that is a
+  `concat` names nothing, since its bytes are its members' and they keep
+  their own records. A message whose
   transform failed neither confirms nor declines its stream, and a stream in
   which every message that decoded had one fail is declined saying so.
   `kober run` and `kober try` take `--param NAME=VALUE`, read as the declared
@@ -59,8 +61,17 @@ minor bump here too.
   a cipher, or `br`. `Decoder.params_digest()` is a digest of the spec, the
   granularity and every parameter's value, a secret one included only as
   hashed; a file does not carry it yet
-  ([python-zipline#77](https://github.com/adamkjonsson/python-zipline/issues/77)). In this development version `kober
-  compile` refuses a spec with a transform or concat.
+  ([python-zipline#77](https://github.com/adamkjonsson/python-zipline/issues/77)).
+  **`kober compile` compiles them**, writing the same file as the interpreter
+  block for block. A transform's `type` must be a unit there (`CompileError`
+  otherwise, and the interpreter decodes it). A generated module binds its
+  transforms from `kober.transforms.DEFAULT` when it is imported, so a name
+  nothing binds fails the import with `UnboundTransformError`. For a spec
+  with `params:` its `decode` and `decode_from` take `params=`, as do
+  `run_compiled` and `decode_stream_compiled`. A failed transform leaves a
+  `kober.runtime.TransformFailed` with the interpreter's wording in its field,
+  and the message is still returned. A generated module does not carry the
+  digest yet.
 - **The Python binding for transforms**, `kober.transforms`
   ([#46](https://github.com/adamkjonsson/zipline-kober/issues/46)). A
   `Registry` binds names to callables; `Registry.standard()`, and the default
@@ -91,7 +102,15 @@ minor bump here too.
 - `Node.refused`: whether a unit's own `confirm` or `reject` refused it.
 - `kober.runtime.Held`, a sink that keeps a guarded unit's records until its
   guard has held, and `kober.errors.Refused`, which a generated module raises
-  for that refusal. Both are re-exported from `kober`.
+  for that refusal. Both are re-exported from `kober`. `Held.retract(role)`
+  takes back a transform's source record.
+- For generated modules' transforms, all re-exported from `kober`:
+  `kober.runtime.run_transform`, `take_over`, `concat`, `Output`,
+  `TransformFailed`, `first_failed`, `bind_transforms`, `document_params` and
+  `params_digest`; `kober.transforms.Registry.bind_names`; `Spec.digest()`;
+  and in the plan a backend reads, `kober.ops.TransformPlan`,
+  `ValueType.concat` and `ValueType.transform`, and `Plan.transforms`,
+  `Plan.params` and `Plan.spec_digest`.
 
 ### Changed
 

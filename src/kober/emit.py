@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 from kober.expr import references
 from kober.node import NodeStatus
 from kober.runtime import TEXT_CONTENT_TYPE, normalize_int, prim_int, prim_token
-from kober.spec import Computed, Emit, IntType, Select, Transform
+from kober.spec import Computed, Concat, Emit, IntType, Select, Transform
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -393,10 +393,19 @@ def _transform(
     region: the argument fields keep their own records. With ``emit: none``,
     the source is ``skipped``. Inside another output none of the regions can be
     named, and every record cites the outermost transform's range.
+
+    A ``concat`` source names nothing. It has no bytes of its own, only its
+    members', which keep their records; its hull also covers the framing
+    between them. Its own record is still taken over.
     """
     kind = node.resolved_type
     source = parent.find(kind.source) if isinstance(kind, Transform) else None
-    named = source is not None and source.width > 0 and cite is None
+    named = (
+        source is not None
+        and source.width > 0
+        and cite is None
+        and not isinstance(source.resolved_type, Concat)
+    )
     if granularity is Emit.NONE or node.failed:
         if named and source is not None:
             reason = NodeStatus.SKIPPED if granularity is Emit.NONE else NodeStatus.UNDECODABLE

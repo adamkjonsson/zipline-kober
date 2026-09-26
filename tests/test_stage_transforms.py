@@ -1,24 +1,27 @@
 """What a stage writes for a transform, and what the driver does with one (Stage 5).
 
-Through the interpreter's driver only: the compiler learns transforms in
-Stage 6, and the differential over both drivers follows it there. Every file
-here must be conformant and account for every input byte.
+Every file is written twice, by the interpreter and by a generated module
+(Stage 6), and the two must be the same file. Every file here must be
+conformant and account for every input byte.
 """
 
 from __future__ import annotations
 
 import gzip
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from cipher import seal, xor_open
 from test_stage import datagrams, write_transport
 from zpfcompare import assert_conformant, blocks
 
-from kober import stage
+from kober import stage, transforms
 from kober.cursor import Cursor
 from kober.decoder import Decoder
 from kober.loader import from_yaml
+from kober.pygen import render_spec
 from kober.spec import Emit, Spec
 from kober.transforms import Registry
 
@@ -53,13 +56,45 @@ def message(document: bytes = b"\x05hello", *, corrupt: bool = False) -> bytes:
     return bytes([len(body)]) + bytes(body) + b"\x7e"
 
 
+def compiled(built: Spec, emit: Emit, registry: Registry | None) -> ModuleType:
+    """Import a generated module, binding its transforms in ``registry``.
+
+    A module binds when it is imported, from :data:`kober.transforms.DEFAULT`,
+    so a caller's registry stands in for it while that happens.
+    """
+    module = ModuleType(f"t_{built.name}_{emit.value}_{len(sys.modules)}")
+    sys.modules[module.__name__] = module
+    default = transforms.DEFAULT
+    if registry is not None:
+        transforms.DEFAULT = registry
+    try:
+        exec(render_spec(built, emit=emit), module.__dict__)
+    finally:
+        transforms.DEFAULT = default
+    return module
+
+
 def decode(
-    built: Spec, source: Path, tmp_path: Path, emit: Emit = Emit.FIELD, **kwargs: object
+    built: Spec,
+    source: Path,
+    tmp_path: Path,
+    emit: Emit = Emit.FIELD,
+    *,
+    params: dict[str, object] | None = None,
+    transforms: Registry | None = None,
 ) -> list[tuple[object, ...]]:
+    """Decode with both drivers, require the same file, and return what it says."""
     sink = tmp_path / f"out.{emit.value}.zpf"
-    Decoder(built, emit=emit, **kwargs).run(source, sink, produced_by="t", produced_at=1)
+    Decoder(built, emit=emit, params=params, transforms=transforms).run(
+        source, sink, produced_by="t", produced_at=1
+    )
     assert_conformant(sink, source)
-    return [block for block in blocks(sink) if block[0] != "participant"]
+    other = tmp_path / f"compiled.{emit.value}.zpf"
+    module = compiled(built, emit, transforms)
+    stage.run_compiled(module, source, other, produced_by="t", produced_at=1, params=params)
+    written = blocks(sink)
+    assert blocks(other) == written
+    return [block for block in written if block[0] != "participant"]
 
 
 def records(written: list[tuple[object, ...]]) -> list[tuple[object, object]]:

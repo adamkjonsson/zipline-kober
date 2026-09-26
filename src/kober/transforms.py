@@ -57,7 +57,7 @@ except ImportError:
     _zstd_module = None
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
 
     from kober.expr import ExprValue
     from kober.spec import FieldType, Spec
@@ -317,7 +317,7 @@ class Registry:
                 every one and saying which kind of missing it is.
 
         """
-        used = sorted(
+        return self.bind_names(
             {
                 kind.name
                 for unit in spec.units.values()
@@ -326,6 +326,24 @@ class Registry:
                 if isinstance(kind, Transform)
             }
         )
+
+    def bind_names(self, names: Iterable[str]) -> Mapping[str, Transformer]:
+        """Return what each name is bound to, or refuse: :meth:`bind` by name.
+
+        What a generated module calls when it is imported, since it has the
+        names its spec uses and not the spec.
+
+        Args:
+            names: The transform names.
+
+        Returns:
+            Each name, and what it is bound to.
+
+        Raises:
+            UnboundTransformError: If any is bound to nothing, naming every one.
+
+        """
+        used = sorted(set(names))
         missing = [name for name in used if name not in self._bound]
         if missing:
             msg = "; ".join(_why_unbound(name) for name in missing)

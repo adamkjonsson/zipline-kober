@@ -1321,6 +1321,74 @@ must word a transform failure identically, and Q4's rule makes that wording
 kober's. `tests/compiled_dns.py` is regenerated and must diff empty: a spec
 with no transform compiles to the same source as before.
 
+**Done except the compiled digest, 2026-09-26.**
+
+- **The shared code is in `kober.runtime`, not `ops.py`**: `ops.py` describes a
+  spec to a backend and runs nothing. `run_transform` runs a transform,
+  decodes its output and contains every failure in the interpreter's words;
+  `take_over` writes what the outcome says about the source; `concat` joins
+  and cites. Each transform is one call and adds **no branch** to the
+  generated function. That is not cosmetic: generated modules are linted with
+  the project's own configuration, and the first version put a test spec's
+  read function at 44 branches against a limit of 20. `http.yaml` meets the
+  same limit in Stage 8.
+- **The plan layer** gains `TransformPlan`, stamped on the output's
+  `ValueType` (`ValueType.transform`), and `ValueType.concat`. `Plan` gains the
+  names to bind, the document parameters and the spec's digest.
+- **A transform's `type` must be a unit in the compiler.** The output is
+  decoded by calling the unit's function over it, through an `Output` sink
+  that cites the input and is released only when the whole output decoded. A
+  scalar `type` has no function, so it is a `CompileError`, and the
+  interpreter decodes it. Wrapping it in a unit is the workaround, and no
+  example needs more.
+- **Take-over in the compiled module** is `Held.retract(role)`: a transform
+  unit is held like a guarded one, and its source's record is taken back
+  when the transform runs, which keeps record order the interpreter's.
+- **A failed transform is a value**: the field holds
+  `TransformFailed(detail)`, the message is returned, and the compiled step
+  reads it back (`first_failed`) as the `TRANSFORM_FAILED` verdict.
+- **Parameters**: a module whose spec has `params:` carries `PARAMS`, and its
+  `decode` and `decode_from` take `params=`, checked by the same
+  `document_params` as the interpreter's, so both refuse in the same words.
+  `run_compiled` and `decode_stream_compiled` take `params=`.
+- **Binding at import**: `TRANSFORMS = bind_transforms((…))` from
+  `kober.transforms.DEFAULT`, so an unbound name fails the import once.
+- **The compiled digest is deferred** with the interpreter's, until
+  python-zipline#77. `Spec.digest()` and `runtime.params_digest` exist for it.
+
+**Two bugs, both shared by the interpreter, found by the differential.**
+
+1. **A failed transform over a `concat` named cited bytes `undecodable`.**
+   Take-over names the source's range; a concat's range is its members' hull,
+   which at field granularity is cited by every member's own record and by
+   the size lines between them. It broke the promise that no byte is both
+   cited and undecoded. Nothing had exercised it, because no example has a
+   transform and the take-over measurement used a length-framed body. **Rule:
+   a concat source names nothing**; its own record is still taken back, and
+   its members keep theirs. Where a switch may or may not have joined, the
+   compiled module decides at run time. This amends Stage 7's invariant 4.
+2. **The two drivers wrote a message's blocks in different orders.** The
+   interpreter's step writes all of a message's records and then its regions,
+   because `plan` returns them apart; a generated module writes in decode
+   order. Nothing tested it until a region could fall in the middle of a
+   message. The compiled step now passes regions on after the records,
+   through `_RegionsLast`, and the files are identical.
+
+The inner short read's wording was also aligned: `<name> output does not
+decode: it ends before its type does`, in both backends.
+
+**Tests.** `tests/fuzzing.py` gains `TRANSFORM_SPEC`, a chunked or
+length-framed deflate body decoded as a unit, and a raw-deflate field kept as
+bytes, which is the first transform the interpreter's fuzz suite reaches. It
+joins the adversarial corpus of `test_compiled.py` in both framings.
+`test_stage_transforms.py` now writes every file with both drivers and
+requires them identical, the tunnel cipher with its key included.
+`test_compiled_transforms.py` covers the typed value, parameters and binding.
+The fixes for bug 1 were each watched failing (the emitter under
+`test_fuzz.py`, the generator under `test_compiled.py`), and bug 2 under
+`test_stage_transforms.py`. The pipeline is unchanged against the Stage 5
+baseline (`../kober-baselines/0.5.0-stage6`).
+
 ### Stage 7 — fuzz, and the new invariants
 
 Four invariants, each verified against a deliberately broken implementation
@@ -1336,7 +1404,9 @@ before it is trusted:
    the corpus.
 4. A transform's source is spoken for exactly once: on success it is cited by
    the output's records and by no record of its own, on failure it is one
-   `undecodable` region and cited by nothing. Checked against a version that
+   `undecodable` region and cited by nothing — except a `concat` source,
+   which on failure names nothing and stays cited by its members' records
+   (Stage 6). Checked against a version that
    also writes the source's own record, and one that drops the region.
 
 Plus the existing set over the input space, unchanged, which is itself a

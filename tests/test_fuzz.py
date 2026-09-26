@@ -31,6 +31,8 @@ from fuzzing import (
     SEEDS,
     SELECT_SPEC,
     STARVED_SPECS,
+    TRANSFORM_MESSAGES,
+    TRANSFORM_SPEC,
     cases,
     const_cases,
     fill_cases,
@@ -39,6 +41,7 @@ from fuzzing import (
     pointer_cases,
     select_cases,
     starved_cases,
+    transform_cases,
     variants,
 )
 from zpf.reassembly import Gap
@@ -431,6 +434,65 @@ def test_a_select_uses_the_documented_vocabulary(seed: int):
         _, unclaimed = plan(spec, tree, data, emit=Emit.FIELD)
         for region in unclaimed:
             assert region.reason in allowed, f"{region.reason!r} on {data!r}"
+
+
+# --- transform ---------------------------------------------------------------
+#
+# A transform reads bytes that are already cited, and a failed one names them
+# instead of citing them, which is two ways a byte could end up both. A
+# concat's source spans its members and the framing between them, which made
+# a third, and it was the one that happened.
+
+
+def transform_spec() -> Spec:
+    return Spec.from_yaml(TRANSFORM_SPEC)
+
+
+def test_the_transform_seeds_decode_whole():
+    """The fuzz starts from a success, or it only ever reaches the failure path."""
+    decoder = Decoder(transform_spec())
+    for data in TRANSFORM_MESSAGES:
+        tree = decoder.decode_bytes(data)
+        assert tree.status is NodeStatus.OK, tree.render()
+        assert not any(node.failed for node in tree.walk()), tree.render()
+        assert tree.off_end == len(data)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_transforming_never_raises(seed: int):
+    decoder = Decoder(transform_spec())
+    for data in transform_cases(seed):
+        try:
+            tree = decoder.decode_bytes(data)
+        except Exception as exc:
+            exc.add_note(f"escaped a decode: transform seed={seed} on {data!r}")
+            raise
+        check_tree(tree, data)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+@pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD])
+def test_a_transform_never_makes_a_byte_both_cited_and_undecoded(seed: int, emit: Emit):
+    spec = transform_spec()
+    decoder = Decoder(spec)
+    allowed = {member.value for member in NodeStatus if member is not NodeStatus.OK}
+    for data in transform_cases(seed):
+        tree = decoder.decode_bytes(data)
+        emissions, unclaimed = plan(spec, tree, data, emit=emit)
+        cited: set[int] = set()
+        for record in emissions:
+            assert record.off_end <= len(data), f"a record past the input on {data!r}"
+            cited.update(range(record.off_start, record.off_end))
+        named: set[int] = set()
+        for region in unclaimed:
+            assert region.off_end <= len(data), f"a region past the input on {data!r}"
+            assert region.reason in allowed, f"{region.reason!r} on {data!r}"
+            named.update(range(region.off_start, region.off_end))
+        overlap = cited & named
+        assert not overlap, (
+            f"transform {emit.value}: {len(overlap)} byte(s) both cited and "
+            f"undecoded on {data!r}"
+        )
 
 
 # --- fill --------------------------------------------------------------------

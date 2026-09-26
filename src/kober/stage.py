@@ -67,12 +67,12 @@ from kober.cursor import Cursor
 from kober.emit import plan, root_emit
 from kober.errors import EvalError, SpecError, TruncatedRead, Undecodable
 from kober.node import NodeStatus
-from kober.runtime import Held
+from kober.runtime import Held, document_params, first_failed
 from kober.spec import Emit, InputShape
 
 if TYPE_CHECKING:
     import os
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from datetime import datetime
 
     from kober.decoder import Decoder
@@ -209,7 +209,13 @@ def decode_stream(decoder: Decoder, stage: zpf.DecodeStage, stream: object) -> N
     _drive(_interpreted(decoder), _Writer(stage, stream, decoder.spec.name), stream)
 
 
-def decode_stream_compiled(module: object, stage: zpf.DecodeStage, stream: object) -> None:
+def decode_stream_compiled(
+    module: object,
+    stage: zpf.DecodeStage,
+    stream: object,
+    *,
+    params: Mapping[str, object] | None = None,
+) -> None:
     """Decode one input stream into ``stage`` with a generated module.
 
     The same driver as :func:`decode_stream`, because everything it does —
@@ -221,9 +227,14 @@ def decode_stream_compiled(module: object, stage: zpf.DecodeStage, stream: objec
         module: A module produced by :func:`kober.pygen.render`.
         stage: The open decode stage to write into.
         stream: One of ``stage.streams()``.
+        params: The document's parameters, for a module whose spec declares
+            ``params:`` — every one in its ``PARAMS``.
+
+    Raises:
+        ParameterError: If ``params`` does not match what the module declares.
 
     """
-    _drive(_compiled(module), _Writer(stage, stream, module.NAME), stream)
+    _drive(_compiled(module, params), _Writer(stage, stream, module.NAME), stream)
 
 
 def _check_shape(shape: InputShape, name: str, stream: object) -> None:
@@ -519,25 +530,78 @@ def _interpreted(decoder: Decoder) -> _Step:
     return step
 
 
-def _compiled(module: object) -> _Step:
+def _compiled(module: object, params: Mapping[str, object] | None = None) -> _Step:
     """Return the step that decodes one message with a generated module.
 
     The module writes its own records as it reads them, so there is nothing to
-    hand on here — only the failure to name, which it reports by raising.
+    hand on here — only the failure to name, which it reports by raising, and a
+    transform that failed, which it reports as a
+    :class:`~kober.runtime.TransformFailed` in the message it returns.
     """
+    # Checked once, here, rather than at the first message; a module whose spec
+    # declares none has no PARAMS, and refuses any in the interpreter's words.
+    document_params(module.NAME, getattr(module, "PARAMS", {}), params or {})
+    keywords: dict[str, object] = {}
+    if hasattr(module, "PARAMS"):
+        keywords["params"] = params or {}
 
     def step(cursor: Cursor, sink: Sink, data: bytes, base: int) -> _Verdict | None:
+        ordered = _RegionsLast(sink)
         try:
-            module.decode_from(cursor, sink)
+            return _verdict(module.decode_from(cursor, ordered, **keywords))
         except TruncatedRead as exc:
             return _Verdict(NodeStatus.TRUNCATED.value, str(exc), exc.reach)
         except Undecodable as exc:
             return _Verdict(NodeStatus.UNDECODABLE.value, str(exc), refused=exc.refused)
         except (EvalError, ZeroDivisionError) as exc:
             return _Verdict(NodeStatus.UNDECODABLE.value, str(exc))
-        return None
+        finally:
+            ordered.release()
 
     return step
+
+
+def _verdict(message: object) -> _Verdict | None:
+    """Return what a message a generated module returned says about the stream."""
+    failed = first_failed(message)
+    if failed is not None:
+        return _Verdict(TRANSFORM_FAILED, failed)
+    return None
+
+
+class _RegionsLast:
+    """Pass a message's records on as they come, and its regions after them.
+
+    The order the interpreter's step writes in, since ``plan`` returns the two
+    apart. A generated module writes in decode order instead, and the two
+    files must be the same block for block: a failed transform's source,
+    named in the middle of its message, is where they first differed.
+    """
+
+    def __init__(self, sink: Sink) -> None:
+        self._sink = sink
+        self._regions: list[tuple[int, int, str]] = []
+
+    def record(
+        self,
+        payload: bytes,
+        content_type: str,
+        off_start: int,
+        off_end: int,
+        role: str | None,
+    ) -> None:
+        """Write a record now."""
+        self._sink.record(payload, content_type, off_start, off_end, role)
+
+    def undecoded(self, off_start: int, off_end: int, reason: str) -> None:
+        """Keep a region until the message ends."""
+        self._regions.append((off_start, off_end, reason))
+
+    def release(self) -> None:
+        """Write the regions kept. Call once, when the message ends."""
+        for region in self._regions:
+            self._sink.undecoded(*region)
+        self._regions.clear()
 
 
 def _drive(step: _Step, writer: _Writer, stream: object) -> None:
@@ -734,6 +798,7 @@ def run_compiled(
     produced_by: str,
     produced_at: int | datetime,
     comment: str | None = None,
+    params: Mapping[str, object] | None = None,
 ) -> None:
     """Decode one file into another with a generated module.
 
@@ -756,8 +821,11 @@ def run_compiled(
         produced_by: What to record as the producer.
         produced_at: When, as ticks or a datetime.
         comment: Free-text note for the output's File Header.
+        params: The document's parameters, for a module whose spec declares
+            ``params:`` — every one in its ``PARAMS``.
 
     Raises:
+        ParameterError: If ``params`` does not match what the module declares.
         TypeError: If the module has no ``EMIT`` — it was generated by a kober
             before 0.3.0 and must be compiled again.
 
@@ -785,7 +853,7 @@ def run_compiled(
         adjacency=_adjacency(Emit(emit)),
     ) as stage:
         for stream in stage.streams():
-            decode_stream_compiled(module, stage, stream)
+            decode_stream_compiled(module, stage, stream, params=params)
 
 
 def content_registry(decoder: Decoder) -> zpf.ContentRegistry:

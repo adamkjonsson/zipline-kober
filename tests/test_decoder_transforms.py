@@ -169,7 +169,11 @@ def test_a_pointer_in_an_output_is_measured_from_the_outputs_first_byte():
     [
         (b"not gzip at all", 4096, "gzip: not valid compressed data"),
         (gzip.compress(b"x" * 200, mtime=0), 100, "gzip: output passes its limit of 100 bytes"),
-        (gzip.compress(b"\x09hi", mtime=0), 4096, "gzip output does not decode"),
+        (
+            gzip.compress(b"\x09hi", mtime=0),
+            4096,
+            "gzip output does not decode: it ends before its type does",
+        ),
         (
             gzip.compress(DOCUMENT + b"??", mtime=0),
             4096,
@@ -195,6 +199,25 @@ def test_a_short_read_inside_the_output_is_never_truncated():
     """`truncated` would claim the input was cut short, and it arrived whole (§11.5)."""
     tree = Decoder(spec()).decode_bytes(framed(gzip.compress(b"\x09hi", mtime=0)))
     assert all(node.status is not NodeStatus.TRUNCATED for node in tree.walk()), tree.render()
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_a_failed_transform_over_joined_chunks_names_no_byte_a_record_cites(emit: Emit):
+    """A concat's bytes are its members', and the members keep their records.
+
+    Take-over names a failed transform's source ``undecodable``; over a concat
+    that was the hull, which covers the chunk data and the size lines between
+    them, every byte of it cited by a record of its own at field granularity.
+    Found by the compiler's adversarial corpus, in both backends at once.
+    """
+    data = chunked(b"not deflate data", [3, 13])
+    built = spec(codec="deflate")
+    tree = Decoder(built).decode_bytes(data)
+    assert content(tree).failed
+    records, regions = plan(built, tree, data, emit=emit)
+    cited = {at for record in records for at in range(record.off_start, record.off_end)}
+    named = {at for region in regions for at in range(region.off_start, region.off_end)}
+    assert not cited & named, (records, regions)
 
 
 # --- arguments, parameters and a caller's cipher --------------------------------------------------

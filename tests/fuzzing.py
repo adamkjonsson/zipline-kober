@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import random
 import struct
+import zlib
 
 #: How many mutations per seed case. Small enough to keep the suite fast, large
 #: enough that each run covers every mutation kind several times.
@@ -435,3 +436,79 @@ def starved_cases(seed: int) -> list[bytes]:
 
     """
     return variants(STARVED_MESSAGE, seed)
+
+
+#: A body framed by its length or in chunks, joined, inflated, and decoded as a
+#: unit in its own offset space; and a second kept as bytes, in a unit of its
+#: own so neither function passes ruff's branch limit. A mutation of the
+#: compressed bytes is almost always a failed transform, so this reaches the
+#: take-over — the source named ``undecodable`` in place of its record — far
+#: more often than a success. No example spec has a transform yet, and a
+#: concat's hull overlapping its members' records on failure went unseen
+#: until this did.
+TRANSFORM_SPEC = """
+name: xform
+version: "1"
+entry: m
+units:
+  m:
+    fields:
+      - {name: chunked, type: {int: {bits: 8}}}
+      - {name: n, type: {int: {bits: 8}}}
+      - name: chunks
+        type: {unit: chunk}
+        until: "chunks.size == 0"
+        condition: "chunked == 1"
+      - name: body
+        switch:
+          dispatch: chunked
+          cases:
+            1: {concat: chunks.data}
+          default: {bytes: {size: {expr: n}}}
+      - name: content
+        transform: {from: body, with: deflate, limit: 64, type: {unit: doc}}
+      - {name: rest, type: {unit: tail}}
+  tail:
+    fields:
+      - {name: m2, type: {int: {bits: 8}}}
+      - {name: raw, type: {bytes: {size: {expr: m2}}}}
+      - name: plain
+        transform: {from: raw, with: deflate-raw, limit: 16, content_type: "prim:bytes"}
+      - {name: after, type: {int: {bits: 8}}}
+  chunk:
+    fields:
+      - {name: size, type: {int: {bits: 8}}}
+      - {name: data, type: {bytes: {size: {expr: size}}}}
+  doc:
+    fields:
+      - {name: length, type: {int: {bits: 8}}}
+      - {name: text, type: {string: {size: {expr: length}}}}
+"""
+
+_DOCUMENT = zlib.compress(b"\x05hello")
+_RAW = zlib.compress(b"abc")[2:-4]
+_TAIL = bytes([len(_RAW)]) + _RAW + bytes([0x7E])
+
+#: Well-formed messages for :data:`TRANSFORM_SPEC`: chunked, then by length.
+TRANSFORM_MESSAGES = (
+    bytes([1, 0, 4])
+    + _DOCUMENT[:4]
+    + bytes([len(_DOCUMENT) - 4])
+    + _DOCUMENT[4:]
+    + bytes([0])
+    + _TAIL,
+    bytes([0, len(_DOCUMENT)]) + _DOCUMENT + _TAIL,
+)
+
+
+def transform_cases(seed: int) -> list[bytes]:
+    """Build one batch of variants of both transform messages.
+
+    Args:
+        seed: Which batch.
+
+    Returns:
+        The batch.
+
+    """
+    return [data for message in TRANSFORM_MESSAGES for data in variants(message, seed)]
