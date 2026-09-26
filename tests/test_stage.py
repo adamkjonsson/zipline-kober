@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import struct
 import sys
 from pathlib import Path
@@ -840,15 +841,54 @@ def test_a_run_whose_start_is_unknown_keeps_no_failed_attempt(tmp_path: Path):
     assert starts(written) == [0, len(first) + len(second)]
 
 
-def test_an_attempt_after_a_gap_that_decodes_whole_is_believed(tmp_path: Path):
-    """The limit #49 leaves to #50, asserted so that changing it is a decision.
+def test_an_http_attempt_after_a_gap_that_decodes_whole_is_refused(tmp_path: Path):
+    """#50: the HTTP spec says what a start line looks like, so a phantom is refused.
+
+    The run after the gap starts inside a body with no line ending, so its first
+    message reads the body's bytes and the next status line as one start line,
+    and that response's empty head as its own: it decodes whole. Before #50 it
+    was believed. The spec's `confirm` refuses it and the attempt writes
+    nothing. Since it was refused, where it stopped is known, and the driver
+    tries again there: the response after it decodes.
+
+    The response the phantom ran into is lost, and this asserts that too. It is
+    the trade-off of retrying where a refusal stopped rather than scanning byte
+    by byte (`DESIGN.md` §3.1, *After a gap*). A whole response opens the
+    stream, so it is confirmed and the lost region keeps its own comment.
+    """
+    first = response(b"\x01" * 40)
+    second = response(b"\x02" * 40)
+    head = len(first) - 40
+    stream = NO_CONTENT + first + second + NO_CONTENT + NO_CONTENT
+    cut = len(NO_CONTENT) + head + 10
+    inside = len(NO_CONTENT) + len(first) + head + 10
+    last = len(stream) - len(NO_CONTENT)
+    source = tmp_path / "in.zpf"
+    runs(source, stream, [(0, cut), (inside, len(stream))])
+    for emit in (Emit.FIELD, Emit.MESSAGE):
+        written = both(HTTP, source, tmp_path, emit)
+        assert (inside, last, "undecodable", LOST) in regions(written), emit
+        if emit is Emit.FIELD:
+            assert starts(written) == [0, len(NO_CONTENT), last]
+
+
+def test_an_attempt_after_a_gap_that_decodes_whole_is_believed_without_a_guard(
+    tmp_path: Path,
+):
+    """The limit #49 leaves to the spec, asserted so that changing it is a decision.
 
     When nothing says where the gap left off and the first attempt happens to
-    decode whole, it is released: here the body's bytes and the next status
-    line read as one start line, and the real response's head and empty body
-    as that message's. Only a spec able to say what a start line looks like can
-    refuse it, which needs `startswith` (#50).
+    decode whole, it is released. Only a spec able to say what the start of its
+    message looks like can refuse it; the HTTP spec can since #50, so this uses
+    it with its `confirm` taken away.
     """
+    unguarded = dataclasses.replace(
+        HTTP,
+        units={
+            **HTTP.units,
+            "message": dataclasses.replace(HTTP.units["message"], confirm=None),
+        },
+    )
     first = response(b"\x01" * 40)
     second = response(b"\x02" * 40)
     head = len(first) - 40
@@ -856,7 +896,7 @@ def test_an_attempt_after_a_gap_that_decodes_whole_is_believed(tmp_path: Path):
     inside = len(first) + head + 10
     source = tmp_path / "in.zpf"
     runs(source, stream, [(0, head + 10), (inside, len(stream))])
-    written = both(HTTP, source, tmp_path, Emit.FIELD)
+    written = both(unguarded, source, tmp_path, Emit.FIELD)
     assert inside in starts(written)
 
 

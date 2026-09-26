@@ -24,6 +24,13 @@ minor bump here too.
 
 ### Added
 
+- **`startswith(s, prefix)` and `endswith(s, suffix)`** in the expression
+  language ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50)),
+  typed `(str, str) -> bool`, exact as to case, in both backends. They are what
+  a spec needs to say what the start of its message looks like, and that a
+  value's last list item is something.
+- `kober.errors.Undecodable.refused`: whether a unit's own `confirm` or
+  `reject` is what failed, which the stage driver reads after a gap.
 - `kober.check.message_tail_fields()`: the fields after which nothing in the
   message reads a byte, keyed `(unit, field index)`
   ([#49](https://github.com/adamkjonsson/zipline-kober/issues/49)).
@@ -47,24 +54,43 @@ minor bump here too.
     after it reading a byte), the run resumes there. The bytes before it are
     `skipped`, commented `rest of a message cut by a gap`;
   - **when nothing said**, the run's first message is written only if it
-    decodes whole. If it does not, nothing it read is written, and the rest of
-    the run is `undecodable`, commented `no message boundary found after a
-    gap`. Such a failure never declines the stream. A stream that ends
-    unconfirmed is still declined, and its comment says `every attempt ran
-    out of input or found no message boundary after a gap` when one of those
-    attempts failed some other way.
+    decodes whole. If it does not, nothing it read is written, and its bytes
+    are `undecodable`, commented `no message boundary found after a gap`. If
+    the spec's `confirm` or `reject` refused it, the next attempt starts where
+    it stopped; any other failure loses the rest of the run. None of this
+    declines the stream. A stream that ends unconfirmed is still declined, and
+    its comment says `every attempt ran out of input or found no message
+    boundary after a gap` when one of those attempts failed some other way.
 
   On a lossy HTTP capture with large bodies, all 30 responses are now decoded
-  at their real offsets, where 4 were swallowed before, and 2 of 8 phantom
-  messages remain. Those two decode whole after a gap into a chunked body,
-  which only a spec able to recognise its own start line can refuse
-  ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50)). A consumer
-  that read the records after a gap should expect `skipped` and `undecodable`
-  regions there instead. Datagram input is unchanged. In the deeper pipeline
-  one output's decline comment changed and nothing else moved.
+  at their real offsets, where 4 were swallowed and 8 phantom messages were
+  written before, and none is written now: `examples/http.yaml` refuses them
+  (below). A consumer that read the records after a gap should expect
+  `skipped` and `undecodable` regions there instead. Datagram input is
+  unchanged. In the deeper pipeline one output's decline comment changed, and
+  the generated HTTP stream's two phantom messages became one `undecodable`
+  region; nothing else moved.
+- **`examples/http.yaml` says what a start line looks like, and reads
+  `gzip, chunked`** ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50)).
+  The `message` unit has a `confirm`: a status line starts with `HTTP/`, a
+  request line ends with ` HTTP/1.1` or ` HTTP/1.0`. After a gap that is what
+  refuses a chunk-size line or a body's tail read as a start line, which used
+  to decode as a message with no headers. A message whose start line is
+  neither (HTTP/2's `PRI * HTTP/2.0`, or any foreign text ending in a line
+  break) is now refused as well, and a stream that begins with one is
+  declined. `chunked` is recognised as the last item of `Transfer-Encoding`
+  (`gzip, chunked`) and not only as the whole of it; such a message used to
+  read as unframed.
 
 ### Fixed
 
+- **A generated module no longer writes a line longer than the project's
+  limit for a long expression.** The compiler put every expression on one
+  line, and a condition, `computed`, `select` value or guard long enough failed
+  the `ruff` check generated modules are held to. One is now bound to a local
+  and split at its top-level `or` or `and`, and a long citation list is written
+  one range per line. `http.yaml`'s test for `chunked` as the last coding was
+  the first expression long enough.
 - **A unit its guard refuses is no longer written field by field.**
   `DESIGN.md` §3.1 promised that a `confirm` or `reject` that does not hold
   makes the unit an honest `undecodable` region instead of a fabricated field
@@ -80,7 +106,13 @@ minor bump here too.
 ### Documentation
 
 - `docs/format/concepts.md` gains *What a spec meets after a gap*;
-  `DESIGN.md` §3.1 gains *After a gap* and is revision 12.
+  `DESIGN.md` §3.1 gains *After a gap* and is revision 12. It records why a
+  refused attempt is retried where it stopped rather than scanned for byte by
+  byte, with the measurement.
+- `tools/pipeline.py` checks that every HTTP start line looks like one, not
+  only how many there are. A count had hidden two phantom start lines in the
+  generated HTTP stream since 0.4.0, because the same gaps also took two real
+  ones.
 
 ## [0.4.0] - 2026-09-23
 

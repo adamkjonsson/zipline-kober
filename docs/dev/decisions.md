@@ -166,7 +166,7 @@ decision down before it is one is how a document starts lying:
 
 ## What is owed, and is not a question
 
-Two things are decided in outline and simply not built, which is a different
+One thing is decided in outline and simply not built, which is a different
 state from either of the above and worth not confusing with them:
 
 - **Byte transforms** — decompression and decryption. The shape is settled in
@@ -174,8 +174,7 @@ state from either of the above and worth not confusing with them:
   file stays data and `check` stays static. `examples/http.yaml` has a
   `Content-Encoding: gzip` body it deliberately leaves opaque, and
   `http_gzip.pcap` is the fixture kept for it.
-- **`Transfer-Encoding: gzip, chunked`**, which is legal HTTP and which
-  `examples/http.yaml` does not recognise, because saying "ends with chunked"
-  needs a function the language does not have. It reads as *unframed* rather
-  than mis-framed, which is the safe direction, and the spec says so where a
-  reader meets it.
+
+`Transfer-Encoding: gzip, chunked` was the second, until `startswith` and
+`endswith` joined the expression language (#50); `examples/http.yaml` now
+recognises `chunked` as the last coding.

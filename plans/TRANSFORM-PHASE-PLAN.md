@@ -7,7 +7,8 @@ leaning is rewritten and says so. Where it turned a leaning into a choice
 between two defensible designs, the choice is listed under *Decisions the
 spike leaves open*, and *Decided, 2026-09-26* records the answers.
 *Stage 1b* ([#49](https://github.com/adamkjonsson/zipline-kober/issues/49))
-is done, and its results are recorded there. Next is Stage 2.
+and *Stage 1c* ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50))
+are done, and their results are recorded there. Next is Stage 2.
 
 > **Written 2026-09-19** against `0.3.0`, `DESIGN.md` revision 9, `zpf` 0.5.0
 > (spec 0.21), packeteer 0.16.0. The prompt was a question — *zipline is ready
@@ -998,6 +999,58 @@ disabled. What it found:
 
 The new baseline is `../kober-baselines/0.5.0-stage1b`.
 
+### Stage 1c — `startswith` and `endswith` ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50))
+
+Added 2026-09-26, at Adam's request, before Stage 2, since Stage 1b left two
+phantoms only a spec able to recognise its start line can refuse.
+
+**Done, 2026-09-26.** Two functions in the expression language, typed
+`(str, str) -> bool`, in both backends. `examples/http.yaml` uses them twice:
+a `confirm` on `message` (a status line starts with `HTTP/`, a request line
+ends with the version), and `chunked` recognised as the *last* transfer
+coding, so `gzip, chunked` is no longer read as unframed. Tests were watched
+failing against the old spec, including one that pins down the wrong fix (a
+bare *ends with `chunked`* would accept `xchunked`).
+
+**It exposed a cascade, and #49's second rule was amended for it.** With the
+`confirm`, the first attempt after a gap into a chunked body is correctly
+refused. Under Stage 1b's rule that lost the rest of the run, so the next run
+had no known end either, its attempt was refused too, and so on: the lossy
+gzip capture recovered **6 of 30** responses, where it had recovered 30 by luck
+without the `confirm`. Two fixes were prototyped and measured:
+
+| after a failed first attempt | gzip: real / 30 | phantoms | `http_gen` (58 real) | time |
+| --- | --- | --- | --- | --- |
+| lose the rest of the run (1b) | 6 | 0 | 51 | 0.01 s |
+| **retry where a refusal stopped** | **30** | **0** | **58** | 0.02 s |
+| scan byte by byte | 30 | 0 | 58 | 1.30 s |
+
+Adam chose the retry: an attempt a guard refused was read far enough for the
+guard to run, so where it stopped is known. It is linear; the scan is
+quadratic in the distance to the next real message. `DESIGN.md` §3.1 records
+the scan as the fallback, and the one case it would win. Both backends report
+a refusal to the driver: the interpreter from `Node.refused`, a generated
+module from `Undecodable.refused`, which a guard's `Refused` sets and the
+wrapper keeps. A fuzz over a guarded framed spec checks the retry happens,
+lands on real messages, and never cites a start inside one, and was watched
+failing without it. The comment recording it is on #49.
+
+Found on the way and fixed: **the compiler wrote a long expression on one
+line**, and generated modules are held to `ruff`. `http.yaml`'s test for
+`chunked` as the last coding was the first expression long enough. Long
+expressions are now bound to a local, split at their top-level `or` or `and`,
+and a long citation list is written one range per line.
+
+**`tools/pipeline.py` now checks that every HTTP start line looks like one**,
+by its own pattern rather than the spec's `confirm`. It fails on the Stage 1b
+baseline's two phantoms and passes now.
+
+Against the Stage 1b baseline, **4 of 64 outputs moved, all `http_gen`
+under the HTTP spec**: its two phantoms became one `undecodable` region, and
+all 58 real start lines stayed. `http_stream_1`'s 2000 real messages did not
+move. The lossy gzip capture decodes all 30 responses at their real offsets
+with no phantom, and so now meets the lossy bound Stage 5 needs.
+
 ### Stage 2 — the constructs in the model, loader, and checker
 
 - `Transform` and `Concat` field types in [`spec.py`](../src/kober/spec.py);
@@ -1084,9 +1137,9 @@ here and the result recorded.
   holds everything before confirmation, and an inner record is held and
   released like any other.
 - `tools/pipeline.py` gains the Q9 inputs, with an exact shape count on the
-  lossless gzip stream and the lossy bound on the other, which holds only
-  once #50 has landed as well (Stage 1b left two phantoms that only the spec
-  can refuse). Its diff against the Stage 1b baseline stays empty
+  lossless gzip stream and the lossy bound on the other, which holds since
+  Stage 1c (30 responses, all at their real offsets, no phantom), and the
+  start-line check Stage 1c added. Its diff against the Stage 1b baseline stays empty
   for every transform-free output.
 
 ### Stage 6 — the compiler

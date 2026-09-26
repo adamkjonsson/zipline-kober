@@ -50,10 +50,11 @@ from zpfcompare import assert_conformant, blocks
 from kober.cli import main
 from kober.decoder import Decoder
 from kober.emit import Emission, Unclaimed, plan, root_emit
-from kober.errors import CompileError, EvalError, TruncatedRead, Undecodable
+from kober.errors import CompileError, EvalError, Refused, TruncatedRead, Undecodable
+from kober.loader import from_dict
 from kober.node import Node, NodeStatus
 from kober.ops import Plan
-from kober.pygen import Names, render
+from kober.pygen import Names, render, render_spec
 from kober.runtime import Cursor, span
 from kober.spec import Emit, Spec
 from kober.stage import run_compiled
@@ -70,6 +71,7 @@ EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 REASONS = {
     TruncatedRead: NodeStatus.TRUNCATED.value,
     Undecodable: NodeStatus.UNDECODABLE.value,
+    Refused: NodeStatus.UNDECODABLE.value,
     EvalError: NodeStatus.UNDECODABLE.value,
     ZeroDivisionError: NodeStatus.UNDECODABLE.value,
 }
@@ -1460,6 +1462,21 @@ AWKWARD["guards"] = """
           - {name: w, type: {int: {bits: 8}}}
 """
 
+AWKWARD["prefixes"] = """
+    name: prefixes
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - {name: line, type: {string: {delimiter: "\\r\\n"}}}
+          - {name: is_status, type: {computed: "startswith(line, 'HTTP/')"}}
+          - {name: is_request, type: {computed: "endswith(trim(line), 'HTTP/1.1')"}}
+          - name: rest
+            type: {bytes: {size: {remaining: true}}}
+            condition: "startswith(lower(line), 'http/') or endswith(line, '')"
+"""
+
 AWKWARD_SEEDS: dict[str, bytes] = {
     "bitfields": bytes(range(1, 12)),
     "signed and wide": bytes(range(0x80, 0x90)),
@@ -1476,6 +1493,7 @@ AWKWARD_SEEDS: dict[str, bytes] = {
     "text arithmetic": b"1a\r\n" + b"x" * 26 + b"rest",
     "entry granularity": bytes([7, 0xA5, 0x12, 0x34]) + b"tail",
     "guards": bytes([1, 7, 2, 3]),
+    "prefixes": b"HTTP/1.1 200 OK\r\nbody",
 }
 
 
@@ -2205,3 +2223,32 @@ def test_a_condition_that_cannot_be_evaluated_is_not_a_refusal():
     records, _ = interpreted(spec, bytes([0, 5]), Emit.FIELD)
     assert [record.role for record in records] == ["cond.n"]
     writes(spec, bytes([0, 5]), Emit.FIELD)
+
+
+def test_a_long_expression_is_wrapped_and_means_the_same():
+    """A generated module is linted like everything else here, long expressions included.
+
+    The compiler used to put an expression on one line however long it was, and
+    `http.yaml`'s test for `chunked` being the last transfer coding (#50) was
+    the first to pass the line limit. A long guard, condition and select value
+    are bound to a local over several lines instead, and mean the same thing.
+    """
+    names = [f"field_number_{index}" for index in range(6)]
+    long_or = " or ".join(f"{name} == 7" for name in names)
+    long_and = " and ".join(f"{name} != 9" for name in names)
+    fields: list[dict[str, object]] = [{"name": name, "bits": 8} for name in names]
+    fields.append({"name": "flag", "computed": long_or})
+    fields.append({"name": "tail", "bits": 8, "condition": long_or})
+    spec = from_dict(
+        {
+            "name": "long",
+            "version": "1",
+            "entry": "m",
+            "units": {"m": {"confirm": long_and, "fields": fields}},
+        }
+    )
+    source = render_spec(spec, emit=Emit.FIELD)
+    assert max(len(line) for line in source.splitlines()) <= 100
+    for data in (bytes([1, 2, 3, 4, 5, 7, 8]), bytes([1, 2, 3, 4, 5, 6, 8]), bytes([9] * 7)):
+        writes(spec, data, Emit.FIELD)
+        compare(spec, data)

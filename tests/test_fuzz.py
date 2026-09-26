@@ -950,12 +950,18 @@ units:
 _BODY_BYTES = bytes(b for b in range(256) if b != 0x42)
 
 
-def _framed_stream(rng: random.Random) -> tuple[_Stream, list[tuple[int, int]]]:
-    """Build framed messages with gaps cut at random, and where each message is."""
+def _framed_stream(
+    rng: random.Random, alphabet: bytes = _BODY_BYTES
+) -> tuple[_Stream, list[tuple[int, int]]]:
+    """Build framed messages with gaps cut at random, and where each message is.
+
+    ``alphabet`` is what bodies are made of. Small values make an attempt from
+    inside a body read a small length, and so decode whole.
+    """
     data = bytearray()
     messages: list[tuple[int, int]] = []
     for _ in range(rng.randint(2, 8)):
-        body = bytes(rng.choice(_BODY_BYTES) for _ in range(rng.randint(0, 12)))
+        body = bytes(rng.choice(alphabet) for _ in range(rng.randint(0, 12)))
         messages.append((len(data), len(data) + 2 + len(body)))
         data += bytes([0x42, len(body)]) + body
     cuts = sorted(rng.sample(range(1, len(data)), min(len(data) - 1, 2 * rng.randint(1, 3))))
@@ -1042,3 +1048,71 @@ def test_a_run_after_a_gap_resumes_where_a_cut_message_ends(seed: int):
             if open_end <= end:
                 open_end = None
     assert resumed, "the batch never cut a body with its length known"
+
+
+FRAMED_GUARDED = """
+name: guarded
+version: "1"
+entry: message
+units:
+  message:
+    confirm: "magic == 0x42"
+    fields:
+      - {name: magic, type: {int: {bits: 8}}}
+      - {name: length, type: {int: {bits: 8}}}
+      - {name: body, type: {bytes: {size: {expr: "length"}}}}
+"""
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_refused_attempt_after_a_gap_is_retried_where_it_stopped(seed: int, emit: Emit):
+    """#49 amended with #50: after a gap, a refused attempt is skipped, not the run.
+
+    The magic is checked by a `confirm` here rather than a `const`, so an
+    attempt from inside a body decodes whole and is then refused. The driver
+    tries again where it stopped. Both drivers write the same thing, no record
+    ever starts a message anywhere but at a real message start, and the batch
+    must actually have retried and landed on a real message.
+
+    Bodies are small values, so an attempt from inside one reads a small
+    length and decodes whole to be refused; random bytes would mostly run out
+    of input instead, which loses the rest of the run and never retries.
+    """
+    spec = Spec.from_yaml(FRAMED_GUARDED)
+    module = ModuleType(f"guarded_fuzz_{seed}_{emit.value}")
+    sys.modules[module.__name__] = module
+    exec(render_spec(spec, emit=emit), module.__dict__)
+    steps = (stage._interpreted(Decoder(spec, emit=emit)), stage._compiled(module))
+    rng = random.Random(seed)
+    retried = 0
+    for _ in range(200):
+        stream, messages = _framed_stream(rng, bytes(range(1, 12)))
+        outputs = []
+        for step in steps:
+            sink = _Recording()
+            stage._drive(step, stage._Writer(sink, stream, "guarded"), stream)
+            outputs.append(sink.calls)
+        assert outputs[0] == outputs[1], f"the drivers disagree on {stream!r}"
+        written = outputs[0]
+        heads = {start for start, _ in messages}
+        for call in written:
+            if call[0] != "record":
+                continue
+            fields = dict(call[2])
+            if fields.get("role") in (None, "guarded.magic"):
+                assert fields["cites"][0] in heads, f"a start inside a message: {stream!r}"
+        # A retry that worked leaves a lost region ending at a real message
+        # inside its run; one that ends where the run does was never retried.
+        ends = {
+            item.off_start + len(item.data) for item in stream.items if isinstance(item, _Chunk)
+        }
+        retried += sum(
+            1
+            for call in written
+            if call[0] == "undecoded"
+            and call[4] == stage.LOST_COMMENT
+            and call[2] in heads
+            and call[2] not in ends
+        )
+    assert retried, "the batch never retried after a refusal"

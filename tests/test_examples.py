@@ -345,3 +345,61 @@ def test_http_decodes_several_messages_from_one_run():
         len(HTTP_REQUEST) + len(second),
         len(run),
     ]
+
+
+# --- the start line, and chunked as the last coding (#50) --------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [b"chunked", b"gzip, chunked", b"gzip,chunked", b" Gzip,  Chunked ", b"x-custom, chunked"],
+)
+def test_http_reads_chunked_when_it_is_the_last_coding(value: bytes):
+    """RFC 7230 §3.3.1: `chunked` is the final coding, and may follow others.
+
+    `gzip, chunked` used to read as unframed, because saying *ends with* needed
+    a function the language did not have (#50).
+    """
+    spec = load("http.yaml")
+    message = (
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: " + value + b"\r\n\r\n"
+        b"4\r\nabcd\r\n0\r\n\r\n"
+    )
+    tree = Decoder(spec).decode_bytes(message)
+    assert tree.status is NodeStatus.OK
+    assert tree.find("chunked").value is True, value
+    assert tree.off_end == len(message), value
+
+
+@pytest.mark.parametrize("value", [b"xchunked", b"chunked, gzip", b"gzip"])
+def test_http_does_not_read_chunked_when_it_is_not_the_last_coding(value: bytes):
+    """A coding that merely ends in the same letters, or chunked not last, is not chunked."""
+    spec = load("http.yaml")
+    message = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: " + value + b"\r\n\r\n"
+    tree = Decoder(spec).decode_bytes(message)
+    assert tree.find("chunked").value is False, value
+
+
+@pytest.mark.parametrize(
+    "line",
+    [b"HTTP/1.1 200 OK", b"HTTP/1.0 404 Not Found", b"GET / HTTP/1.1", b"POST /x?y HTTP/1.0"],
+)
+def test_http_believes_a_start_line_that_looks_like_one(line: bytes):
+    tree = Decoder(load("http.yaml")).decode_bytes(line + b"\r\n\r\n")
+    assert tree.status is NodeStatus.OK, line
+
+
+@pytest.mark.parametrize(
+    "line",
+    [b"19", b"", b'"v": 0.29}, {"id": 27}', b"\x13*FIC HTTP/1.1 200 OK x", b"GET / HTTP/2"],
+)
+def test_http_refuses_a_start_line_that_does_not_look_like_one(line: bytes):
+    """What a run after a gap starts with: a chunk size, a blank line, a body's tail.
+
+    Each decodes whole as a message with no headers, so without the `confirm`
+    it was believed and written (#49's remaining phantoms). HTTP/2 has no text
+    start line to recognise, and is refused with them.
+    """
+    tree = Decoder(load("http.yaml")).decode_bytes(line + b"\r\n\r\n")
+    assert tree.status is NodeStatus.UNDECODABLE, line
+    assert tree.detail == "unit 'message' did not confirm"

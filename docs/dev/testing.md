@@ -156,7 +156,10 @@ both granularities: 64 files. For each, it checks:
   RFC 7230 framing in the script counts from the same bytes; over a lossy one,
   there must be no more start lines than messages sent, since the bug this
   shape exists to catch is a message that stops early and leaves its tail to
-  be read as more messages.
+  be read as more messages. And over every input, every start line must look
+  like one, by a pattern the script holds rather than the spec's own
+  `confirm`: a count cannot see a phantom when a gap also took a real start
+  line, which is how two sat in the generated stream from 0.4.0 until #50.
 
 It prints one line per check and exits non-zero if any failed, keeping the work
 directory. `--work DIR` keeps it anyway, and `--baseline DIR` compares every

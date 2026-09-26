@@ -132,6 +132,9 @@ swallowed the real one behind it. The same work found that §3.1's promise
 about guards held for the file at message granularity only: at field
 granularity a unit its `confirm` refused was written field by field. Both
 implementations now hold a guarded unit's records until its guard has held.
+The expression language gains `startswith` and `endswith` (#50), so the HTTP
+spec can say what its start line looks like, and a refused attempt after a gap
+is retried where it stopped rather than losing its run.
 
 Claims below marked **[verified]** were executed, not reasoned about: against
 `zpf` 0.16 by the script in §10, and against real captures as recorded in §13.
@@ -193,10 +196,11 @@ when this doesn't match":
   `undecodable` and the rest `skipped`, every region commented `not <spec>: …`
   (§3.1, *A stream is confirmed before it is believed*)
 - the bytes after a gap that finish a message the gap cut, when its end is
-  known → `reason="skipped"`, commented `rest of a message cut by a gap`; a run
-  after a gap whose first message does not decode whole, when it is not →
-  `reason="undecodable"`, commented `no message boundary found after a gap`
-  (§3.1, *After a gap*)
+  known → `reason="skipped"`, commented `rest of a message cut by a gap`; an
+  attempt after a gap that does not decode whole, when it is not →
+  `reason="undecodable"`, commented `no message boundary found after a gap`,
+  retried where it stopped if a guard refused it and otherwise to the end of
+  the run (§3.1, *After a gap*)
 
 **What the guarantee is not: leaves do not tile the input.** Until `Pointer`
 (§3.2) existed, every leaf covered a distinct range and the leaves together
@@ -550,23 +554,50 @@ Two rules, depending on what the driver knows:
 - **Where nothing said, hold the first message.** It is written through a
   `Held` sink and released only if it decodes whole. If not, what it wrote is
   dropped, since a partial tree read from the middle of a body is a
-  fabrication, and the rest of the run is `undecodable`, commented `no
-  message boundary found after a gap`. That attempt neither confirms nor
-  declines the stream: it says nothing about the protocol. A stream that ends
+  fabrication, and its bytes are `undecodable`, commented `no message
+  boundary found after a gap`. **If a guard refused it**, it was read far
+  enough for the guard to run, so where it stopped is known, and the next
+  attempt starts there, held in the same way. Any other failure (running out
+  of input, a field that could not be decoded) leaves no such place, and the
+  rest of the run is lost. None of these attempts confirms or declines the
+  stream: they say nothing about the protocol. A stream that ends
   unconfirmed is declined as before, and its comment says that attempts
   found no boundary when one failed other than by running out.
 
-No forward scanning for the next message start. It would be heuristic, and
-quadratic on a spec that fails slowly.
+**The retry after a refusal was not in the first version of this rule**, and
+#50 is what showed it was needed. With it, the HTTP spec says what a start line
+looks like, so it refuses the phantoms a gap leaves. Without the retry, a
+refused attempt lost the rest of its run; the next run then had no known end
+either, its attempt was refused in turn, and the loss cascaded to the end of
+the stream. On the lossy gzip capture that recovered **6 of 30** responses, where
+the spec without a `confirm` had recovered 30 by luck. With the retry it
+recovers all 30 with no phantom, and `http_gen` keeps its 58 real start lines
+and loses its 2 phantoms.
+
+**What was weighed against it: scanning byte by byte.** After any failed
+attempt, try again one byte later until an attempt decodes whole with its
+guards holding. It is the more thorough of the two. It cannot step over a real
+message start, which a retry after a refusal can when the refused attempt ran
+into one: a phantom whose "start line" runs on into a real status line takes
+that message with it. And it recovers after a failure that is not a refusal,
+where the retry gives up. It was measured on the same two inputs and recovered
+**exactly what the retry did** (30 of 30, 58 of 58), at 1.30 s against 0.02 s on
+the gzip capture. Each attempt is a whole decode from its byte, so the cost
+grows with the square of the distance to the next real message, and a
+megabyte body cut by a gap would take minutes. It also leans harder on the
+spec's guard, since it tries thousands of offsets per gap and stops at the
+first one that parses. The case it wins, a gap swallowing the end of a message
+whose length is not known and then a refused phantom running over the next
+real start, was in neither input, because rule 1 takes the length-framed case
+first. It remains the fallback to add if a capture shows that case mattering.
 
 **The limit, and whose it is.** A first message after a gap that happens to
-decode whole is believed. The HTTP spec reads a chunk-size line as a start line,
-and it parses; the pipeline's own lossy input has two such phantoms, hidden
-from its count bound because the same gaps took two real start lines. Only the
-spec can refuse them, with `const` or `confirm` on what a message's start looks
-like, and the HTTP spec cannot yet say *starts with* (#50). On the capture that
-found #49, the two rules brought all four swallowed responses back at their real
-offsets, and left two of the eight phantoms, both of that kind.
+decode whole, and that no guard refuses, is believed. Only the spec can refuse
+it, with `const` or `confirm` on what the start of its message looks like.
+`examples/http.yaml` does since #50 (`startswith`/`endswith`): a start line is
+a status line or a request line, and a chunk-size line or a body's tail is
+neither. A spec with no such guard resynchronises only by luck, as the HTTP
+spec did before it.
 
 `Spec.foreign` holds the keys a document used that belong to **packeteer's**
 dialect of this format — `over`, `ports`, `derive`, `sensitive`. Recognised,

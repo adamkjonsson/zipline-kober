@@ -113,12 +113,15 @@ class _Verdict:
             same way — the differential holds them to that.
         reach: For a truncation, where the message would have ended, when
             that is known (:class:`~kober.errors.TruncatedRead`); else ``None``.
+        refused: Whether a unit's ``confirm`` or ``reject`` refused the
+            message, which decoded far enough for it to run.
 
     """
 
     reason: str
     detail: str
     reach: int | None = None
+    refused: bool = False
 
 
 def _seam_for(reason: str) -> zpf.Seam | None:
@@ -481,7 +484,8 @@ def _interpreted(decoder: Decoder) -> _Step:
         if tree.status is NodeStatus.OK:
             return None
         reach = next((node.reach for node in tree.walk() if node.reach is not None), None)
-        return _Verdict(tree.status.value, tree.detail or tree.status.value, reach)
+        refused = any(node.refused for node in tree.walk())
+        return _Verdict(tree.status.value, tree.detail or tree.status.value, reach, refused)
 
     return step
 
@@ -498,7 +502,9 @@ def _compiled(module: object) -> _Step:
             module.decode_from(cursor, sink)
         except TruncatedRead as exc:
             return _Verdict(NodeStatus.TRUNCATED.value, str(exc), exc.reach)
-        except (EvalError, Undecodable, ZeroDivisionError) as exc:
+        except Undecodable as exc:
+            return _Verdict(NodeStatus.UNDECODABLE.value, str(exc), refused=exc.refused)
+        except (EvalError, ZeroDivisionError) as exc:
             return _Verdict(NodeStatus.UNDECODABLE.value, str(exc))
         return None
 
@@ -556,10 +562,12 @@ def _decode_run(
     ``known`` says whether ``at`` is where a message starts. When it is not (a
     run after a gap that nothing said the end of), the first message is written
     through a :class:`~kober.runtime.Held` sink and released only if it decodes
-    whole. If it does not, what it wrote is dropped and the rest of the run is
-    ``undecodable``: a partial tree read from the middle of a body would be a
-    fabrication. Such a failure never declines the stream, since it says
-    nothing about the protocol.
+    whole. If it does not, what it wrote is dropped: a partial tree read from
+    the middle of a body would be a fabrication. If a guard refused it, it was
+    read far enough for the guard to run, so the next attempt starts where it
+    stopped, still held; otherwise the rest of the run is ``undecodable``.
+    Either way the failure never declines the stream, since it says nothing
+    about the protocol.
 
     Returns:
         Where the message the run ended inside would have ended, when the run
@@ -579,7 +587,16 @@ def _decode_run(
             verdict = _Verdict(NodeStatus.UNDECODABLE.value, "a message consumed no input")
         if held is not None:
             if verdict is not None:
-                writer.note(at, end, NodeStatus.UNDECODABLE.value, LOST_COMMENT)
+                attempt = base + (before >> 3)
+                stopped = _stopped_at(cursor, base)
+                if verdict.refused and attempt < stopped < end:
+                    # Its guard refused it, so it was read far enough for the
+                    # guard to run, and where it stopped is known: try again
+                    # there, still held. Linear, one message per retry.
+                    writer.note(attempt, stopped, NodeStatus.UNDECODABLE.value, LOST_COMMENT)
+                    writer.lost = True
+                    continue
+                writer.note(attempt, end, NodeStatus.UNDECODABLE.value, LOST_COMMENT)
                 writer.lost = writer.lost or verdict.reason != NodeStatus.TRUNCATED.value
                 return None
             held.release()

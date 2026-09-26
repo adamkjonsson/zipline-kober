@@ -64,7 +64,7 @@ number, or reserved bits that must be zero — which refuses traffic that is not
 this protocol's at the field that says so, rather than after a whole message
 has been read against the wrong one. The expression language behind all of that
 is small on purpose — arithmetic, comparison, field references, and a
-closed table of three functions an author cannot add to.
+closed table of five functions an author cannot add to.
 
 What it deliberately cannot do is move the read cursor. That is the invariant
 the coverage guarantee rests on, and it is why constructs get added rather than

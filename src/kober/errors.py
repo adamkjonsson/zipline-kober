@@ -142,7 +142,18 @@ class Undecodable(Stopped):
     code has no tree to record it on, so it says so by raising, and the entry
     point of a generated module turns it into an ``undecodable`` region. Like
     :class:`EvalError`, letting one escape a decode is a bug.
+
+    Attributes:
+        refused: Whether a unit's own ``confirm`` or ``reject`` is what failed,
+            here or in a unit inside. The stage driver retries after a refused
+            attempt that followed a gap (``DESIGN.md`` §3.1, *After a gap*),
+            since the attempt decoded far enough for its guard to run.
+
     """
+
+    def __init__(self, message: str = "", at: int | None = None, *, refused: bool = False) -> None:
+        super().__init__(message, at)
+        self.refused = refused
 
 
 class Refused(Undecodable):
@@ -155,8 +166,12 @@ class Refused(Undecodable):
     any other failure passing through it: only the refusal drops the unit's
     records, since a guess that did not hold up is not written as a field tree
     (``DESIGN.md`` §3.1). The conversion is what stops an enclosing guarded unit
-    mistaking a nested refusal for its own.
+    mistaking a nested refusal for its own. The plain one it raises keeps
+    ``Undecodable.refused``, which is what the driver reads.
     """
+
+    def __init__(self, message: str = "", at: int | None = None) -> None:
+        super().__init__(message, at, refused=True)
 
 
 class CompileError(KoberError):

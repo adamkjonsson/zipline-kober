@@ -108,7 +108,7 @@ back.
 
 ## Functions
 
-The language has exactly three, and they are the whole of what it can call:
+The language has exactly five, and they are the whole of what it can call:
 
 | Call | Result | Meaning |
 | --- | --- | --- |
@@ -116,17 +116,24 @@ The language has exactly three, and they are the whole of what it can call:
 | `to_int(s, base)` | int | The same, in `base` — 2 to 36. |
 | `lower(s)` | str | Lower-case text, for a case-insensitive comparison. |
 | `trim(s)` | str | Text without leading or trailing whitespace. |
+| `startswith(s, prefix)` | bool | Whether `s` begins with `prefix`, case and all. |
+| `endswith(s, suffix)` | bool | Whether `s` ends with `suffix`, case and all. |
 
 ```yaml
 size: {expr: "to_int(length_header)"}          # Content-Length: 1234
 size: {expr: "to_int(chunk_size, 16)"}         # a chunked-encoding chunk header
 condition: "trim(lower(transfer_encoding)) == 'chunked'"
+confirm: "startswith(start_line, 'HTTP/') or endswith(start_line, ' HTTP/1.1')"
 ```
 
 They exist because real HTTP framing needs them and nothing else did: a
 `Content-Length` is a decimal string, a chunk size is a hexadecimal one, and
 whether chunked framing applies depends on matching a header value whose case
-varies and which carries whatever whitespace followed the colon. Those needs
+varies and which carries whatever whitespace followed the colon. A prefix and
+a suffix say what a start line looks like, which is how a spec refuses a guess
+after a gap, and that `chunked` is the *last* transfer coding in a list such
+as `gzip, chunked`. Both compare exactly; for a case-insensitive test, lower
+the text first. Those needs
 are the table, and it is meant to stay that size.
 
 **`to_int` is stricter than most languages' equivalent.** Surrounding

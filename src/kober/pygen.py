@@ -515,6 +515,81 @@ def _safe(text: str) -> str:
     return stripped + '\\"' * (len(text) - len(stripped))
 
 
+#: Room left on a line for the statement around a rendered expression — an
+#: ``if … :``, a ``return …, _spans[_i]``, an assignment — before the
+#: expression is bound to a local over several lines instead (``_wrapped``).
+STATEMENT_ROOM = 30
+
+
+def _top_level_split(rendered: str, operator: str) -> list[str]:
+    """Split rendered Python at ``operator`` where it is outside brackets and strings.
+
+    Args:
+        rendered: A rendered expression.
+        operator: The spelling to split at, spaces included: ``" or "``.
+
+    Returns:
+        The operands, one per part, or the whole expression alone if the
+        operator never occurs at the top level.
+
+    """
+    parts: list[str] = []
+    depth, start, index, quote = 0, 0, 0, ""
+    while index < len(rendered):
+        char = rendered[index]
+        if quote:
+            if char == "\\":
+                index += 1
+            elif char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif depth == 0 and rendered.startswith(operator, index):
+            parts.append(rendered[start:index])
+            index += len(operator)
+            start = index
+            continue
+        index += 1
+    parts.append(rendered[start:])
+    return parts
+
+
+def _wrapped(rendered: str, pad: str, name: str) -> list[str] | None:
+    """Return an assignment of a long expression to ``name``, one operand per line.
+
+    A generated module is linted like everything else here, and an expression
+    as long as ``http.yaml``'s test for ``chunked`` being the last transfer
+    coding does not fit on one line. Split at its top-level ``or``, or failing
+    that its top-level ``and``, inside brackets, which Python continues across
+    lines. ``None`` when the expression has neither, and a caller keeps it on
+    one line as before.
+
+    Args:
+        rendered: The rendered expression.
+        pad: The indentation of the assignment.
+        name: The local to assign.
+
+    Returns:
+        The lines, or ``None``.
+
+    """
+    for operator in (" or ", " and "):
+        parts = _top_level_split(rendered, operator)
+        if len(parts) > 1:
+            word = operator.strip()
+            return [
+                f"{pad}{name} = (",
+                f"{pad}    {parts[0]}",
+                *(f"{pad}    {word} {part}" for part in parts[1:]),
+                f"{pad})",
+            ]
+    return None
+
+
 def _one_line_doc(text: str, fallback: str) -> str:
     """Return a one-line docstring, or ``fallback`` where ``text`` would not fit.
 
@@ -863,15 +938,18 @@ def _builtin(expr: Call, binding: Binding) -> str:
     ``to_int`` goes through :func:`kober.runtime.to_int`, which **is** the
     function the interpreter evaluates — one implementation of a conversion
     that is deliberately stricter than Python's, so the two cannot drift and
-    the differential has nothing to find here. ``lower`` and ``trim`` are
-    method calls on a value the checker has already typed as text, and mean
-    exactly what the interpreter's ``str.lower`` and ``str.strip`` mean.
+    the differential has nothing to find here. ``lower``, ``trim``,
+    ``startswith`` and ``endswith`` are method calls on a value the checker has
+    already typed as text, and mean exactly what the interpreter's ``str``
+    methods of the same names mean.
     """
     arguments = [_expr(argument, binding, 0) for argument in expr.args]
     if expr.name == "lower":
         return f"{arguments[0]}.lower()"
     if expr.name == "trim":
         return f"{arguments[0]}.strip()"
+    if expr.name in ("startswith", "endswith"):
+        return f"{arguments[0]}.{expr.name}({arguments[1]})"
     return f"to_int({', '.join(arguments)})"
 
 
@@ -1267,7 +1345,7 @@ class _Function:
                 f"        _end = {ANCHOR} if _exc.at is None else _exc.at",
                 f"        if _end > {ANCHOR}:",
                 f'            _sink.undecoded(_base + {ANCHOR}, _base + _end, "undecodable")',
-                "        raise Undecodable(str(_exc), _exc.at) from None",
+                "        raise Undecodable(str(_exc), _exc.at, refused=True) from None",
                 "    except Stopped:",
                 "        _held.release()",
                 "        raise",
@@ -1482,10 +1560,18 @@ class _Function:
                 self.index_of, element_of=element_of, element=element, element_as=element_as
             ),
         )
+        long = indent + len(rendered) + STATEMENT_ROOM > LINE_LENGTH
         if not _fallible(rendered):
-            return rendered
+            lines = _wrapped(rendered, pad, "_value") if long else None
+            if lines is None:
+                return rendered
+            for line in lines:
+                self.emit(line)
+            return "_value"
         self.emit(f"{pad}try:")
-        self.emit(f"{pad}    _value = {rendered}")
+        lines = _wrapped(rendered, pad + "    ", "_value") if long else None
+        for line in lines or [f"{pad}    _value = {rendered}"]:
+            self.emit(line)
         for line in _failing(self.stopped()):
             self.emit(f"{pad}{line}")
         return "_value"
@@ -1528,16 +1614,19 @@ class _Function:
             if expr is None:
                 continue
             rendered = render_expr(expr, binding)
+            long = 4 + len(rendered) + STATEMENT_ROOM > LINE_LENGTH
             if _fallible(rendered):
                 # Taken in a `try` as any other fallible expression is, so a
                 # division by zero in a guard fails where the interpreter says.
-                lines.extend(["    try:", f"        _guard = {rendered}"])
-                raised = "Refused" if self.held else "Undecodable"
-                lines.extend(f"    {line}" for line in _failing(where, raised))
+                wrapped = _wrapped(rendered, "        ", "_guard") if long else None
+                lines.extend(["    try:", *(wrapped or [f"        _guard = {rendered}"])])
+                lines.extend(f"    {line}" for line in _failing(where, "Refused"))
+                rendered = "_guard"
+            elif long and (wrapped := _wrapped(rendered, "    ", "_guard")) is not None:
+                lines.extend(wrapped)
                 rendered = "_guard"
             test = rendered if holds else f"not ({rendered})"
-            refusal = "Refused" if self.held else "Undecodable"
-            lines.extend([f"    if {test}:", f"        raise {refusal}({message}, {where})"])
+            lines.extend([f"    if {test}:", f"        raise Refused({message}, {where})"])
         if lines:
             lines.append("")
         return lines
@@ -1733,7 +1822,19 @@ class _Function:
                 ranges.append(f"(_s_{local}, _e_{local})")
         if not ranges:
             return start, end
-        self.emit(f"{pad}_cites = cited([{', '.join(ranges)}], ({start}, {end}))")
+        one = f"{pad}_cites = cited([{', '.join(ranges)}], ({start}, {end}))"
+        if len(one) <= LINE_LENGTH:
+            self.emit(one)
+        else:
+            # One range per line: an expression reading many fields has as
+            # many ranges, and a generated module is held to the line limit.
+            self.emit(f"{pad}_cites = cited(")
+            self.emit(f"{pad}    [")
+            for cited_range in ranges:
+                self.emit(f"{pad}        {cited_range},")
+            self.emit(f"{pad}    ],")
+            self.emit(f"{pad}    ({start}, {end}),")
+            self.emit(f"{pad})")
         return "_cites[0]", "_cites[1]"
 
     def reachable(self, path: tuple[str, ...]) -> str | None:
@@ -2585,9 +2686,8 @@ def _failing(where: str, raised: str = "Undecodable") -> list[str]:
     Args:
         where: The position expression to report the failure at.
         raised: The exception to raise. A guard that cannot be decided raises
-            ``Refused`` where its unit's records are held, because a guard
-            that did not hold is a refusal whatever the reason
-            (``DESIGN.md`` §3.1).
+            ``Refused``, because a guard that did not hold is a refusal
+            whatever the reason (``DESIGN.md`` §3.1).
 
     Returns:
         The ``except`` clauses, unindented, for the ``try`` just emitted.

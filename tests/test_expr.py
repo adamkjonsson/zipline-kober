@@ -285,6 +285,9 @@ def test_what_unparse_writes_parses_back_to_the_same_tree(source: str):
         "lower(a) == 'x'",
         "trim(s)",
         "trim(lower(a)) == 'x'",
+        "startswith(s, 'HTTP/')",
+        "endswith(trim(lower(s)), 'chunked')",
+        "not startswith(s, 'x') and endswith(s, 'y')",
     ],
 )
 def test_a_call_round_trips(source: str):
@@ -305,6 +308,8 @@ def test_a_call_is_an_atom_and_needs_no_brackets():
         ("to_int()", "takes 1 or 2 argument(s), got 0"),
         ("to_int(a, 16, 2)", "takes 1 or 2 argument(s), got 3"),
         ("lower(a, b)", "takes 1 argument(s), got 2"),
+        ("startswith(a)", "takes 2 argument(s), got 1"),
+        ("endswith(a, b, c)", "takes 2 argument(s), got 3"),
         ("to_int(a, base=16)", "positional arguments only"),
     ],
 )
@@ -348,6 +353,15 @@ class _Values:
         ("trim(s)", "chunked", "chunked"),
         ("trim(s)", "   ", ""),
         ("trim(lower(s))", " Chunked ", "chunked"),
+        ("startswith(s, 'HTTP/')", "HTTP/1.1 200 OK", True),
+        ("startswith(s, 'HTTP/')", "GET / HTTP/1.1", False),
+        ("startswith(s, 'http/')", "HTTP/1.1 200 OK", False),
+        ("startswith(s, '')", "anything", True),
+        ("startswith(s, 'longer than s')", "short", False),
+        ("endswith(s, 'HTTP/1.1')", "GET / HTTP/1.1", True),
+        ("endswith(s, 'HTTP/1.1')", "HTTP/1.1 200 OK", False),
+        ("endswith(trim(lower(s)), 'chunked')", "gzip, Chunked ", True),
+        ("endswith(s, '')", "", True),
     ],
 )
 def test_calls_evaluate(source: str, text: str, expected: object):
@@ -391,6 +405,8 @@ def test_to_int_refuses_a_digit_its_base_does_not_have():
         ("to_int(s, 16)", ExprType.INT),
         ("lower(s)", ExprType.STR),
         ("trim(s)", ExprType.STR),
+        ("startswith(s, 'x')", ExprType.BOOL),
+        ("endswith(s, s)", ExprType.BOOL),
     ],
 )
 def test_a_call_has_the_type_its_table_row_says(source: str, expected: ExprType):
@@ -404,6 +420,8 @@ def test_a_call_has_the_type_its_table_row_says(source: str, expected: ExprType)
         ("lower(n)", {"n": ExprType.INT}, "argument 1 of lower()"),
         ("trim(n)", {"n": ExprType.INT}, "argument 1 of trim()"),
         ("to_int(s, s)", {"s": ExprType.STR}, "argument 2 of to_int()"),
+        ("startswith(n, 'x')", {"n": ExprType.INT}, "argument 1 of startswith()"),
+        ("endswith(s, n)", {"s": ExprType.STR, "n": ExprType.INT}, "argument 2 of endswith()"),
     ],
 )
 def test_a_call_checks_its_argument_types(source: str, scope: dict, fragment: str):

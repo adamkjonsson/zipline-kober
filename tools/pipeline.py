@@ -63,6 +63,11 @@ SPECS = ("dns", "http")
 #: lines there can be: one request and one response each.
 HTTP_REQUESTS = 30
 
+#: What an HTTP/1.x start line looks like: a status line, or a request line
+#: ending in the version. Written here, not taken from the spec, so a spec that
+#: stops recognising its own start lines is caught rather than trusted.
+HTTP_START_LINE = re.compile(rb"^(HTTP/1\.[01] \d{3}( .*)?|[!-~]+ \S+ HTTP/1\.[01])$")
+
 #: Real captures from ``python-zipline-wire``. Only ``http_stream_1`` is one of
 #: the example protocols; the other three are there for their loss and
 #: reordering, which is driver structure no generated input reproduces as well.
@@ -305,6 +310,16 @@ def _roles(path: Path) -> Counter[str]:
     return roles
 
 
+def _start_lines(path: Path) -> list[bytes]:
+    """Return every start line a field-granularity HTTP file wrote, in order."""
+    with zpf.open(path) as handle:
+        return [
+            bytes(block.payload)
+            for block in handle.blocks()
+            if isinstance(block, Record) and block.role == "http.start_line"
+        ]
+
+
 def _pointers(path: Path) -> tuple[int, int]:
     """Count DNS compression pointers followed, and the records read through them.
 
@@ -419,6 +434,13 @@ def _shape(report: Report, source: Input, path: Path, transport: Path, what: str
             limit = 2 * HTTP_REQUESTS if source.name == "http_gen" else None
             ok = found[0] > 0 and (limit is None or found[0] <= limit)
             detail += f" (lossy: at most {limit} start lines)" if limit else " (lossy)"
+        # A count can hide a phantom when a gap also took a real start line, and
+        # `http_gen` had two that way from 0.4.0 until #50: so every start line
+        # must also look like one.
+        phantoms = [line for line in _start_lines(path) if not HTTP_START_LINE.match(line)]
+        if phantoms:
+            ok = False
+            detail += f"; {len(phantoms)} not a start line, e.g. {phantoms[0][:30]!r}"
         report.line(ok, f"{what} shape", detail)
 
 

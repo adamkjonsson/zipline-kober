@@ -22,6 +22,17 @@ units:
       the two body fields are mutually exclusive by construction: a message
       reads at most one of them, and a message with neither framing header
       reads no body at all.
+
+      The `confirm` says what a start line looks like: a status line starts
+      with `HTTP/`, a request line ends with the version. That is what lets
+      the driver refuse a guess after a gap, where a run starts inside a body
+      and a chunk-size line or a stray CRLF would otherwise parse as a message
+      (#49, #50). A refused message writes none of its fields. It runs once
+      the message is read, so a phantom costs one decode before it is refused.
+    confirm: >-
+      startswith(start_line, 'HTTP/')
+      or endswith(start_line, ' HTTP/1.1')
+      or endswith(start_line, ' HTTP/1.0')
     fields:
       - name: start_line
         string: {delimiter: "\r\n"}
@@ -63,16 +74,20 @@ units:
         select:
           from: headers
           where: "lower(headers.name) == 'transfer-encoding'"
-          value: "trim(lower(headers.value)) == 'chunked'"
+          value: >-
+            trim(lower(headers.value)) == 'chunked'
+            or endswith(trim(lower(headers.value)), ',chunked')
+            or endswith(trim(lower(headers.value)), ' chunked')
           default: "false"
         doc: >
           Whether the body is chunk-framed.
 
           Only the *first* `Transfer-Encoding` is consulted, which is what a
           select does and what RFC 7230 §3.3.1 wants: the header is a list in
-          order of application, and `chunked` must be its final coding, so a
-          message whose first such header does not say `chunked` is not chunked
-          however many follow.
+          order of application, and `chunked` must be its final coding. So the
+          value is chunked when `chunked` is the whole of it or its last item,
+          as in `gzip, chunked`, and a coding that merely ends in the same
+          letters is not.
 
           `trim` is not decoration. A field value carries the optional
           whitespace RFC 7230 §3.2.3 permits, so the value read here is
@@ -80,11 +95,6 @@ units:
           is why `content_length` above needs nothing; a string *comparison*
           has nothing to strip it, and without `trim` this silently answers
           false on every real chunked message.
-
-          **A known limit:** `Transfer-Encoding: gzip, chunked` is legal and is
-          not recognised here, because saying "ends with chunked" needs a
-          function the language does not have. Such a message reads as
-          unframed rather than as mis-framed, which is the safe direction.
 
       - name: chunks
         unit: chunk

@@ -289,10 +289,12 @@ the message that follows is decoded at its real start.
 
 **When it does not,** the run's first message is a guess, and it is held. If it
 decodes whole, it is written. If it does not, nothing it read is written, and
-the rest of the run is `undecodable` with the comment `no message boundary
-found after a gap`. Such a failure never declines the stream, since an attempt
-from the middle of a message says nothing about which protocol the stream is
-in. A stream that ends without a whole message is still declined, and its
+its bytes are `undecodable` with the comment `no message boundary found after a
+gap`. If the spec's `confirm` or `reject` is what refused it, the attempt was
+read far enough for that to run, so kober tries again where it stopped. Any
+other failure leaves no such place, and the rest of the run is lost. None of
+this declines the stream, since an attempt from the middle of a message says
+nothing about which protocol the stream is in. A stream that ends without a whole message is still declined, and its
 comment then says
 
 ```text
@@ -300,13 +302,19 @@ not http: no message decoded; every attempt ran out of input or found no message
 ```
 
 ```{important}
-**A guess that decodes whole is believed.** A spec that cannot say what the
-start of its message looks like cannot refuse one that only happens to parse.
-The HTTP spec reads a chunk-size line after a gap as a start line, and it
-decodes. `const` and `confirm` on a message's first fields are what refuse it,
-so a spec whose messages begin with something recognisable resynchronises
-cleanly. The HTTP spec will once the language can say *starts with*
-([#50](https://github.com/adamkjonsson/zipline-kober/issues/50)).
+**A guess that decodes whole, and that nothing refuses, is believed.** A spec
+that does not say what the start of its message looks like cannot refuse one
+that only happens to parse, and a chunk-size line or a body's tail read after a
+gap parses as an HTTP message with no headers. So say it: a `const` on a magic
+number, or a `confirm` on the first field's shape. The HTTP example does:
+
+    confirm: >-
+      startswith(start_line, 'HTTP/')
+      or endswith(start_line, ' HTTP/1.1')
+      or endswith(start_line, ' HTTP/1.0')
+
+It is also what lets kober retry after a refusal: a spec with a guard
+resynchronises after a gap, and one without only by luck.
 ```
 
 ## What a spec cannot say
