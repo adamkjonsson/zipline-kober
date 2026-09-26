@@ -25,7 +25,13 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING
 
-from kober.check import Starved, fill_widths, require_valid, starved_fields
+from kober.check import (
+    Starved,
+    fill_widths,
+    message_tail_fields,
+    require_valid,
+    starved_fields,
+)
 from kober.cursor import Cursor
 from kober.errors import EvalError, TruncatedRead
 from kober.expr import ExprValue, evaluate
@@ -167,6 +173,11 @@ class _Frame:
     #: reason :attr:`fill` is: a repetition's elements are decoded below the
     #: loop that knows which field they belong to.
     starved: Starved | None = None
+    #: Whether the field being decoded is one after which nothing in the
+    #: message reads a byte (:func:`kober.check.message_tail_fields`), so a
+    #: fixed-size or counted read of it that runs out knows where the message
+    #: ends. Set per field for the reason :attr:`fill` is.
+    tail: bool = False
 
     def root(self) -> _Frame:
         """Return the outermost frame."""
@@ -268,6 +279,9 @@ class Decoder:
         #: by ``(unit, field index)`` — precomputed for the reason
         #: :attr:`_fills` is. Empty for every spec that passes ``check``.
         self._starved = starved_fields(spec)
+        #: The fields whose cut-off read tells where the message ends, for the
+        #: driver to resume at after a gap (#49). Precomputed like the others.
+        self._tails = message_tail_fields(spec)
 
     def decode_bytes(self, data: bytes, *, base: int = 0) -> Node:
         """Decode one buffer as a single instance of the entry unit.
@@ -397,10 +411,12 @@ class Decoder:
 
         children: list[Node] = []
         status, detail = NodeStatus.OK, None
+        refused = False
         try:
             for index, item in enumerate(unit.fields):
                 frame.fill = self._fills.get((unit.name, index))
                 frame.starved = self._starved.get((unit.name, index))
+                frame.tail = (unit.name, index) in self._tails
                 empty = cursor.at_end()
                 child = self._field(item, frame, cursor, read)
                 if child is None:
@@ -419,6 +435,7 @@ class Decoder:
                         child.detail or f"field {item.name!r} could not be decoded",
                     )
             status, detail = self._guards(unit, frame)
+            refused = status is not NodeStatus.OK
         except _Stop as stop:
             status, detail = stop.status, stop.detail
 
@@ -431,6 +448,7 @@ class Decoder:
             status=status,
             children=tuple(children),
             detail=detail,
+            refused=refused,
         )
 
     def _guards(self, unit: Unit, frame: _Frame) -> tuple[NodeStatus, str | None]:
@@ -571,6 +589,7 @@ class Decoder:
                 detail=str(exc),
                 spec_field=item,
                 resolved_type=kind,
+                reach=exc.reach,
             )
         except EvalError as exc:
             start, end = cursor.span(mark)
@@ -795,17 +814,35 @@ class Decoder:
     def _read_sized(self, size: SizeSpec, cursor: Cursor, env: _Environment) -> bytes:
         """Read the bytes a size spec describes."""
         if isinstance(size, Fixed):
-            return cursor.read_bytes(size.count)
+            return self._read_counted(size.count, cursor, env)
         if isinstance(size, FromExpr):
             count = self._int(size.expr, env, "size")
             if count < 0:
                 raise _Stop(NodeStatus.UNDECODABLE, f"negative size {count}")
-            return cursor.read_bytes(count)
+            return self._read_counted(count, cursor, env)
         if isinstance(size, Remaining):
             return cursor.read_remaining()
         if isinstance(size, Fill):
             return self._read_fill(cursor, env)
         return self._read_terminated(size, cursor)
+
+    def _read_counted(self, count: int, cursor: Cursor, env: _Environment) -> bytes:
+        """Read ``count`` bytes, saying where the message ends if they run out.
+
+        Only for a field after which nothing in the message reads
+        (:attr:`_Frame.tail`): then the read that ran out was the message's
+        last, and its length was decided before a byte of it was read, so the
+        message ends exactly where this read would have. The stage driver
+        resumes there after a gap rather than reading the rest of a body as a
+        new message (#49).
+        """
+        start = cursor.byte_offset()
+        try:
+            return cursor.read_bytes(count)
+        except TruncatedRead as exc:
+            if env.frame.tail:
+                raise TruncatedRead(str(exc), reach=start + count) from exc
+            raise
 
     def _read_fill(self, cursor: Cursor, env: _Environment) -> bytes:
         """Read everything left except what the fields after this one claim.
@@ -984,6 +1021,7 @@ class Decoder:
             detail=node.detail,
             spec_field=item,
             resolved_type=kind,
+            refused=node.refused,
         )
 
     # --- expression helpers ------------------------------------------------

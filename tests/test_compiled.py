@@ -1442,6 +1442,24 @@ AWKWARD["entry granularity"] = """
           - {name: c, type: {int: {bits: 16}}}
 """
 
+AWKWARD["guards"] = """
+    name: guards
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - {name: tag, type: {int: {bits: 8}}}
+          - {name: body, type: {unit: inner}}
+          - {name: tail, type: {int: {bits: 8}}}
+      inner:
+        confirm: "v == 7"
+        reject: "w == 0"
+        fields:
+          - {name: v, type: {int: {bits: 8}}}
+          - {name: w, type: {int: {bits: 8}}}
+"""
+
 AWKWARD_SEEDS: dict[str, bytes] = {
     "bitfields": bytes(range(1, 12)),
     "signed and wide": bytes(range(0x80, 0x90)),
@@ -1457,6 +1475,7 @@ AWKWARD_SEEDS: dict[str, bytes] = {
     "back-reference": bytes([0xAA, 0xBB, 0xCC, 0xDD, 1, 9, 9, 9]),
     "text arithmetic": b"1a\r\n" + b"x" * 26 + b"rest",
     "entry granularity": bytes([7, 0xA5, 0x12, 0x34]) + b"tail",
+    "guards": bytes([1, 7, 2, 3]),
 }
 
 
@@ -2115,3 +2134,74 @@ def test_a_constant_writes_the_same_file_on_adversarial_input(seed: int, emit: E
     spec = Spec.from_yaml(CONST_SPEC)
     for data in const_cases(seed):
         writes(spec, data, emit)
+
+
+# --- a failed guard writes no fields (#49) ----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("data", "why"),
+    [(bytes([1, 9, 2, 3]), "confirm"), (bytes([1, 7, 0, 3]), "reject")],
+    ids=["confirm", "reject"],
+)
+def test_a_unit_its_guard_refuses_writes_none_of_its_fields(data: bytes, why: str):
+    """A guess that did not hold up is an `undecodable` region (`DESIGN.md` §3.1).
+
+    Not a fabricated field tree. Both backends used to write `body.v` and
+    `body.w` at field granularity and then stop, with nothing in the file
+    saying the unit was refused. The field
+    read before the guarded unit is real and stays; the refused unit's bytes
+    and the rest of the run are `undecodable`.
+    """
+    spec = awkward("guards")
+    for records, regions in (
+        interpreted(spec, data, Emit.FIELD),
+        emitted(spec, data, Emit.FIELD),
+    ):
+        assert [record.role for record in records] == ["guards.tag"], why
+        assert [(r.off_start, r.off_end, r.reason) for r in regions] == [
+            (1, 4, "undecodable")
+        ], why
+    writes(spec, data, Emit.FIELD)
+
+
+def test_a_unit_whose_guard_holds_writes_its_fields():
+    spec = awkward("guards")
+    records, regions = emitted(spec, bytes([1, 7, 2, 3]), Emit.FIELD)
+    assert [record.role for record in records] == [
+        "guards.tag",
+        "guards.body.v",
+        "guards.body.w",
+        "guards.tail",
+    ]
+    assert regions == []
+    writes(spec, bytes([1, 7, 2, 3]), Emit.FIELD)
+
+
+def test_a_guarded_unit_cut_short_keeps_what_it_read():
+    """Only a guard's refusal drops the fields: a truncation never ran the guard."""
+    spec = awkward("guards")
+    records, _ = emitted(spec, bytes([1, 7]), Emit.FIELD)
+    assert [record.role for record in records] == ["guards.tag", "guards.body.v"]
+    writes(spec, bytes([1, 7]), Emit.FIELD)
+
+
+def test_a_condition_that_cannot_be_evaluated_is_not_a_refusal():
+    """The interpreter must tell a guard's refusal from a unit stopped any other way.
+
+    A condition dividing by zero also leaves a failed unit whose fields all
+    decoded. It is not a guard, so what was read is written, as before.
+    """
+    spec = inline("""
+    name: cond
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - {name: n, type: {int: {bits: 8}}}
+          - {name: x, type: {int: {bits: 8}}, condition: "10 / n == 1"}
+    """)
+    records, _ = interpreted(spec, bytes([0, 5]), Emit.FIELD)
+    assert [record.role for record in records] == ["cond.n"]
+    writes(spec, bytes([0, 5]), Emit.FIELD)

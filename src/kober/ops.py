@@ -34,7 +34,14 @@ from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from kober.check import Starved, require_valid, scope_at, starved_fields, trailing_width
+from kober.check import (
+    Starved,
+    message_tail_fields,
+    require_valid,
+    scope_at,
+    starved_fields,
+    trailing_width,
+)
 from kober.errors import CompileError, SpecError
 from kober.expr import SCOPE_WORDS, ExprType, IntLiteral, Ref, infer_type, references, unparse
 from kober.spec import (
@@ -202,6 +209,10 @@ class FieldPlan:
             (:func:`kober.check.starved_fields`). Always ``None`` in a spec that
             passes ``check``; carried so a backend running one that does not
             can call its short read ``undecodable``, as the interpreter does.
+        tail: Whether nothing in the message reads a byte after this field
+            (:func:`kober.check.message_tail_fields`). A backend reports where
+            a fixed-size or counted read of it would have ended when the read
+            runs out, so the driver can resume there after a gap (#49).
 
     """
 
@@ -215,6 +226,7 @@ class FieldPlan:
     doc: str | None = None
     const: int | bytes | str | None = None
     starved: Starved | None = None
+    tail: bool = False
 
     @property
     def exhaustive(self) -> bool:
@@ -425,8 +437,9 @@ class Plan:
             for name in units
         }
         starved = starved_fields(spec)
+        tails = message_tail_fields(spec)
         objects = tuple(
-            _object(spec, name, name in recursive, roots, callers[name], starved)
+            _object(spec, name, name in recursive, roots, callers[name], starved, tails)
             for name in units
         )
         return cls(
@@ -595,11 +608,12 @@ def _object(
     roots: Mapping[str, tuple[str, ...]],
     parents: tuple[str, ...],
     starved: Mapping[tuple[str, int], Starved],
+    tails: frozenset[tuple[str, int]] = frozenset(),
 ) -> ObjectPlan:
     """Reduce one unit to its shape."""
     target = spec.unit(unit)
     fields = tuple(
-        _field(spec, unit, index, item, starved.get((unit, index)))
+        _field(spec, unit, index, item, starved.get((unit, index)), tail=(unit, index) in tails)
         for index, item in enumerate(target.fields)
     )
     params = tuple(ParamPlan(name=param.name, kind=KINDS[param.type]) for param in target.params)
@@ -733,7 +747,13 @@ def _recursive(spec: Spec, units: Sequence[str]) -> set[str]:
 
 
 def _field(
-    spec: Spec, unit: str, index: int, item: Field, starved: Starved | None = None
+    spec: Spec,
+    unit: str,
+    index: int,
+    item: Field,
+    starved: Starved | None = None,
+    *,
+    tail: bool = False,
 ) -> FieldPlan:
     """Reduce one field to what it contributes."""
     switch = item.type if isinstance(item.type, Switch) else None
@@ -757,6 +777,7 @@ def _field(
         doc=item.doc,
         const=item.const,
         starved=starved,
+        tail=tail,
     )
 
 

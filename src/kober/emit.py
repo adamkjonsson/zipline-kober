@@ -219,7 +219,9 @@ def plan(
         # granularity the root resolved to, not the decoder's: the entry is a
         # unit, and a unit's setting is the default inside it, here as at every
         # container `_walk` meets below.
-        _walk(spec, tree, [spec.name], granularity, emissions, unclaimed)
+        if not tree.refused:
+            # A refused entry unit writes nothing; `_holes` names its bytes.
+            _walk(spec, tree, [spec.name], granularity, emissions, unclaimed)
     elif tree.width:
         unclaimed.append(Unclaimed(tree.off_start, tree.off_end, NodeStatus.SKIPPED.value))
 
@@ -310,6 +312,14 @@ def _walk(
         # already named `field[0]`, `field[1]`, so counting the container too
         # would spell every repeat twice — `questions.questions[0]`.
         path = names if child.is_repetition else [*names, child.name]
+        if child.refused:
+            # Its guard refused it: what its fields read was a guess that did
+            # not hold up, so none of it is written (`DESIGN.md` §3.1).
+            if child.width:
+                unclaimed.append(
+                    Unclaimed(child.off_start, child.off_end, NodeStatus.UNDECODABLE.value)
+                )
+            continue
         granularity = resolve_emit(child, spec, default)
         if not child.is_leaf:
             # A container's setting becomes the default *inside* it rather

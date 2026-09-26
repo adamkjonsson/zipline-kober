@@ -736,3 +736,147 @@ def test_a_short_first_message_then_a_foreign_one_keeps_nothing(tmp_path: Path):
     comment = NOT_TOY.format(4)
     assert [b for b in written if b[0] == "record"] == []
     assert regions(written) == [(0, 5, "undecodable", comment), (5, 8, "skipped", comment)]
+
+
+# --- after a gap (#49) -------------------------------------------------------
+#
+# Every message below is HTTP with a binary body: no CRLF in it, so a decode
+# that starts inside one reads it as a start line until the next real one.
+
+CUT = "rest of a message cut by a gap"
+LOST = "no message boundary found after a gap"
+
+
+def response(body: bytes, status: str = "200 OK") -> bytes:
+    """Return one length-framed HTTP response."""
+    return f"HTTP/1.1 {status}\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body
+
+
+NO_CONTENT = b"HTTP/1.1 204 No Content\r\n\r\n"
+
+
+def runs(source: Path, stream: bytes, kept: list[tuple[int, int]]) -> None:
+    """Write ``stream`` as a transport file holding only the ``kept`` ranges."""
+    write_transport(
+        source,
+        [(1000 * (i + 1), stream[a:b], 1001 + a) for i, (a, b) in enumerate(kept)],
+    )
+
+
+def starts(written: list[tuple[object, ...]]) -> list[int]:
+    """Return where every start line cited begins."""
+    return [
+        b[4][0][0] for b in written if b[0] == "record" and str(b[2]).endswith("start_line")
+    ]
+
+
+@pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD], ids=lambda e: e.value)
+def test_a_run_resumes_where_the_message_a_gap_cut_would_have_ended(
+    tmp_path: Path, emit: Emit
+):
+    """#49, the case with a known end: a gap inside a `Content-Length` body.
+
+    The next run used to be decoded from its first byte, which is the middle of
+    the body, and the body's bytes up to the next real status line became a
+    start line: the real response was swallowed. The body's length was read
+    before the gap, so where the message ends is known; the run resumes there,
+    and the bytes before it are `skipped` as the rest of the cut message.
+    """
+    first = response(b"\x01" * 40)
+    head = len(first) - 40
+    stream = first + NO_CONTENT + NO_CONTENT
+    source = tmp_path / "in.zpf"
+    runs(source, stream, [(0, head + 10), (head + 20, len(stream))])
+    written = both(HTTP, source, tmp_path, emit)
+    assert (head + 20, len(first), "skipped", CUT) in regions(written)
+    if emit is Emit.FIELD:
+        assert starts(written) == [0, len(first), len(first) + len(NO_CONTENT)]
+    else:
+        assert [b[4] for b in written if b[0] == "record"] == [
+            ((len(first), len(first) + len(NO_CONTENT)),),
+            ((len(first) + len(NO_CONTENT), len(stream)),),
+        ]
+
+
+def test_a_run_inside_a_cut_message_is_all_the_rest_of_it(tmp_path: Path):
+    """A body cut by two gaps: the run between them is all body, and the next resumes."""
+    first = response(b"\x01" * 40)
+    head = len(first) - 40
+    stream = first + NO_CONTENT
+    source = tmp_path / "in.zpf"
+    runs(source, stream, [(0, head + 5), (head + 10, head + 15), (head + 20, len(stream))])
+    written = both(HTTP, source, tmp_path, Emit.FIELD)
+    assert (head + 10, head + 15, "skipped", CUT) in regions(written)
+    assert (head + 20, len(first), "skipped", CUT) in regions(written)
+    assert starts(written) == [0, len(first)]
+
+
+def test_a_run_whose_start_is_unknown_keeps_no_failed_attempt(tmp_path: Path):
+    """#49, the case with no known end: the gap swallowed a message's end.
+
+    The first run ends inside the first body; the gap then takes the rest of it
+    and the second response's head, so the next run starts inside a body and
+    nothing says where. Its first message is held: here it reads a "start line"
+    up to a CRLF inside the body, then runs out in its headers, so the record it
+    wrote is dropped and the run is `undecodable`. It
+    does not decline the stream, which is not yet confirmed: an attempt from
+    the middle of a message says nothing about the protocol. The run after the
+    next gap starts at a real response, which decodes and confirms it.
+    """
+    first = response(b"\x01" * 40)
+    second = response(b"\x02" * 15 + b"\r\n" + b"\x02" * 23)
+    head = len(first) - 40
+    stream = first + second + NO_CONTENT
+    inside = len(first) + head + 10
+    source = tmp_path / "in.zpf"
+    third = len(first) + len(second)
+    runs(source, stream, [(0, head + 10), (inside, inside + 20), (third, len(stream))])
+    written = both(HTTP, source, tmp_path, Emit.FIELD)
+    assert (inside, inside + 20, "undecodable", LOST) in regions(written)
+    assert not any(str(region[3]).startswith("not http") for region in regions(written))
+    assert not any(
+        b[0] == "record" and inside <= b[4][0][0] < inside + 20 for b in written
+    )
+    assert starts(written) == [0, len(first) + len(second)]
+
+
+def test_an_attempt_after_a_gap_that_decodes_whole_is_believed(tmp_path: Path):
+    """The limit #49 leaves to #50, asserted so that changing it is a decision.
+
+    When nothing says where the gap left off and the first attempt happens to
+    decode whole, it is released: here the body's bytes and the next status
+    line read as one start line, and the real response's head and empty body
+    as that message's. Only a spec able to say what a start line looks like can
+    refuse it, which needs `startswith` (#50).
+    """
+    first = response(b"\x01" * 40)
+    second = response(b"\x02" * 40)
+    head = len(first) - 40
+    stream = first + second + NO_CONTENT
+    inside = len(first) + head + 10
+    source = tmp_path / "in.zpf"
+    runs(source, stream, [(0, head + 10), (inside, len(stream))])
+    written = both(HTTP, source, tmp_path, Emit.FIELD)
+    assert inside in starts(written)
+
+
+def test_a_stream_declined_after_a_lost_attempt_does_not_say_every_attempt_ran_out(
+    tmp_path: Path,
+):
+    """The end-of-stream comment says what the attempts did, and #49 adds a way.
+
+    Here the first run runs out, as plain text under the HTTP spec does, and the
+    run after the gap fails on a length that is not a number. That attempt is
+    dropped (#49) and neither confirms nor declines, so the stream is declined
+    at its end, and 0.4.0's "every attempt ran out of input" would be false.
+    """
+    text = b"There is a flower within my heart, Daisy, Daisy"
+    bad = b"HTTP/1.1 200 OK\r\nContent-Length: many\r\n\r\n"
+    source = tmp_path / "in.zpf"
+    write_transport(source, [(1000, text, 1001), (2000, bad, 1001 + len(text) + 10)])
+    written = both(HTTP, source, tmp_path, Emit.FIELD)
+    comments = {region[3] for region in regions(written) if region[2] != "gap"}
+    assert comments == {
+        "not http: no message decoded; every attempt ran out of input or found no "
+        "message boundary after a gap"
+    }

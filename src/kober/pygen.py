@@ -128,6 +128,8 @@ RUNTIME_NAMES = frozenset(
     {
         "Cursor",
         "EvalError",
+        "Held",
+        "Refused",
         "Sink",
         "Stopped",
         "TruncatedRead",
@@ -395,6 +397,24 @@ class Names:
         """
         return f"_decode_{self.class_of(unit).lower()}"
 
+    def reader_of(self, unit: str) -> str:
+        """Return the name of the function that reads a guarded unit's fields.
+
+        Only a unit with a ``confirm`` or ``reject``, compiled at field
+        granularity, has one: :meth:`function_of` is then a wrapper that holds
+        the records this writes until the guard has held. No other generated
+        name begins ``_read_``, and the suffix is the class name's, so two units
+        cannot collide here without colliding there first.
+
+        Args:
+            unit: The unit's name as the spec spells it.
+
+        Returns:
+            The function's name.
+
+        """
+        return f"_read_{self.class_of(unit).lower()}"
+
     def constant_of(self, enum: str) -> str:
         """Return the module constant an enum's labels compile to.
 
@@ -493,6 +513,40 @@ def _safe(text: str) -> str:
     text = text.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
     stripped = text.rstrip('"')
     return stripped + '\\"' * (len(text) - len(stripped))
+
+
+def _one_line_doc(text: str, fallback: str) -> str:
+    """Return a one-line docstring, or ``fallback`` where ``text`` would not fit.
+
+    Args:
+        text: The docstring wanted.
+        fallback: A shorter one that always fits.
+
+    Returns:
+        The docstring's line, indented for a function body.
+
+    """
+    line = f'    """{text}"""'
+    return line if len(line) <= LINE_LENGTH else f'    """{fallback}"""'
+
+
+def _call_lines(head: str, arguments: Sequence[str]) -> list[str]:
+    """Return a call, on one line if it fits and one argument per line if not.
+
+    Args:
+        head: Everything before the opening parenthesis, indentation included:
+            ``"        return _read_x"``.
+        arguments: The arguments, already rendered.
+
+    Returns:
+        The lines.
+
+    """
+    one = f"{head}({', '.join(arguments)})"
+    if len(one) <= LINE_LENGTH:
+        return [one]
+    indent = " " * (len(head) - len(head.lstrip()))
+    return [f"{head}(", *(f"{indent}    {argument}," for argument in arguments), f"{indent})"]
 
 
 def _wrap(text: str, indent: int, *, hang: int = 0, width: int = DOC_WIDTH) -> list[str]:
@@ -1061,18 +1115,29 @@ class _Function:
         offset = -(-self.delta // 8)
         return ANCHOR if offset == 0 else f"{ANCHOR} + {offset}"
 
-    def need(self, bits: int, indent: int) -> None:
+    def need(self, bits: int, indent: int, reach: str | None = None) -> None:
         """Emit the bounds check for reading ``bits`` from the current position.
 
         One per field, never merged. A merged check would report the failure at
         the start of the run rather than at the field that ran out, and the
         interpreter stops at the field — so a merged check would be a different
         answer about which bytes were decoded.
+
+        ``reach`` is where the message ends, for a read the message ends with
+        (:attr:`~kober.ops.FieldPlan.tail`), carried on the truncation so the
+        driver can resume there after a gap (#49).
         """
         needed = -(-(self.delta + bits) // 8)
         pad = " " * indent
         self.emit(f"{pad}if _size - {ANCHOR} < {needed}:")
-        self.emit(f'{pad}    raise TruncatedRead("truncated", {self.stopped()})')
+        self.truncated(pad, reach)
+
+    def truncated(self, pad: str, reach: str | None) -> None:
+        """Emit the ``raise`` for a read that ran out, with where it would have ended."""
+        if reach is None:
+            self.emit(f'{pad}    raise TruncatedRead("truncated", {self.stopped()})')
+        else:
+            self.emit(f'{pad}    raise TruncatedRead("truncated", {self.stopped()}, {reach})')
 
     def advance(self, bits: int) -> None:
         """Note that ``bits`` more have been read, without emitting anything."""
@@ -1115,6 +1180,20 @@ class _Function:
         """Whether this function carries a sink and a field path."""
         return self.module is Emit.FIELD
 
+    @property
+    def held(self) -> bool:
+        """Whether this unit's records wait for its guard.
+
+        A generated unit writes each record as it reads the field, and its
+        ``confirm`` or ``reject`` runs after the last one. At field granularity
+        that would write a field tree for a guess that did not hold up, which
+        ``DESIGN.md`` §3.1 promises never to, so a guarded unit is split in two:
+        a reading function that writes through a :class:`~kober.runtime.Held`
+        sink and raises :class:`~kober.errors.Refused`, and a wrapper that
+        releases or drops what it held (:meth:`wrapper`).
+        """
+        return self.threads and (self.obj.confirm is not None or self.obj.reject is not None)
+
     def emits(self, item: FieldPlan) -> bool:
         """Whether one field's leaves write records."""
         return self.threads and (item.emit or self.inside) is not Emit.NONE
@@ -1142,11 +1221,69 @@ class _Function:
             head.extend(self.depth_guard())
         head.extend([f"    {ORIGIN} = _base + {ANCHOR}", f"    _extent = {ORIGIN}"])
         tail = ["", *self.guards(), f"    _s, _e = _extent, {self.end()}", *self.construct()]
+        if self.held:
+            tail.extend(["", "", *self.wrapper()])
         return "\n".join([*head, *self.lines, *tail])
+
+    def wrapper(self) -> list[str]:
+        """Return the function that holds a guarded unit's records until its guard holds.
+
+        Released when the unit decoded, and when it failed any other way, since
+        what it read before a truncation is real and is written today. Dropped
+        only when its own guard refused it: then the unit's bytes are one
+        ``undecodable`` region, which is what the interpreter's emitter writes
+        for a unit it marked ``refused``, and the refusal goes on as a plain
+        :class:`~kober.errors.Undecodable`, so an enclosing guarded unit does not
+        take it for its own.
+        """
+        name = self.names.function_of(self.obj.unit)
+        reader = self.names.reader_of(self.obj.unit)
+        parameters = self.parameters()
+        arguments = [parameter.split(":")[0] for parameter in parameters]
+        held = ["_held" if argument == "_sink" else argument for argument in arguments]
+        returns = f"tuple[{self.cls}, int]"
+        one = f"def {name}({', '.join(parameters)}) -> {returns}:"
+        if len(one) <= LINE_LENGTH:
+            lines = [one]
+        else:
+            lines = [
+                f"def {name}(",
+                *(f"    {parameter}," for parameter in parameters),
+                f") -> {returns}:",
+            ]
+        lines.extend(
+            [
+                _one_line_doc(
+                    f"Decode one ``{_safe(self.obj.unit)}``, holding its records until its "
+                    "guard holds.",
+                    "Decode one guarded unit, holding its records until its guard holds.",
+                ),
+                "    if _sink is None:",
+                *_call_lines(f"        return {reader}", arguments),
+                "    _held = Held(_sink)",
+                "    try:",
+                *_call_lines(f"        _value = {reader}", held),
+                "    except Refused as _exc:",
+                f"        _end = {ANCHOR} if _exc.at is None else _exc.at",
+                f"        if _end > {ANCHOR}:",
+                f'            _sink.undecoded(_base + {ANCHOR}, _base + _end, "undecodable")',
+                "        raise Undecodable(str(_exc), _exc.at) from None",
+                "    except Stopped:",
+                "        _held.release()",
+                "        raise",
+                "    _held.release()",
+                "    return _value",
+            ]
+        )
+        return lines
 
     def definition(self) -> list[str]:
         """Return the ``def`` line, wrapped if its parameters do not fit."""
-        name = self.names.function_of(self.obj.unit)
+        name = (
+            self.names.reader_of(self.obj.unit)
+            if self.held
+            else self.names.function_of(self.obj.unit)
+        )
         parameters = self.parameters()
         returns = f"tuple[{self.cls}, int]"
         one = f"def {name}({', '.join(parameters)}) -> {returns}:"
@@ -1395,10 +1532,12 @@ class _Function:
                 # Taken in a `try` as any other fallible expression is, so a
                 # division by zero in a guard fails where the interpreter says.
                 lines.extend(["    try:", f"        _guard = {rendered}"])
-                lines.extend(f"    {line}" for line in _failing(where))
+                raised = "Refused" if self.held else "Undecodable"
+                lines.extend(f"    {line}" for line in _failing(where, raised))
                 rendered = "_guard"
             test = rendered if holds else f"not ({rendered})"
-            lines.extend([f"    if {test}:", f"        raise Undecodable({message}, {where})"])
+            refusal = "Refused" if self.held else "Undecodable"
+            lines.extend([f"    if {test}:", f"        raise {refusal}({message}, {where})"])
         if lines:
             lines.append("")
         return lines
@@ -2284,8 +2423,10 @@ class _Function:
         self.aligned("a sized field")
         prefix = "" if target is None else f"{target} = "
         if isinstance(size, Fixed):
-            self.need(size.count * 8, indent)
-            first, after = self.byte(), self.byte(size.count * 8)
+            after = self.byte(size.count * 8)
+            reach = f"_base + {after}" if self.obj.fields[index].tail else None
+            self.need(size.count * 8, indent, reach)
+            first = self.byte()
             self.emit(f"{pad}{prefix}_data[{first}:{after}]")
             self.advance(size.count * 8)
         elif isinstance(size, Remaining):
@@ -2336,7 +2477,7 @@ class _Function:
         start = self.byte()
         room = f"_size - {start}" if start == ANCHOR else f"_size - ({start})"
         self.emit(f"{pad}if {room} < _want:")
-        self.emit(f'{pad}    raise TruncatedRead("truncated", {self.stopped()})')
+        self.truncated(pad, f"_base + {start} + _want" if self.obj.fields[index].tail else None)
         self.emit(f"{pad}{prefix}_data[{start}:{start} + _want]")
         self.rebase(f"{start} + _want", indent)
 
@@ -2433,7 +2574,7 @@ class _Function:
         self.lines.append(line)
 
 
-def _failing(where: str) -> list[str]:
+def _failing(where: str, raised: str = "Undecodable") -> list[str]:
     """Return the handlers that turn a failed expression into ``Undecodable``.
 
     Worded as the interpreter words it, and for division by zero fixed rather
@@ -2443,6 +2584,10 @@ def _failing(where: str) -> list[str]:
 
     Args:
         where: The position expression to report the failure at.
+        raised: The exception to raise. A guard that cannot be decided raises
+            ``Refused`` where its unit's records are held, because a guard
+            that did not hold is a refusal whatever the reason
+            (``DESIGN.md`` §3.1).
 
     Returns:
         The ``except`` clauses, unindented, for the ``try`` just emitted.
@@ -2450,9 +2595,9 @@ def _failing(where: str) -> list[str]:
     """
     return [
         "except ZeroDivisionError as _exc:",
-        f'    raise Undecodable("division by zero", {where}) from _exc',
+        f'    raise {raised}("division by zero", {where}) from _exc',
         "except EvalError as _exc:",
-        f"    raise Undecodable(str(_exc), {where}) from _exc",
+        f"    raise {raised}(str(_exc), {where}) from _exc",
     ]
 
 

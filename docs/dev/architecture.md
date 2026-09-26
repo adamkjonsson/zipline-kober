@@ -79,7 +79,9 @@ checker proves.
 **Decode.** The driver iterates the input's `chunks()`, treating each `Gap` as
 a hard message boundary. Within a contiguous run it builds a
 {class}`kober.cursor.Cursor` and calls the engine repeatedly until the run is
-exhausted. The engine walks the spec, reading through the cursor and building
+exhausted. A run after a gap usually starts inside a message. Where the message
+the gap cut said where it ends, the run resumes there; where nothing did, its
+first message is held until it decodes whole (`DESIGN.md` §3.1, *After a gap*). The engine walks the spec, reading through the cursor and building
 {class}`kober.node.Node` objects. Per stream, the driver holds everything
 until the first whole message **confirms** the stream, and **declines** a
 stream that fails before that or ends without one. A declined stream keeps no

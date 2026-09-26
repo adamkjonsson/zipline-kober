@@ -72,6 +72,16 @@ class Node:
         resolved_type: The field type actually decoded. Differs from
             ``spec_field.type`` for a :class:`~kober.spec.Switch`, where it is
             the case that matched.
+        refused: Whether this unit's own ``confirm`` or ``reject`` refused what
+            its fields read. The fields stay in the tree, since they say what
+            was read, but none of them is written: a guess that did not hold up
+            is an ``undecodable`` region, not a field tree (``DESIGN.md`` §3.1).
+            Only a guard sets it. A unit stopped any other way, a condition
+            that could not be evaluated say, keeps its fields as before.
+        reach: For a ``truncated`` leaf whose read was the message's last and
+            whose length was already decided, where the message would have
+            ended, as an absolute offset; else ``None``. See
+            :class:`~kober.errors.TruncatedRead`.
 
     """
 
@@ -86,6 +96,8 @@ class Node:
     is_repetition: bool = False
     spec_field: Field | None = None
     resolved_type: FieldType | None = None
+    refused: bool = False
+    reach: int | None = None
 
     def __post_init__(self) -> None:
         if self.off_end < self.off_start:

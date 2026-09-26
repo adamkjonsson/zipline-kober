@@ -6,8 +6,8 @@ a pipeline baseline). The Stage 1 spike ran on 2026-09-24 and is recorded in
 leaning is rewritten and says so. Where it turned a leaning into a choice
 between two defensible designs, the choice is listed under *Decisions the
 spike leaves open*, and *Decided, 2026-09-26* records the answers.
-Next is [#49](https://github.com/adamkjonsson/zipline-kober/issues/49), found by
-the spike and added to the `0.5.0` milestone, as *Stage 1b*.
+*Stage 1b* ([#49](https://github.com/adamkjonsson/zipline-kober/issues/49))
+is done, and its results are recorded there. Next is Stage 2.
 
 > **Written 2026-09-19** against `0.3.0`, `DESIGN.md` revision 9, `zpf` 0.5.0
 > (spec 0.21), packeteer 0.16.0. The prompt was a question — *zipline is ready
@@ -931,11 +931,30 @@ lands. And it moves transform-free output, so doing it before any transform
 code means one diff against the Stage 0 baseline shows exactly what it
 moved, and nothing else can be mixed into that diff.
 
-- **Decide the behaviour first**, in the issue. The issue names one
-  candidate (not believing the first message after a gap until it decodes
-  whole, confirmation per run rather than per stream) and leaves the choice
-  open. Whatever is chosen has to apply to both drivers, since both share
-  `stage.py`, and to datagram input as well as byte streams, or say why not.
+- **Decided 2026-09-26**, and recorded on
+  [#49](https://github.com/adamkjonsson/zipline-kober/issues/49#issuecomment-5845321378).
+  Measured first: all 8 gaps in the lossy gzip capture land inside a body.
+  The 4 in `Content-Length` bodies are exactly the 4 real responses the
+  phantoms swallowed, and the 4 in chunked bodies left junk messages. Three
+  parts land here, in both backends:
+  1. **Resume at a known end.** A gap that cuts a read whose length was
+     already decided, with nothing after it up to the entry unit reading
+     bytes, leaves the message's end known. The next run resumes there. The
+     bytes from the gap to that end are `skipped`, with the comment *rest of
+     a message cut by a gap*.
+  2. **Where the end is not known**, the first message after a gap is held.
+     If it decodes whole it is released. If not, its partial tree is
+     discarded and the rest of the run is `undecodable`, with a comment
+     saying no message boundary was found after the gap. Such a failure never
+     declines the stream. No forward scanning.
+  3. **A failed guard writes no fields**, anywhere. It was a separate defect
+     against `DESIGN.md` §3.1, found on the way, and part 2 depends on it. No
+     shipped spec has a guard, so no example output moves.
+
+  The fourth part, a spec recognising its own start line, needs
+  `startswith`/`endswith`: [#50](https://github.com/adamkjonsson/zipline-kober/issues/50),
+  also in `0.5.0`, not in this stage. Datagram input is untouched, since a
+  datagram cannot be cut by a gap.
 - **Tests first**, reverted-and-watched: #49's reproduction as a stage-level
   test through both drivers, and the lossy gzip capture's shape (*no more
   start lines than responses sent*) as the property. The stage-level fuzz
@@ -947,6 +966,37 @@ moved, and nothing else can be mixed into that diff.
   every later stage keeps.
 - `CHANGELOG.md` under `Unreleased`: `Fixed`, and `Breaking:` under `Changed`
   if what a file says about a lossy stream changes the way #32's did.
+
+**Done, 2026-09-26.** All three parts, in both backends, with every
+regression test watched failing against the code it guards, including two
+tests that pin down the *wrong* fixes (dropping records on any failure, and
+guessing a refusal from a unit whose fields all decoded). A new stage-level
+fuzz cuts gaps anywhere in framed streams and checks, against ground truth,
+that no message start is cited inside a message and that every whole message
+after a known cut is decoded. It was watched failing with the resume
+disabled. What it found:
+
+- **On the lossy gzip capture**, start lines went from 34 (26 real, 8
+  phantom) to 32: **all 30 responses at their real offsets**, 4 `skipped` cut
+  regions, 2 `undecodable` lost runs, and 2 phantoms left, both after a gap
+  into a chunked body, both decoding whole. That is #50's case. The capture
+  therefore still breaks the lossy bound (32 > 30) until #50 lands.
+- **Against the Stage 0 baseline, 4 of 64 outputs moved**, all one stream:
+  the generated HTTP traffic under `dns.yaml`, declined as before over the
+  same bytes, now with the end-of-stream comment instead of the specific
+  failure, because the attempt that failed came after a gap. No HTTP output
+  moved: the pipeline's lossy HTTP input has only 2 gaps.
+- **The pipeline's lossy HTTP input has had 2 phantom start lines since
+  0.4.0** (`b''` and `b'19'`, chunk framing read as start lines), hidden by
+  its count bound because the same gaps took 2 real start lines. A check that
+  every start line looks like one would have caught them. It belongs with
+  #50, since it fails until #50 lands.
+- The guard fix moved nothing: no shipped spec has a guard.
+- An end-of-stream decline after a lost attempt needed its own wording, since
+  0.4.0's "every attempt ran out of input" is false when one failed some other
+  way.
+
+The new baseline is `../kober-baselines/0.5.0-stage1b`.
 
 ### Stage 2 — the constructs in the model, loader, and checker
 
@@ -1035,7 +1085,8 @@ here and the result recorded.
   released like any other.
 - `tools/pipeline.py` gains the Q9 inputs, with an exact shape count on the
   lossless gzip stream and the lossy bound on the other, which holds only
-  once Stage 1b has landed. Its diff against the Stage 1b baseline stays empty
+  once #50 has landed as well (Stage 1b left two phantoms that only the spec
+  can refuse). Its diff against the Stage 1b baseline stays empty
   for every transform-free output.
 
 ### Stage 6 — the compiler
@@ -1166,9 +1217,10 @@ message decoded whole without one is declined.
 9. `DESIGN.md` and the format docs say what is true of both implementations
    afterwards, and `concepts.md` no longer lists transforms as something a
    spec cannot say.
-10. **#49 is fixed**: no stream in any pipeline input, lossy gzip included,
-    has more start lines than messages sent, and the Stage 1b diff against
-    the Stage 0 baseline moved only what #49 meant to move.
+10. **#49 and #50 are fixed**: no stream in any pipeline input, lossy gzip
+    included, has more start lines than messages sent or a start line that
+    does not look like one, and the Stage 1b diff against the Stage 0
+    baseline moved only what #49 meant to move.
 11. **No secret reaches the file**: a `secret: true` value, and a secret in a
     raising transform's own message, appear in no record, region comment or
     diagnostic, including a declined stream's.

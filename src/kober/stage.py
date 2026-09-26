@@ -67,6 +67,7 @@ from kober.cursor import Cursor
 from kober.emit import plan, root_emit
 from kober.errors import EvalError, SpecError, TruncatedRead, Undecodable
 from kober.node import NodeStatus
+from kober.runtime import Held
 from kober.spec import Emit, InputShape
 
 if TYPE_CHECKING:
@@ -90,6 +91,16 @@ GAP_REASON = NodeStatus.GAP.value
 #: (``DESIGN.md`` §5).
 SEAM_REASON = "stream-gap"
 
+#: The comment on the bytes after a gap that finish a message the gap cut,
+#: when that message's end was known (#49). They are ``skipped``: what they are
+#: is known, and they are passed over on purpose.
+CUT_COMMENT = "rest of a message cut by a gap"
+
+#: The comment on a run after a gap whose first message did not decode whole,
+#: when where the gap left off was not known (#49). ``undecodable``: an attempt
+#: was made there, and it could not be told from the middle of a message.
+LOST_COMMENT = "no message boundary found after a gap"
+
 
 @dataclass(frozen=True)
 class _Verdict:
@@ -100,11 +111,14 @@ class _Verdict:
         detail: What went wrong, as the decoder said it. Quoted in the comment
             of a stream it declines, so both implementations must say it the
             same way — the differential holds them to that.
+        reach: For a truncation, where the message would have ended, when
+            that is known (:class:`~kober.errors.TruncatedRead`); else ``None``.
 
     """
 
     reason: str
     detail: str
+    reach: int | None = None
 
 
 def _seam_for(reason: str) -> zpf.Seam | None:
@@ -290,6 +304,11 @@ class _Writer:
         self.confirmed = False
         #: The comment every region of a declined stream carries, once it is.
         self.declined: str | None = None
+        #: Whether a run after a gap had its first message dropped for failing
+        #: other than by running out (#49). Such an attempt neither confirms nor
+        #: declines, so a stream that ends unconfirmed may have had one, and
+        #: then its comment must not say every attempt ran out.
+        self.lost = False
         #: While unconfirmed: each run as ``(start, end, writes)``, and each gap
         #: as ``(start, end, None)``, in stream order.
         self._held: list[tuple[int, int, list[tuple[object, ...]] | None]] = []
@@ -348,9 +367,12 @@ class _Writer:
         """End the stream: decline it if nothing ever decoded, then write what is left."""
         if not self.confirmed and self.declined is None:
             if any(writes is not None for _, _, writes in self._held):
-                self.decline(
-                    f"not {self.name}: no message decoded; every attempt ran out of input"
+                how = (
+                    "ran out of input or found no message boundary after a gap"
+                    if self.lost
+                    else "ran out of input"
                 )
+                self.decline(f"not {self.name}: no message decoded; every attempt {how}")
             else:
                 # Nothing was tried — the stream is gaps, or nothing at all.
                 self.confirm()
@@ -376,10 +398,14 @@ class _Writer:
 
     def undecoded(self, off_start: int, off_end: int, reason: str) -> None:
         """Mark ``[off_start, off_end)`` as not decoded, and say why."""
+        self.note(off_start, off_end, reason, None)
+
+    def note(self, off_start: int, off_end: int, reason: str, comment: str | None) -> None:
+        """Mark ``[off_start, off_end)`` as not decoded, with a comment saying why."""
         if self.confirmed:
-            self._undecoded(off_start, off_end, reason)
+            self._undecoded(off_start, off_end, reason, comment)
         else:
-            self._held[-1][2].append(("undecoded", off_start, off_end, reason))
+            self._held[-1][2].append(("undecoded", off_start, off_end, reason, comment))
 
     # --- the file -------------------------------------------------------------
 
@@ -454,7 +480,8 @@ def _interpreted(decoder: Decoder) -> _Step:
             sink.undecoded(region.off_start, region.off_end, region.reason)
         if tree.status is NodeStatus.OK:
             return None
-        return _Verdict(tree.status.value, tree.detail or tree.status.value)
+        reach = next((node.reach for node in tree.walk() if node.reach is not None), None)
+        return _Verdict(tree.status.value, tree.detail or tree.status.value, reach)
 
     return step
 
@@ -470,7 +497,7 @@ def _compiled(module: object) -> _Step:
         try:
             module.decode_from(cursor, sink)
         except TruncatedRead as exc:
-            return _Verdict(NodeStatus.TRUNCATED.value, str(exc))
+            return _Verdict(NodeStatus.TRUNCATED.value, str(exc), exc.reach)
         except (EvalError, Undecodable, ZeroDivisionError) as exc:
             return _Verdict(NodeStatus.UNDECODABLE.value, str(exc))
         return None
@@ -488,38 +515,84 @@ def _drive(step: _Step, writer: _Writer, stream: object) -> None:
 
 
 def _drive_stream(step: _Step, writer: _Writer, stream: object) -> None:
-    """Decode a byte-oriented stream, run by run, marking the holes between."""
+    """Decode a byte-oriented stream, run by run, marking the holes between.
+
+    A run after a gap starts wherever the gap left off, which is usually inside
+    a message (#49). Where the message the gap cut said where it would end, the
+    run resumes there, and the bytes before it are ``skipped`` as the rest of
+    that message. Where nothing said, the run's first message is a guess, and
+    :func:`_decode_run` holds it until it has decoded whole.
+    """
+    resume: int | None = None
+    after_gap = False
     for chunk in stream.chunks():
         if isinstance(chunk, Gap):
             writer.gap(chunk.off_start, chunk.off_end)
+            after_gap = True
             continue
+        start, end = chunk.off_start, chunk.off_start + len(chunk.data)
         if writer.declined is not None:
-            writer.skip(chunk.off_start, chunk.off_start + len(chunk.data))
+            writer.skip(start, end)
             continue
         writer.ts = chunk.ts
-        writer.begin(chunk.off_start, chunk.off_start + len(chunk.data))
-        _decode_run(step, writer, chunk.data, chunk.off_start)
+        writer.begin(start, end)
+        at, known = start, not after_gap
+        if after_gap and resume is not None and resume >= start:
+            at, known = min(resume, end), True
+            writer.note(start, at, NodeStatus.SKIPPED.value, CUT_COMMENT)
+        after_gap = False
+        if resume is not None and resume > end:
+            # The message the gap cut runs past this run too: all of it is the
+            # rest of that message, and the next run may still finish it.
+            continue
+        resume = _decode_run(step, writer, chunk.data, chunk.off_start, at=at, known=known)
 
 
-def _decode_run(step: _Step, writer: _Writer, data: bytes, base: int) -> None:
-    """Decode as many messages as fit in one contiguous run."""
+def _decode_run(
+    step: _Step, writer: _Writer, data: bytes, base: int, *, at: int, known: bool
+) -> int | None:
+    """Decode as many messages as fit in one contiguous run, from ``at``.
+
+    ``known`` says whether ``at`` is where a message starts. When it is not (a
+    run after a gap that nothing said the end of), the first message is written
+    through a :class:`~kober.runtime.Held` sink and released only if it decodes
+    whole. If it does not, what it wrote is dropped and the rest of the run is
+    ``undecodable``: a partial tree read from the middle of a body would be a
+    fabrication. Such a failure never declines the stream, since it says
+    nothing about the protocol.
+
+    Returns:
+        Where the message the run ended inside would have ended, when the run
+        ended by cutting it off and its end was known; else ``None``.
+
+    """
     cursor = Cursor(data, base)
+    cursor.seek_to(at)
     end = base + len(data)
     while not cursor.at_end():
         before = cursor.tell()
-        verdict = step(cursor, writer, data, base)
+        held = None if known else Held(writer)
+        verdict = step(cursor, held or writer, data, base)
         if verdict is None and cursor.tell() == before:
             # A message that consumes nothing would loop forever. It cannot be
             # decoded and neither can what follows it.
             verdict = _Verdict(NodeStatus.UNDECODABLE.value, "a message consumed no input")
+        if held is not None:
+            if verdict is not None:
+                writer.note(at, end, NodeStatus.UNDECODABLE.value, LOST_COMMENT)
+                writer.lost = writer.lost or verdict.reason != NodeStatus.TRUNCATED.value
+                return None
+            held.release()
+            known = True
         if verdict is not None:
             # The decode stopped here and said why; the rest of the run is the
             # tail a message deliberately leaves to whoever owns the run.
             stopped = _stopped_at(cursor, base)
             writer.undecoded(stopped, end, verdict.reason)
             writer.failed(verdict, stopped)
-            return
+            return verdict.reach if verdict.reason == NodeStatus.TRUNCATED.value else None
         writer.confirm()
+    return None
 
 
 def _drive_datagrams(step: _Step, writer: _Writer, stream: object) -> None:

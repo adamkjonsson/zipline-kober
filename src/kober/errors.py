@@ -145,6 +145,20 @@ class Undecodable(Stopped):
     """
 
 
+class Refused(Undecodable):
+    """A unit's own ``confirm`` or ``reject`` refused what its fields read.
+
+    Raised only inside a generated module, by a guarded unit's reading
+    function, and caught by the wrapper around it, which names the unit's
+    bytes ``undecodable`` and raises a plain :class:`Undecodable` in its place.
+    A distinct type because the wrapper must tell the unit's *own* refusal from
+    any other failure passing through it: only the refusal drops the unit's
+    records, since a guess that did not hold up is not written as a field tree
+    (``DESIGN.md`` §3.1). The conversion is what stops an enclosing guarded unit
+    mistaking a nested refusal for its own.
+    """
+
+
 class CompileError(KoberError):
     """A valid spec cannot be expressed in the language being generated.
 
@@ -168,7 +182,18 @@ class TruncatedRead(Stopped):
     an ordinary outcome — the message may simply continue in a segment we do
     not hold (``DESIGN.md`` §3.2) — so the decode engine turns it into a
     ``truncated`` region and carries on. It must not escape a decode.
+
+    Attributes:
+        reach: Where the message would have ended, as an absolute byte
+            offset, when the read that ran out was its last and its length was
+            already decided (:func:`kober.check.message_tail_fields`); else
+            ``None``. The stage driver resumes there after a gap (#49).
+
     """
+
+    def __init__(self, message: str = "", at: int | None = None, reach: int | None = None) -> None:
+        super().__init__(message, at)
+        self.reach = reach
 
 
 class EvalError(KoberError):

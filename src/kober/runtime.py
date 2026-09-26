@@ -40,7 +40,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from kober.cursor import Cursor
-from kober.errors import EvalError, Stopped, TruncatedRead, Undecodable
+from kober.errors import EvalError, Refused, Stopped, TruncatedRead, Undecodable
 from kober.expr import shift_left, shift_right, to_int
 from kober.spec import Endian
 
@@ -52,6 +52,8 @@ __all__ = [
     "TEXT_CONTENT_TYPE",
     "Cursor",
     "EvalError",
+    "Held",
+    "Refused",
     "Sink",
     "Spanned",
     "Stopped",
@@ -261,6 +263,63 @@ class Sink(Protocol):
             reason: One of `zpf`'s ``reason=`` strings.
 
         """
+
+
+class Held:
+    """A sink that keeps what a guarded unit writes until its guard has held.
+
+    A generated module writes each record as it reads the field, and a unit's
+    ``confirm`` or ``reject`` runs only once all its fields are read. So a
+    guarded unit writes through one of these, and the wrapper around it
+    releases the records into the real sink when the unit decoded, or when it
+    failed some other way, since what it read before a truncation is real. It
+    drops them only when the guard refused, which is ``DESIGN.md`` §3.1's
+    promise: no field tree for a guess that did not hold up.
+
+    Args:
+        sink: Where the records go once released.
+
+    """
+
+    __slots__ = ("_records", "_regions", "_sink", "_writes")
+
+    def __init__(self, sink: Sink) -> None:
+        self._sink = sink
+        self._records: list[tuple[bytes, str, int, int, str | None]] = []
+        self._regions: list[tuple[int, int, str]] = []
+        #: Which list each write went to, in the order they were written, so
+        #: that releasing them keeps the order a sink is promised.
+        self._writes: list[bool] = []
+
+    def record(
+        self,
+        payload: bytes,
+        content_type: str,
+        off_start: int,
+        off_end: int,
+        role: str | None,
+    ) -> None:
+        """Keep one record until :meth:`release`."""
+        self._records.append((payload, content_type, off_start, off_end, role))
+        self._writes.append(True)
+
+    def undecoded(self, off_start: int, off_end: int, reason: str) -> None:
+        """Keep one region until :meth:`release`."""
+        self._regions.append((off_start, off_end, reason))
+        self._writes.append(False)
+
+    def release(self) -> None:
+        """Write everything kept, in the order it was written."""
+        records = iter(self._records)
+        regions = iter(self._regions)
+        for is_record in self._writes:
+            if is_record:
+                self._sink.record(*next(records))
+            else:
+                self._sink.undecoded(*next(regions))
+        self._records.clear()
+        self._regions.clear()
+        self._writes.clear()
 
 
 class Spanned(Protocol):

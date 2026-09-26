@@ -273,6 +273,42 @@ There is no setting to turn this off. A decoder that believed a stream's first
 failure was corruption would write a field tree for every foreign stream it
 met, which is what `const` and `confirm` exist to prevent.
 
+## What a spec meets after a gap
+
+A message may not span a hole, so a stream with a gap is decoded run by run. A
+run after a gap usually starts **inside** a message: the gap took that message's
+start. What kober does there depends on whether it knows where that message
+ends.
+
+**When it knows,** it resumes there. If the gap cut a read whose length had
+already been decided, such as an HTTP body after its `Content-Length`, and
+nothing after that field reads a byte, the message ends where that read would
+have ended. The next run resumes at that offset, and the bytes before it are
+`skipped` with the comment `rest of a message cut by a gap`. Nothing is guessed:
+the message that follows is decoded at its real start.
+
+**When it does not,** the run's first message is a guess, and it is held. If it
+decodes whole, it is written. If it does not, nothing it read is written, and
+the rest of the run is `undecodable` with the comment `no message boundary
+found after a gap`. Such a failure never declines the stream, since an attempt
+from the middle of a message says nothing about which protocol the stream is
+in. A stream that ends without a whole message is still declined, and its
+comment then says
+
+```text
+not http: no message decoded; every attempt ran out of input or found no message boundary after a gap
+```
+
+```{important}
+**A guess that decodes whole is believed.** A spec that cannot say what the
+start of its message looks like cannot refuse one that only happens to parse.
+The HTTP spec reads a chunk-size line after a gap as a start line, and it
+decodes. `const` and `confirm` on a message's first fields are what refuse it,
+so a spec whose messages begin with something recognisable resynchronises
+cleanly. The HTTP spec will once the language can say *starts with*
+([#50](https://github.com/adamkjonsson/zipline-kober/issues/50)).
+```
+
 ## What a spec cannot say
 
 Worth knowing early, because each is a deliberate line rather than an omission.

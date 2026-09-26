@@ -15,6 +15,7 @@ differ.
 
 from __future__ import annotations
 
+import itertools
 import random
 import sys
 from dataclasses import dataclass
@@ -48,6 +49,7 @@ from kober.decoder import Decoder
 from kober.emit import plan
 from kober.node import Node, NodeStatus
 from kober.pygen import render_spec
+from kober.runtime import Held
 from kober.spec import Emit, Field, Select, Spec
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
@@ -810,29 +812,47 @@ def _toy_stream(rng: random.Random) -> _Stream:
 
 
 def _reference(step: Any, writer: Any, stream: _Stream, verdicts: list[str]) -> None:
-    """0.3.0's driver loop: try every run and every datagram, whatever came before."""
+    """0.3.0's driver loop: try every run and every datagram, whatever came before.
+
+    With #49's rule for a run after a gap, whose start nothing said: its first
+    message is written only if it decodes whole, and if it does not, the run
+    is one ``undecodable`` region with no record from the attempt. That attempt
+    is recorded as ``lost``, which neither confirms nor declines. The toy spec
+    has no field whose cut-off read knows where the message ends, so #49's
+    other rule, resuming at a known end, never applies here.
+    """
     ok, undecodable, skipped = "ok", NodeStatus.UNDECODABLE.value, NodeStatus.SKIPPED.value
 
-    def run_of(data: bytes, base: int) -> None:
+    def run_of(data: bytes, base: int, *, after_gap: bool) -> None:
         cursor = Cursor(data, base)
         end = base + len(data)
         while not cursor.at_end():
             before = cursor.tell()
-            verdict = step(cursor, writer, data, base)
+            held = Held(writer) if after_gap else None
+            verdict = step(cursor, held or writer, data, base)
+            if verdict is None and cursor.tell() == before:
+                verdict = stage._Verdict(undecodable, "a message consumed no input")
+            if held is not None:
+                after_gap = False
+                if verdict is not None:
+                    verdicts.append("lost")
+                    writer.note(base, end, undecodable, stage.LOST_COMMENT)
+                    return
+                held.release()
             verdicts.append(ok if verdict is None else verdict.reason)
             if verdict is not None:
                 writer.undecoded(stage._stopped_at(cursor, base), end, verdict.reason)
                 return
-            if cursor.tell() == before:
-                writer.undecoded(stage._stopped_at(cursor, base), end, undecodable)
-                return
 
+    after_gap = False
     for item in stream.items:
         if isinstance(item, Gap):
             writer.undecoded(item.off_start, item.off_end, stage.GAP_REASON)
+            after_gap = True
         elif stream.is_stream_oriented:
             writer.ts = item.ts
-            run_of(item.data, item.off_start)
+            run_of(item.data, item.off_start, after_gap=after_gap)
+            after_gap = False
         else:
             writer.ts = item.ts
             cursor = Cursor(item.data, item.off_start)
@@ -844,8 +864,15 @@ def _reference(step: Any, writer: Any, stream: _Stream, verdicts: list[str]) -> 
 
 
 def _declines(verdicts: list[str]) -> bool:
-    """Whether a stream with these verdicts, in order, is one #32 declines."""
+    """Whether a stream with these verdicts, in order, is one #32 declines.
+
+    A ``lost`` attempt, the first after a gap (#49), neither confirms nor
+    declines, but it was an attempt: a stream of nothing else is declined at
+    its end.
+    """
     for verdict in verdicts:
+        if verdict == "lost":
+            continue
         if verdict == "ok":
             return False
         if verdict == NodeStatus.UNDECODABLE.value:
@@ -903,3 +930,115 @@ def test_a_stream_is_declined_exactly_when_it_should_be_and_otherwise_unchanged(
         assert sum(r[2] - r[1] for r in regions) == extent, f"bytes unnamed in {stream!r}"
     assert declined and confirmed, "the batch did not reach both outcomes"
 
+
+
+# --- after a gap: resume where a cut message ends (#49) ----------------------
+
+FRAMED = """
+name: framed
+version: "1"
+entry: message
+units:
+  message:
+    fields:
+      - {name: magic, type: {int: {bits: 8}}, const: 0x42}
+      - {name: length, type: {int: {bits: 8}}}
+      - {name: body, type: {bytes: {size: {expr: "length"}}}}
+"""
+#: Body bytes never equal the magic, so an attempt from inside a body cannot
+#: pass for a message start: every phantom this could write is a bug.
+_BODY_BYTES = bytes(b for b in range(256) if b != 0x42)
+
+
+def _framed_stream(rng: random.Random) -> tuple[_Stream, list[tuple[int, int]]]:
+    """Build framed messages with gaps cut at random, and where each message is."""
+    data = bytearray()
+    messages: list[tuple[int, int]] = []
+    for _ in range(rng.randint(2, 8)):
+        body = bytes(rng.choice(_BODY_BYTES) for _ in range(rng.randint(0, 12)))
+        messages.append((len(data), len(data) + 2 + len(body)))
+        data += bytes([0x42, len(body)]) + body
+    cuts = sorted(rng.sample(range(1, len(data)), min(len(data) - 1, 2 * rng.randint(1, 3))))
+    items: list[object] = []
+    at = 0
+    for index in range(0, len(cuts) - 1, 2):
+        start, end = cuts[index], cuts[index + 1]
+        items.append(_Chunk(bytes(data[at:start]), at, 1000 + index))
+        items.append(Gap(start, end))
+        at = end
+    items.append(_Chunk(bytes(data[at:]), at, 9999))
+    return _Stream(is_stream_oriented=True, items=items), messages
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_run_after_a_gap_resumes_where_a_cut_message_ends(seed: int):
+    """#49's promise with a known end, over gaps cut anywhere in a stream.
+
+    Both drivers write the same thing; no message start is ever cited anywhere
+    but at a real message start; and where a gap cut a body whose length was
+    already read and ended before that message did, every message that arrived
+    whole in the next run is decoded, with the bytes before the first of them
+    ``skipped`` as the rest of the cut message.
+    """
+    spec = Spec.from_yaml(FRAMED)
+    module = ModuleType(f"framed_fuzz_{seed}")
+    sys.modules[module.__name__] = module
+    exec(render_spec(spec, emit=Emit.FIELD), module.__dict__)
+    steps = (stage._interpreted(Decoder(spec, emit=Emit.FIELD)), stage._compiled(module))
+    rng = random.Random(seed)
+    resumed = 0
+    for _ in range(200):
+        stream, messages = _framed_stream(rng)
+        outputs = []
+        for step in steps:
+            sink = _Recording()
+            stage._drive(step, stage._Writer(sink, stream, "framed"), stream)
+            outputs.append(sink.calls)
+        assert outputs[0] == outputs[1], f"the drivers disagree on {stream!r}"
+        written = outputs[0]
+        cites = [dict(call[2]) for call in written if call[0] == "record"]
+        magics = {c["cites"][0] for c in cites if c["role"] == "framed.magic"}
+        heads = {start for start, _ in messages}
+        assert magics <= heads, f"a message start cited inside a message: {stream!r}"
+
+        # Follow what the driver can know: the first run starts at a message;
+        # a later one does when the run before it did and ended inside a body
+        # whose length it had read, and the gap ended before that message did.
+        # A run lying wholly inside that body passes the knowledge on.
+        declined = any(
+            call[0] == "undecoded" and str(call[4]).startswith("not framed")
+            for call in written
+        )
+        runs = [item for item in stream.items if isinstance(item, _Chunk)]
+        known, open_end = True, None
+        for before, after in itertools.pairwise(runs):
+            cut_at = before.off_start + len(before.data)
+            if open_end is None or open_end <= before.off_start:
+                cut = (
+                    next(
+                        (
+                            m
+                            for m in messages
+                            if before.off_start <= m[0] and m[0] + 2 <= cut_at < m[1]
+                        ),
+                        None,
+                    )
+                    if known
+                    else None
+                )
+                open_end = None if cut is None else cut[1]
+            known = open_end is not None and after.off_start <= open_end
+            if not known:
+                open_end = None
+                continue
+            resumed += 1
+            end = after.off_start + len(after.data)
+            whole = [m for m in messages if open_end <= m[0] and m[1] <= end]
+            assert {m[0] for m in whole} <= magics, f"a whole message lost: {stream!r}"
+            if not declined and after.off_start < open_end:
+                stop = min(open_end, end)
+                expected = ("undecoded", after.off_start, stop, "skipped", stage.CUT_COMMENT)
+                assert expected in written, f"the rest of a cut message unnamed: {stream!r}"
+            if open_end <= end:
+                open_end = None
+    assert resumed, "the batch never cut a body with its length known"

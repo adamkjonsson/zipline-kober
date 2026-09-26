@@ -425,6 +425,82 @@ def starved_fields(spec: Spec) -> dict[tuple[str, int], Starved]:
     return found
 
 
+
+#: Field types that read nothing where they stand, so a field of one of them
+#: after another field cannot move where the message ends.
+_READS_NOTHING = (Computed, Select, Pointer)
+
+
+def message_tail_fields(spec: Spec) -> frozenset[tuple[str, int]]:
+    """Return the fields after which nothing in the message reads a byte.
+
+    Keyed ``(unit name, field index)`` like :func:`starved_fields`. A field is
+    here when every field after it in its unit reads nothing where it stands,
+    it is not repeated, and its unit is only ever reached from such a field in
+    another unit that is itself only reached that way, up to the entry. A
+    ``pointer`` target is never reached that way, since it is read from
+    somewhere else.
+
+    What it is for (#49): when a fixed-size or counted read of one of these runs
+    out at the end of a run, the message's end is known exactly: where that
+    read would have ended. The next run after a gap can then resume there
+    instead of reading the rest of a body as a new message. Both backends
+    report that end only for these fields, so they agree by construction.
+
+    Args:
+        spec: The spec.
+
+    Returns:
+        The positions of every such field.
+
+    """
+
+    def tail(unit: Unit, index: int) -> bool:
+        item = unit.fields[index]
+        if item.repeat is not None:
+            return False
+        return all(isinstance(later.type, _READS_NOTHING) for later in unit.fields[index + 1 :])
+
+    def references(kind: FieldType, tail_here: bool) -> Iterator[tuple[str, bool]]:
+        if isinstance(kind, UnitRef):
+            yield kind.unit, tail_here
+        elif isinstance(kind, Switch):
+            for case in (*kind.cases.values(), kind.default):
+                if case is not None:
+                    yield from references(case, tail_here)
+        elif isinstance(kind, Pointer):
+            yield from references(kind.type, False)
+
+    # Every reference to each unit, and whether it is from a tail position.
+    refs: dict[str, list[tuple[str, bool]]] = {name: [] for name in spec.units}
+    for unit in spec.units.values():
+        for index, item in enumerate(unit.fields):
+            for target, is_tail in references(item.type, tail(unit, index)):
+                if target in refs:
+                    refs[target].append((unit.name, is_tail))
+
+    # The greatest fixed point: assume every unit is reached only from tail
+    # positions, and drop one whenever a reference to it is not, or comes from
+    # a unit already dropped. Recursion settles, since the set only shrinks.
+    context = set(spec.units)
+    changed = True
+    while changed:
+        changed = False
+        for name in list(context):
+            unreached = name != spec.entry and not refs[name]
+            if unreached or any(
+                not is_tail or source not in context for source, is_tail in refs[name]
+            ):
+                context.discard(name)
+                changed = True
+    return frozenset(
+        (unit.name, index)
+        for unit in spec.units.values()
+        if unit.name in context
+        for index in range(len(unit.fields))
+        if tail(unit, index)
+    )
+
 def _terminal_phrase(label: str, item: Field, terminal: dict[str, str]) -> str | None:
     """Say how a field reads to the end of the message, or ``None`` if it does not.
 

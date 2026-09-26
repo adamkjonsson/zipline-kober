@@ -22,6 +22,66 @@ minor bump here too.
 
 ## [Unreleased]
 
+### Added
+
+- `kober.check.message_tail_fields()`: the fields after which nothing in the
+  message reads a byte, keyed `(unit, field index)`
+  ([#49](https://github.com/adamkjonsson/zipline-kober/issues/49)).
+  `kober.ops.FieldPlan.tail` carries each field's answer to a backend.
+- `TruncatedRead.reach` and `Node.reach`: where a message would have ended,
+  when the read that ran out was its last and its length was already decided.
+- `Node.refused`: whether a unit's own `confirm` or `reject` refused it.
+- `kober.runtime.Held`, a sink that keeps a guarded unit's records until its
+  guard has held, and `kober.errors.Refused`, which a generated module raises
+  for that refusal. Both are re-exported from `kober`.
+
+### Changed
+
+- **Breaking: what a file says after a gap in a byte stream**
+  ([#49](https://github.com/adamkjonsson/zipline-kober/issues/49)). A run after
+  a gap used to be decoded from its first byte, which is usually the middle of
+  a message. The rest of a body was read as a new message, and where the body
+  had no line ending, that phantom swallowed the real message behind it. Now:
+  - **when the message the gap cut said where it ends** (a fixed-size or
+    counted read, such as an HTTP body after its `Content-Length`, with nothing
+    after it reading a byte), the run resumes there. The bytes before it are
+    `skipped`, commented `rest of a message cut by a gap`;
+  - **when nothing said**, the run's first message is written only if it
+    decodes whole. If it does not, nothing it read is written, and the rest of
+    the run is `undecodable`, commented `no message boundary found after a
+    gap`. Such a failure never declines the stream. A stream that ends
+    unconfirmed is still declined, and its comment says `every attempt ran
+    out of input or found no message boundary after a gap` when one of those
+    attempts failed some other way.
+
+  On a lossy HTTP capture with large bodies, all 30 responses are now decoded
+  at their real offsets, where 4 were swallowed before, and 2 of 8 phantom
+  messages remain. Those two decode whole after a gap into a chunked body,
+  which only a spec able to recognise its own start line can refuse
+  ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50)). A consumer
+  that read the records after a gap should expect `skipped` and `undecodable`
+  regions there instead. Datagram input is unchanged. In the deeper pipeline
+  one output's decline comment changed and nothing else moved.
+
+### Fixed
+
+- **A unit its guard refuses is no longer written field by field.**
+  `DESIGN.md` §3.1 promised that a `confirm` or `reject` that does not hold
+  makes the unit an honest `undecodable` region instead of a fabricated field
+  tree. That held at message granularity only. At field granularity both
+  backends wrote the refused unit's fields and then stopped, with nothing in
+  the file saying the unit was refused. Now its bytes are one `undecodable`
+  region, and a guard that cannot be decided refuses the same way. Fields
+  read before the unit, and everything read before a truncation, are written
+  as before. No shipped example uses a guard. A module compiled from a spec
+  with `confirm` or `reject` at field granularity should be regenerated with
+  `kober compile`.
+
+### Documentation
+
+- `docs/format/concepts.md` gains *What a spec meets after a gap*;
+  `DESIGN.md` §3.1 gains *After a gap* and is revision 12.
+
 ## [0.4.0] - 2026-09-23
 
 **The verdict release.** Each change here is about what a file *says* about

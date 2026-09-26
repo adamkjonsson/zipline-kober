@@ -11,7 +11,7 @@ everything in §11 that is still a question.
 `zpf` by [`pressure_test.py`](pressure_test.py), and since revision 6 against
 real captures too.
 
-Revision 11. Revision 1 was written blind and got the layer wrong — it invented
+Revision 12. Revision 1 was written blind and got the layer wrong — it invented
 reassembly, gaps, and provenance that `zpf` already provides. Revision 2 fixed
 that against the source. Revision 3 added the results of an executable pressure
 test (§10) and treated this project as what it is: **a load test of `zpf`, where
@@ -123,6 +123,16 @@ its second application: a field starved under `check=False`. And the entry
 unit's `emit` now wins over the decoder's in both implementations, as the
 chain in §4 always said.
 
+Revision 12, for `0.5.0`, begins with what a gap leaves behind (#49). §3.1
+gains *After a gap*: a run after a gap resumes where the message the gap cut
+ends, when that is known, and otherwise believes its first message only once
+it has decoded whole. A lossy capture with large bodies had shown every gap
+landing inside a body and the rest of that body read as a new message, which
+swallowed the real one behind it. The same work found that §3.1's promise
+about guards held for the file at message granularity only: at field
+granularity a unit its `confirm` refused was written field by field. Both
+implementations now hold a guarded unit's records until its guard has held.
+
 Claims below marked **[verified]** were executed, not reasoned about: against
 `zpf` 0.16 by the script in §10, and against real captures as recorded in §13.
 
@@ -182,6 +192,11 @@ when this doesn't match":
   stream is **declined**: no record for any of it, what was tried
   `undecodable` and the rest `skipped`, every region commented `not <spec>: …`
   (§3.1, *A stream is confirmed before it is believed*)
+- the bytes after a gap that finish a message the gap cut, when its end is
+  known → `reason="skipped"`, commented `rest of a message cut by a gap`; a run
+  after a gap whose first message does not decode whole, when it is not →
+  `reason="undecodable"`, commented `no message boundary found after a gap`
+  (§3.1, *After a gap*)
 
 **What the guarantee is not: leaves do not tile the input.** Until `Pointer`
 (§3.2) existed, every leaf covered a distinct range and the leaves together
@@ -418,7 +433,12 @@ class Field:
 `confirm`/`reject` survive from revision 1 and matter more here than they did
 in Spicy, because rejecting cleanly is how a wrong protocol guess becomes an
 honest `undecodable` region instead of a fabricated field tree — and, on a
-stream's first message, how a whole stream is declined (below).
+stream's first message, how a whole stream is declined (below). The fields a
+refused unit read stay in the tree, since they say what was read, and none of
+them is written: the emitter skips a node marked `refused`, and a generated
+module writes a guarded unit through a `Held` sink that its guard releases.
+A guard that cannot be decided has not held, and refuses the same way. Until
+revision 12 this was true at message granularity only.
 
 `const` is the same need one field wide, and the timing is why it is not just a
 `confirm`. A guard runs **once the unit's fields are decoded**; a run holds as
@@ -501,6 +521,52 @@ Confirmation is per stream: per direction of a TCP session, per participant of a
 chained stage's input. Held output costs memory in proportion to the
 unconfirmed prefix, which for a stream that never confirms is all of it, since
 the decline that ends it cannot come earlier.
+
+#### After a gap (0.5.0)
+
+A message may not span a hole, so the driver decodes a byte stream run by run,
+and a run after a gap starts wherever the gap left off. That is usually inside
+a message. Until 0.5.0 the driver decoded from there as though a message began,
+and on a lossy capture with large bodies (#49) every one of 8 gaps landed in a
+body. The rest of the body became a start line; where the body had no line
+ending, that "start line" ran on into the next real status line, and the real
+response's headers and body were read as the phantom's. Four real responses
+were swallowed that way, and four junk messages were written.
+
+Two rules, depending on what the driver knows:
+
+- **Where the cut message said where it ends, resume there.** A field is
+  *message-tail* when nothing after it in its unit reads a byte, it is not
+  repeated, and its unit is reached only from such fields
+  (`kober.check.message_tail_fields`, a greatest fixed point over the unit
+  references). A fixed-size or counted read of one that runs out knows the
+  message's end: where the read would have ended. Both implementations report
+  it on the truncation (`TruncatedRead.reach`, `Node.reach`) and only for
+  those fields, so they agree by construction. The next run resumes there, and
+  the bytes before it are `skipped`, commented `rest of a message cut by a
+  gap`: what they are is known, and they are passed over on purpose. A run
+  lying wholly inside the cut message is all `skipped`, and the one after
+  still resumes.
+- **Where nothing said, hold the first message.** It is written through a
+  `Held` sink and released only if it decodes whole. If not, what it wrote is
+  dropped, since a partial tree read from the middle of a body is a
+  fabrication, and the rest of the run is `undecodable`, commented `no
+  message boundary found after a gap`. That attempt neither confirms nor
+  declines the stream: it says nothing about the protocol. A stream that ends
+  unconfirmed is declined as before, and its comment says that attempts
+  found no boundary when one failed other than by running out.
+
+No forward scanning for the next message start. It would be heuristic, and
+quadratic on a spec that fails slowly.
+
+**The limit, and whose it is.** A first message after a gap that happens to
+decode whole is believed. The HTTP spec reads a chunk-size line as a start line,
+and it parses; the pipeline's own lossy input has two such phantoms, hidden
+from its count bound because the same gaps took two real start lines. Only the
+spec can refuse them, with `const` or `confirm` on what a message's start looks
+like, and the HTTP spec cannot yet say *starts with* (#50). On the capture that
+found #49, the two rules brought all four swallowed responses back at their real
+offsets, and left two of the eight phantoms, both of that kind.
 
 `Spec.foreign` holds the keys a document used that belong to **packeteer's**
 dialect of this format — `over`, `ports`, `derive`, `sensitive`. Recognised,
