@@ -972,7 +972,7 @@ def test_the_framing_seeds_reach_every_arm():
     exactly as `SEEDS["http.yaml"]` did.
     """
     decoder = Decoder(http_spec())
-    arms = {"chunks": 0, "body": 0, "neither": 0}
+    arms = {"chunks": 0, "body": 0, "neither": 0, "inflated": 0, "not inflated": 0}
     for data in framing_cases(1):
         tree = decoder.decode_bytes(data)
         if tree.status is not NodeStatus.OK:
@@ -983,6 +983,9 @@ def test_the_framing_seeds_reach_every_arm():
             arms["body"] += 1
         else:
             arms["neither"] += 1
+        content = tree.find("content")
+        if content is not None:
+            arms["not inflated" if content.failed else "inflated"] += 1
     assert all(count > 0 for count in arms.values()), arms
 
 

@@ -172,6 +172,20 @@ def test_the_body_before_a_transform_is_the_message_tail():
     assert ("message", 3) in tails
 
 
+def test_the_body_before_a_switch_of_transforms_is_the_message_tail():
+    """A transform chosen by a switch reads nothing either, as `http.yaml`'s does."""
+    tails = message_tail_fields(
+        spec("""\
+      - name: content
+        switch:
+          dispatch: n
+          cases:
+            1: {transform: {from: body, with: deflate, limit: 64}}
+          default: {transform: {from: body, with: gzip, limit: 64}}""")
+    )
+    assert ("message", 3) in tails
+
+
 # --- which transform --------------------------------------------------------------
 
 

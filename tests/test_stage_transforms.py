@@ -346,3 +346,76 @@ def test_a_module_from_before_the_digest_writes_none(tmp_path: Path):
     sink = tmp_path / "old.zpf"
     stage.run_compiled(module, source, sink, produced_by="t", produced_at=1)
     assert digests(blocks(sink)) == [None]
+
+
+# --- a tunnel feeding a second stage (acceptance 2) ----------------------------------------------
+
+#: The tunnel with its header `emit: none`: the plaintext is the one record a
+#: datagram writes, so a second stage reads nothing else.
+QUIET_TUNNEL = TUNNEL.replace("- {name: nonce, bytes: 8}", "- {name: nonce, bytes: 8, emit: none}")
+
+#: What the second stage reads each plaintext as.
+PACKET = """
+name: packet
+version: "1"
+entry: packet
+input: datagram
+units:
+  packet:
+    fields:
+      - {name: word, string: {delimiter: " "}}
+      - {name: number, string: {size: {remaining: true}}}
+"""
+
+
+@pytest.mark.parametrize("corrupt", [0, 2], ids=["first-corrupt", "third-corrupt"])
+def test_a_tunnel_feeds_a_second_stage_one_plaintext_per_datagram(tmp_path: Path, corrupt: int):
+    """The header the output cites is spoken for by it, so `emit: none` names nothing there.
+
+    Its bytes are cited by the plaintext, which covers the whole datagram
+    (*Decided* 3), so a `skipped` region over them would make them both cited
+    and undecoded. When the transform fails nothing cites them, and they are
+    `skipped` as any `emit: none` field is.
+    """
+    registry = Registry.standard()
+    registry.register("xor", xor_open)
+    payloads = [f"packet {i}".encode() for i in range(4)]
+    wire = [sealed(p, i, corrupt=i == corrupt) for i, p in enumerate(payloads)]
+    source = tmp_path / "in.zpf"
+    datagrams(source, wire)
+    written = decode(
+        from_yaml(QUIET_TUNNEL), source, tmp_path, params={"key": KEY}, transforms=registry
+    )
+    offsets = [sum(len(d) for d in wire[:i]) for i in range(len(wire) + 1)]
+    assert [(b[2], b[4]) for b in written if b[0] == "record"] == [
+        ("tunnel.inner", ((offsets[i], offsets[i + 1]),)) for i in range(4) if i != corrupt
+    ]
+    assert regions(written) == [
+        (offsets[corrupt], offsets[corrupt] + 8, "skipped", None),
+        (offsets[corrupt] + 8, offsets[corrupt + 1], "undecodable", None),
+    ]
+
+    first = tmp_path / f"out.{Emit.FIELD.value}.zpf"
+    second = tmp_path / "second.zpf"
+    Decoder(from_yaml(PACKET), emit=Emit.FIELD).run(first, second, produced_by="t", produced_at=1)
+    assert_conformant(second, first)
+    numbers = [b[3] for b in blocks(second) if b[0] == "record" and b[2] == "packet.number"]
+    assert numbers == [str(i).encode() for i in range(4) if i != corrupt]
+
+
+def test_a_tunnel_with_the_wrong_key_is_declined_saying_so(tmp_path: Path):
+    """*Decided* 1e: every datagram fails, so the stream is declined, the key nowhere."""
+    registry = Registry.standard()
+    registry.register("xor", xor_open)
+    source = tmp_path / "in.zpf"
+    datagrams(source, [sealed(f"packet {i}".encode(), i) for i in range(3)])
+    wrong = bytes(16)
+    written = decode(
+        from_yaml(QUIET_TUNNEL), source, tmp_path, params={"key": wrong}, transforms=registry
+    )
+    assert [b for b in written if b[0] == "record"] == []
+    assert {region[3] for region in regions(written)} == {
+        "not tunnel: every message that decoded had a transform fail; the first: "
+        "xor: the transform raised ValueError"
+    }
+    assert wrong.hex() not in repr(written)

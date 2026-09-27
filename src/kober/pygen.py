@@ -32,7 +32,7 @@ from __future__ import annotations
 import ast
 import keyword
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from kober.decoder import MAX_DEPTH, MAX_POINTER_HOPS
@@ -55,7 +55,7 @@ from kober.expr import (
     unparse,
 )
 from kober.node import NodeStatus
-from kober.ops import Kind, Plan, nonnegative, walk_path
+from kober.ops import Kind, Plan, TransformPlan, nonnegative, walk_path
 from kober.runtime import TEXT_CONTENT_TYPE, prim_token
 from kober.spec import Count, Emit, Fill, Fixed, FromExpr, Remaining, Terminated, ToEnd, Until
 
@@ -135,7 +135,9 @@ RUNTIME_NAMES = frozenset(
         "TransformError",
         "bind_transforms",
         "concat",
+        "decode_text",
         "document_params",
+        "size_of",
         "run_transform",
         "take_over",
         "Sink",
@@ -144,6 +146,7 @@ RUNTIME_NAMES = frozenset(
         "Undecodable",
         "cited",
         "prim_int",
+        "record_int",
         "read_int_le",
         "shift_left",
         "shift_right",
@@ -598,13 +601,60 @@ def _wrapped(rendered: str, pad: str, name: str) -> list[str] | None:
         parts = _top_level_split(rendered, operator)
         if len(parts) > 1:
             word = operator.strip()
-            return [
-                f"{pad}{name} = (",
-                f"{pad}    {parts[0]}",
-                *(f"{pad}    {word} {part}" for part in parts[1:]),
-                f"{pad})",
-            ]
+            inner = f"{pad}    "
+            lines = [f"{pad}{name} = ("]
+            lines += _operand_lines(parts[0], inner, "")
+            for part in parts[1:]:
+                lines += _operand_lines(part, inner, f"{word} ")
+            return [*lines, f"{pad})"]
     return None
+
+
+def _operand_lines(text: str, pad: str, lead: str) -> list[str]:
+    """Return one operand of a split expression, split again if it is too long.
+
+    Only a parenthesized operand can be: its brackets already continue it
+    across lines, and it splits at its own top-level ``or`` or ``and``.
+    """
+    line = f"{pad}{lead}{text}"
+    if len(line) <= LINE_LENGTH or not _enclosed(text):
+        return [line]
+    inner = text[1:-1]
+    for operator in (" or ", " and "):
+        parts = _top_level_split(inner, operator)
+        if len(parts) > 1:
+            word = operator.strip()
+            deeper = f"{pad}    "
+            lines = [f"{pad}{lead}("]
+            lines += _operand_lines(parts[0], deeper, "")
+            for part in parts[1:]:
+                lines += _operand_lines(part, deeper, f"{word} ")
+            return [*lines, f"{pad})"]
+    return [line]
+
+
+def _enclosed(text: str) -> bool:
+    """Whether ``text`` is one parenthesized group, its first bracket closing last."""
+    if not (text.startswith("(") and text.endswith(")")):
+        return False
+    depth, index, quote = 0, 0, ""
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == "\\":
+                index += 1
+            elif char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+            if depth == 0 and index < len(text) - 1:
+                return False
+        index += 1
+    return True
 
 
 def _one_line_doc(text: str, fallback: str) -> str:
@@ -951,10 +1001,17 @@ def _expr(expr: Expr, binding: Binding, limit: int) -> str:
     if isinstance(expr, Ref):
         return binding.render(expr.path)
     if isinstance(expr, UnaryOp):
+        if expr.op == "not" and isinstance(expr.operand, BoolOp):
+            negated = _membership(expr.operand, binding, negate=True)
+            if negated is not None:
+                return _group(negated, PRECEDENCE["=="], limit)
         level = PRECEDENCE["not"] if expr.op == "not" else UNARY_PRECEDENCE
         space = " " if expr.op == "not" else ""
         return _group(f"{expr.op}{space}{_expr(expr.operand, binding, level)}", level, limit)
     if isinstance(expr, BoolOp):
+        membership = _membership(expr, binding)
+        if membership is not None:
+            return _group(membership, PRECEDENCE["=="], limit)
         level = PRECEDENCE[expr.op]
         joined = f" {expr.op} ".join(_expr(operand, binding, level) for operand in expr.operands)
         return _group(joined, level, limit)
@@ -1005,6 +1062,33 @@ def _binary(expr: BinOp, binding: Binding, limit: int) -> str:
 def _safe_shift(count: Expr) -> bool:
     """Whether a shift count is a literal the runtime's bound already allows."""
     return isinstance(count, IntLiteral) and 0 <= count.value <= MAX_SHIFT
+
+
+def _membership(expr: BoolOp, binding: Binding, *, negate: bool = False) -> str | None:
+    """Render one value compared with several literals as a membership test.
+
+    ``x == 'a' or x == 'b'`` is ``x in ('a', 'b')``, and ``x != 'a' and x !=
+    'b'`` is ``x not in ('a', 'b')``: the same answer, the value computed
+    once, and what ``ruff`` asks a reader to write (PLR1714). ``negate`` is
+    for a ``not`` around it, which flips the test rather than preceding it
+    (E713). ``None`` when the operands are anything else.
+    """
+    wanted = "==" if expr.op == "or" else "!="
+    lefts: set[str] = set()
+    rights: list[str] = []
+    for operand in expr.operands:
+        if not (
+            isinstance(operand, Compare)
+            and operand.op == wanted
+            and isinstance(operand.right, (IntLiteral, StrLiteral))
+        ):
+            return None
+        lefts.add(_expr(operand.left, binding, PRECEDENCE["=="] + 1))
+        rights.append(_expr(operand.right, binding, PRECEDENCE["=="] + 1))
+    if len(lefts) != 1 or len(rights) < 2:
+        return None
+    test = "in" if (wanted == "==") != negate else "not in"
+    return f"{lefts.pop()} {test} ({', '.join(rights)})"
 
 
 def _group(text: str, level: int, limit: int) -> str:
@@ -1192,6 +1276,9 @@ class _Function:
         self.delta = 0
         #: Which field is being rendered, for the expressions inside it.
         self.index_of = 0
+        #: The local holding a transform's name, when a switch chose it
+        #: (:meth:`chosen`); ``None`` when the name is the spec's literal.
+        self.transform_name: str | None = None
 
     # --- where the reads are ------------------------------------------------
 
@@ -1747,17 +1834,15 @@ class _Function:
         self.settle(4)
         self.index_of = index
         condition = self.evaluate(item.condition, 4)
+        if target is not None and item.name is not None:
+            # Written before the test rather than in an `else`: absent, not
+            # empty, it read nothing and cites nothing, and the test's branch
+            # overwrites all three when the field is there.
+            self.emit(f"    {target} = None")
+            self.emit(f"    _s_{target} = _e_{target} = {ORIGIN}")
         self.emit(f"    if {condition}:")
         self.present(index, item, target, 8)
         self.settle(8)
-        if target is not None and item.name is not None:
-            self.emit("    else:")
-            self.emit("        # Absent, not empty: it read nothing, so it cites nothing.")
-            self.emit(f"        {target} = None")
-            self.emit(f"        _s_{target} = _e_{target} = {ORIGIN}")
-        elif target is None:
-            self.emit("    else:")
-            self.emit("        pass")
 
     def segment(self, item: FieldPlan, index: int) -> str:
         """Return the path segment one field adds, as a Python expression.
@@ -1800,6 +1885,17 @@ class _Function:
         # where exactly one branch is left, the two tests fold into one, which
         # is both what a reader would write and what `ruff` insists on.
         writing = [branch for branch in item.branches if branch.type.kind is not Kind.OBJECT]
+        if len(writing) == len(item.branches) > 1:
+            # Every branch writes: when every one writes the same record, as a
+            # body read two ways does, it is one record and not a switch.
+            rendered = [
+                self.rendered(index, branch.type, target, role, start, end, indent + 4)
+                for branch in writing
+            ]
+            if all(lines == rendered[0] for lines in rendered):
+                self.emit(f"{pad}if _sink is not None:")
+                self.lines.extend(rendered[0])
+                return
         if len(writing) == 1 and writing[0].case is not None:
             test = f"_selector == {_literal(writing[0].case)}"
             self.emit(f"{pad}if _sink is not None and {test}:")
@@ -1815,6 +1911,25 @@ class _Function:
             self.record(index, branch.type, target, role, start, end, indent + 8)
             keyword = "elif"
 
+    def rendered(
+        self,
+        index: int,
+        value: ValueType,
+        local: str,
+        role: str,
+        start: str,
+        end: str,
+        indent: int,
+    ) -> list[str]:
+        """Return what :meth:`record` would emit, without emitting it."""
+        kept = self.lines
+        self.lines = []
+        try:
+            self.record(index, value, local, role, start, end, indent)
+            return self.lines
+        finally:
+            self.lines = kept
+
     def record(
         self,
         index: int,
@@ -1826,7 +1941,6 @@ class _Function:
         indent: int,
     ) -> None:
         """Emit one ``sink.record`` call, with everything known baked into it."""
-        pad = " " * indent
         if value.source is None and value.expr is not None:
             # A computed only. A select carries an ``expr`` too, but its span
             # locals already hold the element it chose — where `cites` would
@@ -1836,10 +1950,8 @@ class _Function:
             # The one payload a compiler cannot bake: nothing declares the width
             # of a computed integer, so it is sized by its value — and a value
             # too wide for the vocabulary gets no record at all.
-            self.emit(f"{pad}_labelled = prim_int({local})")
-            self.emit(f"{pad}if _labelled is not None:")
             self.lines.extend(
-                _call("_sink.record", ["*_labelled", start, end, role], indent + 4)
+                _call("record_int", ["_sink", local, start, end, role], indent)
             )
             return
         payload = payload_of(value, local)
@@ -1996,10 +2108,10 @@ class _Function:
             # from. A concat and a transform likewise cite what they read.
             self.emit(f"{pad}_s_{target}, _e_{target} = _cite_{target}")
         elif some:
-            self.emit(f"{pad}if _cite_{target} is None:")
-            self.emit(f"{pad}    _e_{target} = {self.end()}")
-            self.emit(f"{pad}else:")
-            self.emit(f"{pad}    _s_{target}, _e_{target} = _cite_{target}")
+            own = f"(_s_{target}, {self.end()})"
+            self.emit(f"{pad}_s_{target}, _e_{target} = (")
+            self.emit(f"{pad}    {own} if _cite_{target} is None else _cite_{target}")
+            self.emit(f"{pad})")
         else:
             self.emit(f"{pad}_e_{target} = {self.end()}")
         if item.repeat is None and not self.container(item):
@@ -2275,6 +2387,17 @@ class _Function:
             return
         self.index_of = index
         self.emit(f"{pad}_selector = {self.evaluate(item.selector, indent)}")
+        chosen = self.chosen(item)
+        if chosen is not None:
+            names, default = chosen
+            self.emit(f"{pad}_name = {names}.get(_selector, {_literal(default.transform.name)})")
+            self.transform_name = "_name"
+            try:
+                self.read(index, default, target, indent, path)
+            finally:
+                self.transform_name = None
+            self.settle(indent)
+            return
         keyword = "if"
         for branch in item.branches:
             if branch.case is None:
@@ -2298,6 +2421,35 @@ class _Function:
             f"{self.stopped()})"
         )
         self.delta = 0
+
+    def chosen(self, item: FieldPlan) -> tuple[str, ValueType] | None:
+        """Return a switch of transforms as a lookup of the name, if it is one.
+
+        A content coding is the common case: every branch runs the same source
+        through a different transform, and nothing else differs. That is one
+        call with the name looked up, rather than a branch per coding, which
+        keeps a unit that decodes several codings under the branch limit
+        generated code is linted to. Only with a default, since without one an
+        unmatched value is a failure of its own.
+
+        Returns:
+            The rendered mapping from case to name, and the default's type;
+            ``None`` if the switch is anything else.
+
+        """
+        default = next((b.type for b in item.branches if b.case is None), None)
+        if default is None or default.transform is None:
+            return None
+        pairs = []
+        for branch in item.branches:
+            plan = branch.type.transform
+            if plan is None or replace(
+                branch.type, transform=replace(plan, name=default.transform.name)
+            ) != default:
+                return None
+            if branch.case is not None:
+                pairs.append(f"{_literal(branch.case)}: {_literal(plan.name)}")
+        return f"{{{', '.join(pairs)}}}", default
 
     def constant_mark(self, item: FieldPlan, indent: int) -> str | None:
         """Emit the local holding where a field carrying a ``const`` begins.
@@ -2386,13 +2538,7 @@ class _Function:
         self.sized(index, value, raw, indent)
         if value.kind is Kind.TEXT and target is not None:
             encoding = _literal(value.encoding or "utf-8")
-            self.emit(f"{pad}try:")
-            self.emit(f"{pad}    {target} = _raw.decode({encoding})")
-            self.emit(f"{pad}except UnicodeDecodeError:")
-            self.emit(f"{pad}    # A malformed string is a fact about the input, not a")
-            self.emit(f"{pad}    # failure of the decoder: §3.2. The bytes are accounted")
-            self.emit(f"{pad}    # for either way, so the region stays decoded.")
-            self.emit(f'{pad}    {target} = _raw.decode({encoding}, errors="replace")')
+            self.emit(f"{pad}{target} = decode_text(_raw, {encoding})")
 
     def joined(self, index: int, value: ValueType, target: str, indent: int) -> None:
         """Emit a ``concat``: one field of every element, joined, citing their hull.
@@ -2465,7 +2611,7 @@ class _Function:
                 target=f"_cite_{target}",
             )
         )
-        name = _literal(plan.name)
+        name = self.transform_name or _literal(plan.name)
         call = [name, f"TRANSFORMS[{name}]", source, f"limit={plan.limit}"]
         if plan.args:
             # Evaluated here, where the fields are; a failure is the transform's,
@@ -2506,22 +2652,38 @@ class _Function:
             over.append(f"role={self.segment(field, field_index)}")
         joins = [] if field is None else [kind.concat is not None for kind in field.types]
         if source_local is not None and not all(joins or [False]):
-            # Where a switch may have joined, `_cite_` says whether it did.
-            named = f"(_s_{source_local}, _e_{source_local})"
-            if any(joins):
-                named = f"{named} if _cite_{source_local} is None else None"
-            over.append(f"source={named}")
+            over.append(f"source=(_s_{source_local}, _e_{source_local})")
         if field is not None and any(joins):
-            members = self.members(index, field)
-            if not all(joins):
-                members = f"{members} if _cite_{source_local} is not None else None"
-            over.append(f"members={members}")
+            over.append(f"members={self.members(index, field)}")
+            # Where a switch may have joined, `_cite_` says whether it did.
+            joined = "True" if all(joins) else f"_cite_{source_local} is not None"
+            over.append(f"joined={joined}")
         if not self.emits(self.obj.fields[index]):
             over.append("skipped=True")
         elif not plan.typed:
             content = _literal(plan.content_type or "prim:bytes")
             over.append(f"record=({content}, {role}, _cite_{target})")
+        spoken = self.spoken(plan)
+        if spoken:
+            over.append(f"spoken=({', '.join(spoken)},)")
         self.lines.extend(_call("take_over", ["_sink", *over], indent))
+
+    def spoken(self, plan: TransformPlan) -> list[str]:
+        """Return the ranges of the argument fields marked ``emit: none``.
+
+        They are ``skipped`` where they stand, and an output that succeeded
+        cites them, so :func:`kober.runtime.take_over` takes the regions back.
+        """
+        ranges: list[str] = []
+        for _, expr in plan.args:
+            for ref in references(expr):
+                item = self.obj.field(ref.path[0])
+                if item is None or not self.skips(item):
+                    continue
+                local = self.local_of(item, self.obj.fields.index(item))
+                if local is not None and f"_s_{local}" in self.spans:
+                    ranges.append(f"(_s_{local}, _e_{local})")
+        return ranges
 
     def members(self, index: int, field: FieldPlan) -> str:
         """Return what a concat source joined, as :func:`kober.runtime.take_over` takes it.
@@ -2800,10 +2962,10 @@ class _Function:
         pad = " " * indent
         self.index_of = index
         rendered = self.evaluate(size.expr, indent)
-        self.emit(f"{pad}_want = {rendered}")
-        if not self.provable(size.expr):
-            self.emit(f"{pad}if _want < 0:")
-            self.emit(f'{pad}    raise Undecodable(f"negative size {{_want}}", {self.stopped()})')
+        if self.provable(size.expr):
+            self.emit(f"{pad}_want = {rendered}")
+        else:
+            self.emit(f"{pad}_want = size_of({rendered}, {self.stopped()})")
         start = self.byte()
         room = f"_size - {start}" if start == ANCHOR else f"_size - ({start})"
         self.emit(f"{pad}if {room} < _want:")

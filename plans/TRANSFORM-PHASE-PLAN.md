@@ -1503,6 +1503,70 @@ two there were.
 - `CHANGELOG.md` under `Unreleased`, then `0.5.0`: a minor bump for new
   spec keys, and `Breaking:` only if `content_registry`'s signature changes.
 
+**Done, 2026-09-27.**
+
+- **`examples/http.yaml` inflates its content.** `body` is one switch on a new
+  `framing` select, `concat: chunks.data` or a counted read, and `content` a
+  switch on `encoding` over `deflate` and, by default, `gzip` (the condition
+  admits `gzip`, `x-gzip` and `deflate`, and only when there is a body, so a
+  `304` or a `HEAD` reply inflates nothing). `chunked` is computed from
+  `framing`, which reads two `Transfer-Encoding` headers as one list. `br` is
+  not decoded: declaring it would stop the spec from running where nothing
+  binds it. Message-granularity output is unchanged; at field granularity each
+  message gains `framing` and `encoding` records, a chunked one a joined
+  `body`, and an inflated body is replaced by its `content`.
+- **The generated module passed its branch limit**, at 28 against 20: the
+  message unit sat at exactly 20 before. Adam chose generator changes over
+  splitting the spec, which would have renamed every HTTP role. An absent
+  field is assigned before its condition; identical per-branch records are
+  written once; the span of a switch that may have joined is a conditional
+  expression; a size check, a text decode and a value-sized integer record are
+  runtime calls; and a switch of one transform under different names is one
+  call with the name looked up. It is at 19. Long nested conditions split
+  inside their brackets, and one value against several literals renders as a
+  membership test, which `ruff` asks for.
+- **Two bugs.** `message_tail_fields` did not see through a switch of
+  transforms, so #49's resume stopped working for length-framed bodies the
+  moment `content` was added; a switch whose every case reads nothing now
+  reads nothing. And an argument field marked `emit: none` was `skipped` under
+  the plaintext that cites it, found by writing the two-stage tunnel: the
+  output of a transform that succeeded now speaks for it, in both backends
+  (`Held.withdraw`, `take_over(spoken=…)`).
+- **The tunnel** is a test spec rather than an example, since it needs a
+  caller's cipher: `QUIET_TUNNEL` in `tests/test_stage_transforms.py`, whose
+  first stage writes one plaintext per datagram and whose second stage reads
+  them, conformant with full coverage, corrupting the first or the third.
+- **The pipeline** checks each `http.content` record against the SHA-256 of a
+  document that was compressed: 25 of 25 without loss, 21 with, every one
+  genuine. Every other HTTP output changed only as described above.
+- **Docs**: `concepts.md` gains *A second offset space* and the confirmation
+  rule; *cannot say* now names state between messages. The name table was
+  already reference documentation beside the types (Stage 5). `DESIGN.md`'s
+  revision 12 grew rather than a revision 13, since it is one release.
+  `decisions.md`, `architecture.md` (the seam test held: the field loop is
+  unchanged and the unit loop gained one line), `expressions.md` and
+  `document.md` are brought up to date. **packeteer 0.16.0 refuses the new
+  `http.yaml` at load**: it knows neither `transform` nor `concat`, and its
+  switch cases are integers. Filed as packeteer#170 and #171.
+
+### Acceptance, as it stands
+
+1. Holds: the pipeline's `gzip_clean` and `gzip_lossy`, both granularities,
+   both backends, conformant and coverage-clean.
+2. Holds: `test_a_tunnel_feeds_a_second_stage_one_plaintext_per_datagram`
+   (first and third corrupt) and `test_a_tunnel_with_the_wrong_key_is_declined_saying_so`.
+3. Holds, with one qualification. Files are identical block for block,
+   `params_digest` and comments included. `tests/compiled_dns.py` no longer
+   regenerates to an empty diff, because the generator's output changed on
+   purpose (fewer branches); DNS output is unchanged apart from its digest.
+4. Holds (Stage 7).
+5. Holds: see `architecture.md`.
+6. Holds (Stage 2).
+7. Holds: the name table in `types.md` states the tiers and each name's
+   reference, and every backend is to bind the core three.
+8. Holds (Stage 3): `br` fails before any input, saying this backend does not
+   bind it, and `check` without a target passes.
+
 ## What this phase does not do
 
 - **Stateful transforms** (Q8). TLS 1.3 nonces, deflate with context

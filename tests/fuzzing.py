@@ -26,6 +26,7 @@ a story about a run that happened once.
 
 from __future__ import annotations
 
+import gzip
 import random
 import struct
 import zlib
@@ -66,9 +67,39 @@ HTTP_COUNTED = (
     b'{"id": 89163, "ok": false}'
 )
 
+_HTML = b"<html><body>hello, inflated world</html>"
+_GZIPPED = gzip.compress(_HTML, mtime=0)
+_DEFLATED = zlib.compress(_HTML)
+
+#: A gzip body framed by its length, and a deflate one in chunks: the two
+#: ways `examples/http.yaml` reaches its `content`. A mutation of either body
+#: almost always fails to inflate, so the transform fails far more often than
+#: not, and a mutation of the headers leaves it inflating.
+HTTP_GZIPPED = (
+    b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: "
+    + str(len(_GZIPPED)).encode()
+    + b"\r\n\r\n"
+    + _GZIPPED
+)
+HTTP_DEFLATED_CHUNKED = (
+    b"HTTP/1.1 200 OK\r\nContent-Encoding: deflate\r\nTransfer-Encoding: chunked\r\n\r\n"
+    + b"%x\r\n" % 9
+    + _DEFLATED[:9]
+    + b"\r\n"
+    + b"%x\r\n" % (len(_DEFLATED) - 9)
+    + _DEFLATED[9:]
+    + b"\r\n0\r\n\r\n"
+)
+
 #: Every framing arm the shipped example chooses between, so a sweep covers the
-#: choice and not only one side of it.
-HTTP_FRAMINGS: tuple[bytes, ...] = (HTTP_REQUEST, HTTP_CHUNKED, HTTP_COUNTED)
+#: choice and not only one side of it, and both ways it inflates a body.
+HTTP_FRAMINGS: tuple[bytes, ...] = (
+    HTTP_REQUEST,
+    HTTP_CHUNKED,
+    HTTP_COUNTED,
+    HTTP_GZIPPED,
+    HTTP_DEFLATED_CHUNKED,
+)
 
 #: A real DNS response, from `python-zipline-wire`'s ``dns_example.pcapng``.
 #: Its answer's owner name is ``c0 0c`` — the compression pointer of RFC 1035
@@ -304,7 +335,7 @@ def framing_cases(seed: int) -> list[bytes]:
         seed: Which batch.
 
     Returns:
-        The batch, the three seeds' variants interleaved in a fixed order.
+        The batch, each seed's variants in a fixed order.
 
     """
     out: list[bytes] = []

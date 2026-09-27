@@ -398,7 +398,7 @@ is why it is not in the table above.
 
 Since packeteer 0.13.0 the two dialects share one spelling: it renamed its
 switch key to `dispatch` and took kober's shorthands, so a spec from either
-repository loads in the other. What does *not* cross is now the mirror image
+repository loads in the other, with the exceptions kober 0.5.0 added below. What does *not* cross is now the mirror image
 of the table above — constructs of kober's that packeteer reads and declines by
 name, since it builds messages as well as reads them and several of these have
 no encoding — and two places where the same key is accepted differently.
@@ -409,10 +409,13 @@ direction.
 `pointer`, `select`, `computed`, delimiter framing in either spelling
 (`{terminated: …}` and `{string: {delimiter: …}}`), the `until` and `to_end`
 repeats, unit `params` and `args`, unit `confirm` and `reject`, `emit` at every
-level, and a recursive unit. On `examples/dns.yaml` that is four named errors;
-on `examples/http.yaml` it is every one of the fourteen fields, plus type
-errors where a condition reads a `select` result, since a construct it does
-not model has no type there.
+level, and a recursive unit. On `examples/dns.yaml` that is four named errors.
+
+**Refused by packeteer at load**, so the spec does not load there at all:
+`transform` and `concat`, which it does not know as keys, and a `switch` with a
+string case, since its cases are integers. `examples/http.yaml` has all three
+since kober 0.5.0, which is when it began to inflate its bodies; before that,
+packeteer loaded it and declined each of its fields by name.
 
 **`input: stream` is refused unless the entry unit has exactly one field
 deriving `size_of`** — packeteer decodes one packet at a time and needs the

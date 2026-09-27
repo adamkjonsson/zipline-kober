@@ -35,6 +35,7 @@ from kober.ops import Plan
 from kober.pygen import (
     Binding,
     Names,
+    _wrapped,
     render,
     render_enums,
     render_expr,
@@ -711,6 +712,36 @@ def test_a_text_builtin_renders_to_the_method_that_means_the_same(
     assert render_expr(parse(source), binding) == expected
 
 
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("a == 1 or a == 2", "a in (1, 2)"),
+        ("a != 1 and a != 2", "a not in (1, 2)"),
+        ("(a == 1 or a == 2) and p", "a in (1, 2) and p"),
+        ("not (a == 1 or a == 2)", "a not in (1, 2)"),
+        ("not (a != 1 and a != 2)", "a in (1, 2)"),
+        ("a == 1 or b == 2", "a == 1 or b == 2"),
+        ("a == 1 or a == b", "a == 1 or a == b"),
+        ("a == 1 and a == 2", "a == 1 and a == 2"),
+    ],
+)
+def test_one_value_against_several_literals_is_a_membership_test(source: str, expected: str):
+    """What `ruff` asks a reader to write (PLR1714), and only when it is that."""
+    assert rendered(source) == expected
+
+
+def test_a_long_condition_splits_inside_its_brackets_too():
+    """A nested `or` too long for its line continues within its own brackets."""
+    lines = _wrapped(
+        "p and (" + " or ".join(f"a == {n} or b == {n}" for n in range(9)) + ")", "    ", "_v"
+    )
+    assert lines is not None
+    assert all(len(line) <= 100 for line in lines), lines
+    assert eval("\n".join(line[4:] for line in lines).replace("_v = (", "(", 1), {}, {
+        "p": True, "a": 5, "b": 0
+    })
+
+
 # --- the same answers as the interpreter -----------------------------------
 
 EXPRESSIONS = [
@@ -741,6 +772,12 @@ EXPRESSIONS = [
     "b != 0 and a / b > 1",
     "a > 0 or a / 0 > 1",
     "(a > b) == p",
+    "a == 7 or a == 0 or a == -1",
+    "a != 7 and a != 0",
+    "a == 7 or b == 0",
+    "(a == 7 or a == 5) and b != 0",
+    "not (a == 0 or a == 1)",
+    "not (a != 0 and a != 1) or q",
 ]
 
 CASES = [

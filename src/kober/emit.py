@@ -398,6 +398,11 @@ def _transform(
     hull also covers the framing between them. So the members are what is
     taken over: on failure each member's record is taken back and each
     non-empty member named, and the framing keeps its records.
+
+    An argument field marked ``emit: none`` is ``skipped`` where it stands,
+    and the output of a transform that succeeded cites it (*Decided* 3): so
+    the output speaks for it, and its region is taken back. Otherwise its
+    bytes would be both cited and undecoded.
     """
     kind = node.resolved_type
     source = parent.find(kind.source) if isinstance(kind, Transform) else None
@@ -411,6 +416,18 @@ def _transform(
         elif source.width > 0 and cite is None:
             unclaimed.append(Unclaimed(source.off_start, source.off_end, reason.value))
         return
+    if isinstance(kind, Transform):
+        spoken = {
+            (argument.off_start, argument.off_end, NodeStatus.SKIPPED.value)
+            for expr in kind.args.values()
+            for ref in references(expr)
+            if (argument := parent.find(ref.path[0])) is not None
+        }
+        unclaimed[:] = [
+            region
+            for region in unclaimed
+            if (region.off_start, region.off_end, region.reason) not in spoken
+        ]
     outer = cite if cite is not None else (node.off_start, node.off_end)
     if node.children:
         _walk(spec, node, path, granularity, emissions, unclaimed, outer)

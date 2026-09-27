@@ -81,17 +81,20 @@ __all__ = [
     "bind_transforms",
     "cited",
     "concat",
+    "decode_text",
     "document_params",
     "first_failed",
     "normalize_int",
     "params_digest",
     "prim_int",
+    "record_int",
     "prim_token",
     "read_int_le",
     "run_transform",
     "take_over",
     "shift_left",
     "shift_right",
+    "size_of",
     "span",
     "to_int",
 ]
@@ -345,6 +348,18 @@ class Held:
                 del self._writes[index]
                 return
 
+    def withdraw(self, off_start: int, off_end: int, reason: str) -> None:
+        """Take back the last region kept for exactly this range, if there is one.
+
+        What a transform that succeeded does to an argument field marked
+        ``emit: none``: its output cites those bytes, so they are not skipped.
+        """
+        for index in range(len(self._writes) - 1, -1, -1):
+            tag, write = self._writes[index]
+            if tag == "region" and write == (off_start, off_end, reason):
+                del self._writes[index]
+                return
+
     def release(self) -> None:
         """Write everything kept, in the order it was written."""
         for tag, write in self._writes:
@@ -451,6 +466,68 @@ def first_failed(value: object) -> str | None:
     return None
 
 
+def record_int(
+    sink: Sink, value: int, off_start: int, off_end: int, role: str | None
+) -> None:
+    """Record an integer nothing declared the width of, sized by its value.
+
+    A value too wide for the vocabulary gets no record at all
+    (:func:`prim_int`).
+
+    Args:
+        sink: Where the record goes.
+        value: The integer.
+        off_start: First input byte it cites.
+        off_end: One past the last.
+        role: Its field path.
+
+    """
+    labelled = prim_int(value)
+    if labelled is not None:
+        sink.record(*labelled, off_start, off_end, role)
+
+
+def size_of(want: int, at: int) -> int:
+    """Return a size an expression computed, or refuse a negative one.
+
+    Args:
+        want: The size.
+        at: Where the decode stands, for the failure.
+
+    Returns:
+        ``want``.
+
+    Raises:
+        Undecodable: If it is negative, worded as the interpreter words it.
+
+    """
+    if want < 0:
+        msg = f"negative size {want}"
+        raise Undecodable(msg, at)
+    return want
+
+
+def decode_text(raw: bytes, encoding: str) -> str:
+    """Decode a string's bytes, replacing what does not decode.
+
+    A malformed string is a fact about the input, not a failure of the
+    decoder (``DESIGN.md`` §3.2): its bytes are accounted for either way, so
+    the region stays decoded.
+
+    Args:
+        raw: The bytes read.
+        encoding: The spec's encoding.
+
+    Returns:
+        The text.
+
+    """
+    try:
+        return raw.decode(encoding)
+    except UnicodeDecodeError:
+        return raw.decode(encoding, errors="replace")
+
+
 def concat(
     elements: Sequence[Spanned] | None,
     member: str,
@@ -498,8 +575,10 @@ def take_over(
     role: str | None = None,
     source: tuple[int, int] | None = None,
     members: tuple[Sequence[Spanned] | None, str, str, str] | None = None,
+    joined: bool = False,
     skipped: bool = False,
     record: tuple[str, str | None, tuple[int, int]] | None = None,
+    spoken: Sequence[tuple[int, int]] = (),
 ) -> None:
     """Write what a transform's outcome says about its source (*Decided* 1).
 
@@ -513,14 +592,20 @@ def take_over(
         value: What the transform produced: its output, or a
             :class:`TransformFailed`.
         role: The source's record to take back, if it has one.
-        source: The source's range to name, or ``None`` for a concat.
-        members: For a concat, what it joined: the repetition's elements,
-            the member's attribute, the repetition's path and the member's
-            name. A concat has no bytes of its own, and its range covers the
-            framing between its members, so on failure each member's record
-            is taken back and each non-empty member named instead.
+        source: The source's range, named when it was read where it stands.
+        members: For a source that may be a concat, what it would join: the
+            repetition's elements, the member's attribute, the repetition's
+            path and the member's name. A concat has no bytes of its own, and
+            its range covers the framing between its members, so on failure
+            each member's record is taken back and each non-empty member
+            named instead.
+        joined: Whether the source was a concat this time, so ``members``
+            are named rather than ``source``. A switch decides it per message.
         skipped: Whether the transform is ``emit: none``.
         record: For a type-less output: its content type, role and citation.
+        spoken: The ranges of argument fields marked ``emit: none``. They were
+            named ``skipped`` where they stand; an output that succeeded cites
+            them, so those regions are taken back.
 
     """
     if sink is None:
@@ -529,15 +614,18 @@ def take_over(
         sink.retract(role)
     failed = isinstance(value, TransformFailed)
     reason = "skipped" if skipped else "undecodable"
-    if source is not None and source[1] > source[0] and (failed or skipped):
-        sink.undecoded(*source, reason)
-    if members is not None and (failed or skipped):
+    if (failed or skipped) and joined and members is not None:
         elements, attribute, path, name = members
         for index, element in enumerate(elements or ()):
             sink.retract(f"{path}[{index}].{name}")
             start, end = span(element, attribute)
             if end > start:
                 sink.undecoded(start, end, reason)
+    elif (failed or skipped) and source is not None and source[1] > source[0]:
+        sink.undecoded(*source, reason)
+    if not failed and not skipped:
+        for start, end in spoken:
+            sink.withdraw(start, end, "skipped")
     if record is not None and not failed and not skipped:
         content_type, output_role, cite = record
         sink.record(value, content_type, *cite, output_role)

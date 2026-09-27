@@ -159,9 +159,10 @@ decision down before it is one is how a document starts lying:
 5. How far the spec language goes before it becomes a program. The one that has
    moved most: `Pointer`, a closed table of three functions, and `Select` have
    all landed on the near side, each closing a real gap by making the
-   *declarative* language say more. Hooks stay on the far side, and now have a
-   concrete case waiting for them — byte transforms, which no closed table can
-   hold.
+   *declarative* language say more. Hooks stay on the far side. Byte
+   transforms, which no closed table can hold, landed in 0.5.0 in the shape
+   §11.5 describes: the spec names a transform and a registry supplies it,
+   given bytes and returning bytes, so `check` stays static.
 6. *(Closed — `Select` answers it.)*
 
 ## What is owed, and is not a question
@@ -169,11 +170,11 @@ decision down before it is one is how a document starts lying:
 One thing is decided in outline and simply not built, which is a different
 state from either of the above and worth not confusing with them:
 
-- **Byte transforms** — decompression and decryption. The shape is settled in
-  §11.5: the spec *names* a transform and a registry supplies it, so the spec
-  file stays data and `check` stays static. `examples/http.yaml` has a
-  `Content-Encoding: gzip` body it deliberately leaves opaque, and
-  `http_gzip.pcap` is the fixture kept for it.
+- **Transforms that keep state between messages** — TLS 1.3's per-connection
+  nonce counter, deflate with context takeover, HPACK's dynamic table. A
+  transform runs per message, as the step that decodes one does. A
+  stream-scoped instance, made once per stream by the registry, is the natural
+  extension, and nothing in 0.5.0 makes it harder (`DESIGN.md` §11.5).
 
 `Transfer-Encoding: gzip, chunked` was the second, until `startswith` and
 `endswith` joined the expression language (#50); `examples/http.yaml` now

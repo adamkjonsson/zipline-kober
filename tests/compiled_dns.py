@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar
 
-from kober.runtime import Cursor, Sink, Stopped, TruncatedRead, Undecodable
+from kober.runtime import Cursor, Sink, Stopped, TruncatedRead, Undecodable, decode_text
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -960,13 +960,7 @@ def _decode_label(
         _raw = _data[_at + 1:_at + 1 + _want]
         _at = _at + 1 + _want
         _b = _base + _at
-        try:
-            rest = _raw.decode("utf-8")
-        except UnicodeDecodeError:
-            # A malformed string is a fact about the input, not a
-            # failure of the decoder: §3.2. The bytes are accounted
-            # for either way, so the region stays decoded.
-            rest = _raw.decode("utf-8", errors="replace")
+        rest = decode_text(_raw, "utf-8")
     elif _selector == 3:
         rest, _at = _decode_compressed(
             _data,

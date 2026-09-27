@@ -168,10 +168,11 @@ no method on a value, no import. It has no substring, no search, and no loop.
 
 **A byte transform is not a candidate for the table.** Decompression and
 decryption map bytes to bytes and feed a sub-decode with its own offset space,
-where a function here maps one value to another. They need an extension point
-of their own — see `DESIGN.md` §11 — and adding one as a third row would cost
-`check` its static answer, since a spec's validity would then depend on what a
-caller had registered.
+where a function here maps one value to another. They have a field type of
+their own, [`transform`](types.md#transform), whose names a registry binds
+when a decoder is built. As a row here they would have cost `check` its
+static answer, since a spec's validity would then depend on what a caller had
+registered.
 
 ## Decode-time failure
 

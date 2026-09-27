@@ -436,6 +436,18 @@ def starved_fields(spec: Spec) -> dict[tuple[str, int], Starved]:
 _READS_NOTHING = (Computed, Select, Pointer, Concat, Transform)
 
 
+def _reads_nothing(kind: FieldType) -> bool:
+    """Whether a field of this type reads nothing where it stands.
+
+    A switch reads nothing when none of its cases does: a transform chosen by
+    the content coding, say.
+    """
+    if isinstance(kind, Switch):
+        cases = (*kind.cases.values(), kind.default)
+        return all(case is None or _reads_nothing(case) for case in cases)
+    return isinstance(kind, _READS_NOTHING)
+
+
 def message_tail_fields(spec: Spec) -> frozenset[tuple[str, int]]:
     """Return the fields after which nothing in the message reads a byte.
 
@@ -464,7 +476,7 @@ def message_tail_fields(spec: Spec) -> frozenset[tuple[str, int]]:
         item = unit.fields[index]
         if item.repeat is not None:
             return False
-        return all(isinstance(later.type, _READS_NOTHING) for later in unit.fields[index + 1 :])
+        return all(_reads_nothing(later.type) for later in unit.fields[index + 1 :])
 
     def references(kind: FieldType, tail_here: bool) -> Iterator[tuple[str, bool]]:
         if isinstance(kind, UnitRef):

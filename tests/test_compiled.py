@@ -31,6 +31,8 @@ import zpf
 from fuzzing import (
     CONST_SPEC,
     DNS_RESPONSE,
+    HTTP_DEFLATED_CHUNKED,
+    HTTP_GZIPPED,
     SEEDS,
     SELECT_MESSAGE,
     SELECT_SPEC,
@@ -100,6 +102,9 @@ HTTP_MESSAGES = [
     b"HTTP/1.1 204 No Content\r\nHost: h\r\n\r\n",
     b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
     b"POST / HTTP/1.1\r\nCONTENT-LENGTH:2\r\n\r\nhi",
+    HTTP_GZIPPED,
+    HTTP_DEFLATED_CHUNKED,
+    HTTP_GZIPPED[:-4] + b"oops",
 ]
 
 

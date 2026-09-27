@@ -234,17 +234,27 @@ read cleanly before the failure. Its bytes are named instead:
 | A hole in the capture | `gap` | As everywhere. |
 
 Every `undecodable` and `skipped` region of a declined stream carries a comment
-saying why, in one of two forms:
+saying why, in one of three forms:
 
 ```text
 not dns: no case for 7 and no default, stopped at offset 3
 not http: no message decoded; every attempt ran out of input
+not tunnel: every message that decoded had a transform fail; the first: xor: the transform raised ValueError
 ```
 
 The second is a stream that never failed outright, which is what plain text
 looks like to the HTTP spec: a start line whose line ending never arrives.
 Without the decline, that would be recorded as `truncated`, which says the
 capture had a hole where it had none.
+
+The third is about a [`transform`](types.md#transform). **A message whose
+transform failed neither confirms the stream nor declines it.** Its framing
+held, so it decoded whole and the stream goes on after it, but the transform
+is often a protocol's only real check of identity, a tag that verifies under
+the key, and its failing is evidence of neither. So the next message decides.
+A stream in which every message that decoded had a transform fail is declined
+at its end, saying so. That is what a wrong key looks like, and nothing in the
+bytes can tell it from a wrong protocol, so the comment says what was seen.
 
 Both reasons say the bytes **exist**, so a later stage, or another spec, can
 still read them. `skipped` says *declined*, `undecodable` says *tried and
@@ -317,6 +327,36 @@ It is also what lets kober retry after a refusal: a spec with a guard
 resynchronises after a gap, and one without only by luck.
 ```
 
+## A second offset space
+
+A [`transform`](types.md#transform) turns bytes already decoded into new ones:
+a body inflated, a datagram decrypted. What its `type` reads there is decoded
+from the output's first byte, in an **offset space of its own**, and nothing
+in the input stands at those offsets. In the decoded tree a node read there
+carries the transform's name as its {attr}`~kober.node.Node.space`, and its
+offsets are the output's.
+
+A file has only the input's offsets to cite, so it says less:
+
+- **Every record read from an output cites the transform's range in the
+  input**: its source, and every field its `args` read. Eight bytes of a
+  header field may cite the whole compressed body, since the body is what they
+  were computed from. The citation says *where this came from*, not *these
+  bytes are this value*.
+- **Nothing read from an output becomes a region.** A region names input bytes,
+  and an output has none. An output that does not decode fails the transform
+  as a whole.
+- **The transform speaks for its source.** The source is not written as a
+  record of its own when the output is; when the transform fails, the source's
+  bytes are `undecodable` and the message goes on. A `concat` source's bytes
+  are its members', so they are taken over one by one.
+
+So the output is in the file only through the records it produced. A consumer
+that wants it as bytes asks for a transform with no `type`: its output is one
+record, which a **second stage** reads like any other input. That is how a
+tunnel is decoded: the first stage decrypts each datagram into one plaintext
+record, and a spec for what was inside reads those.
+
 ## What a spec cannot say
 
 Worth knowing early, because each is a deliberate line rather than an omission.
@@ -331,6 +371,10 @@ Worth knowing early, because each is a deliberate line rather than an omission.
 - **Fields are read in the order written.** An expression may only name fields
   declared *before* it, because a later one has not been decoded yet. The
   checker enforces this before any data exists.
-- **Bytes are not transformed.** Decompression and decryption are not
-  expressible; a body that is gzipped decodes as the bytes it is. That is an
-  owed extension rather than a rule, and the reasoning is in `DESIGN.md` §11.5.
+- **A transform keeps nothing between messages.** Each runs over bytes one
+  message already decoded, and the next message starts afresh. So a whole
+  gzip body, a per-datagram cipher, or a TLS record whose nonce is in the record
+  or supplied as a parameter can be decoded; TLS 1.3's per-connection nonce
+  counter, WebSocket's `permessage-deflate` with context takeover, and HPACK's
+  dynamic table cannot. It is a line this version draws, and the reasoning is
+  in `DESIGN.md` §11.5.

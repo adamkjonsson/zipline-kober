@@ -28,6 +28,7 @@ It prints one line per check and exits non-zero if any failed.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import re
@@ -146,6 +147,9 @@ class Input:
             protocol's own direction and the other together, when that is
             known: over a lossy stream, no more start lines than this may be
             decoded.
+        inflates: Whether its bodies are `tools/gzip_http.py`'s compressed
+            documents: each ``http.content`` record must be one of them, and a
+            lossless capture must hold every one.
 
     """
 
@@ -153,6 +157,7 @@ class Input:
     protocol: str | None
     make: Callable[[Tools, Path], None]
     messages: int | None = None
+    inflates: bool = False
 
 
 def _fuzzed_dns(tools: Tools, out: Path) -> None:
@@ -254,8 +259,8 @@ INPUTS = (
     Input("dns_gen", "dns", _generated_dns),
     Input("http_gen", "http", _generated_http, messages=2 * HTTP_REQUESTS),
     Input("http_clean", "http", _clean_http),
-    Input("gzip_lossy", "http", _gzip_http, messages=GZIP_RESPONSES),
-    Input("gzip_clean", "http", _gzip_http_clean),
+    Input("gzip_lossy", "http", _gzip_http, messages=GZIP_RESPONSES, inflates=True),
+    Input("gzip_clean", "http", _gzip_http_clean, inflates=True),
     *(
         Input(name, "http" if name.startswith("http") else None, _capture(name))
         for name in CAPTURES
@@ -487,6 +492,33 @@ def _shape(report: Report, source: Input, path: Path, transport: Path, what: str
             ok = False
             detail += f"; {len(phantoms)} not a start line, e.g. {phantoms[0][:30]!r}"
         report.line(ok, f"{what} shape", detail)
+        if source.inflates:
+            _inflated(report, source, path, transport, what)
+
+
+def _inflated(report: Report, source: Input, path: Path, transport: Path, what: str) -> None:
+    """Check that every inflated body is a document that was sent, and how many were.
+
+    A digest is the whole claim: an `http.content` record that is not byte for
+    byte a document the generator compressed is a body inflated wrong. Without
+    loss every compressed body must be inflated; with loss, at least one, since
+    a body a gap cut is never read.
+    """
+    digests = []
+    with zpf.open(path) as handle:
+        for block in handle.blocks():
+            if isinstance(block, Record) and block.role == "http.content":
+                digests.append(hashlib.sha256(bytes(block.payload)).hexdigest())
+    _, responses = gzip_http.build(GZIP_RESPONSES, seed=7)
+    sent = {response.digest for response in responses if response.coding != "identity"}
+    compressed = sum(1 for response in responses if response.coding != "identity")
+    foreign = [digest for digest in digests if digest not in sent]
+    lossless = _reference_http(transport) is not None
+    ok = not foreign and (len(digests) == compressed if lossless else bool(digests))
+    detail = f"{len(digests)} bodies inflated, of {compressed} sent compressed"
+    if foreign:
+        detail += f"; {len(foreign)} not a document that was sent"
+    report.line(ok, f"{what} inflated", detail)
 
 
 def _compile(spec: Spec, name: str, emit: Emit, work: Path) -> ModuleType:

@@ -114,23 +114,26 @@ nothing.
 citation a sub-decode reports *is* the range it read. That is the identity
 case.
 
-**It was built with one more caller in mind, and that caller does not exist
-yet.** A byte transform — decompressing a `Content-Encoding: gzip` body,
-decrypting a TLS record — is the same shape with one variable changed: the
+**It was built with one more caller in mind, and since 0.5.0 that caller
+exists.** A byte transform — decompressing a `Content-Encoding: gzip` body,
+decrypting a datagram — is the same shape with one variable changed: the
 bytes come from somewhere else, and what a record cites is the input region it
 was *computed from* rather than a region holding it. The Zipline format already
 allows exactly that: a decoder MAY emit bytes that appear nowhere in its input,
 and `spans` asserts correspondence rather than identity.
 
 So the seam takes the bytes to read, the offset they start at, and the offset
-it may not read past. What a transform would add is not a fourth parameter but
+it may not read past. What a transform added was not a fourth parameter but
 a *vocabulary*: which codec, with what configuration, supplied by a registry
-rather than by the spec file (`DESIGN.md` §11.5). Nothing here anticipates that
-beyond the shape, and it should not — one caller exists.
+rather than by the spec file (`DESIGN.md` §11.5).
 
-The test that the seam was drawn in the right place is stated so it can be
-checked later: adding a transform should touch the byte source and the spec
-vocabulary, and **not** {mod}`kober.decoder`'s field or unit loops.
+The test that the seam was drawn in the right place was stated before the
+transform existed, so it could be checked after: adding one should touch the
+byte source and the spec vocabulary, and **not** {mod}`kober.decoder`'s field
+or unit loops. **It held.** The field loop is unchanged, and the unit loop
+changed by one line, which gives each unit's frame the document's parameters
+so an expression can name a key. Everything else is a new method and two new
+entries in the dispatch on a field's type.
 
 ## Design invariants
 

@@ -53,7 +53,11 @@ minor bump here too.
   `undecodable`, and `emit: none` names it `skipped`. A source that is a
   `concat` has no bytes of its own, so its members are taken over instead:
   each member's record is taken back and each non-empty member named, and a
-  chunked body's size lines keep their records. A message whose
+  chunked body's size lines keep their records. An argument field marked
+  `emit: none` names nothing when the transform succeeds, since the output
+  cites its bytes, and is `skipped` when it fails: that is what lets a
+  tunnel's first stage write one plaintext record per datagram, for a second
+  stage to read. A message whose
   transform failed neither confirms nor declines its stream, and a stream in
   which every message that decoded had one fail is declined saying so.
   `kober run` and `kober try` take `--param NAME=VALUE`, read as the declared
@@ -78,6 +82,19 @@ minor bump here too.
   and the message is still returned. A generated module carries `SPEC_DIGEST`,
   and `run_compiled` writes the same `params_digest` the interpreter would; a
   module compiled before it existed writes none.
+- **`examples/http.yaml` inflates the content** a `Content-Encoding` of
+  `gzip`, `x-gzip` or `deflate` compressed into the body, as a new field
+  `content`, framed by length or in chunks. `body` is now one field either
+  way: the chunks' data, joined, when the message is chunked. Two selects
+  join it, `framing` (`'chunked'` or `'length'`) and `encoding`, and `chunked`
+  is computed from `framing`. At field granularity each message writes a
+  `framing` and an `encoding` record, a chunked one a `body` record, and an
+  inflated body's record is replaced by its `content`; message-granularity
+  output is unchanged. A coding it does not decode (`br`, `zstd`, a list such
+  as `gzip, br`) leaves the body as it arrived, and a `304` or a `HEAD` reply
+  that names a coding but sends no body inflates nothing. Two
+  `Transfer-Encoding` headers are now read as one list, so a message with
+  `gzip` then `chunked` is chunked, as RFC 7230 §3.3.1 says.
 - **The Python binding for transforms**, `kober.transforms`
   ([#46](https://github.com/adamkjonsson/zipline-kober/issues/46)). A
   `Registry` binds names to callables; `Registry.standard()`, and the default
@@ -110,6 +127,9 @@ minor bump here too.
   guard has held, and `kober.errors.Refused`, which a generated module raises
   for that refusal. Both are re-exported from `kober`. `Held.retract(role)`
   takes back a transform's source record.
+- `kober.runtime.size_of`, `decode_text` and `record_int`, which generated
+  modules call where they used to branch, and `Held.withdraw`. Re-exported
+  from `kober`.
 - For generated modules' transforms, all re-exported from `kober`:
   `kober.runtime.run_transform`, `take_over`, `concat`, `Output`,
   `TransformFailed`, `first_failed`, `bind_transforms`, `document_params` and
@@ -120,6 +140,14 @@ minor bump here too.
 
 ### Changed
 
+- **A generated module branches less**, so a unit that frames and inflates a
+  body stays under the branch limit it is linted to: `examples/http.yaml`'s
+  message sat at exactly 20 before `content` was added. An absent field is
+  written before its condition rather than in an `else`; a record written the
+  same way on every branch of a switch is written once; a size is checked,
+  text decoded and a value-sized integer recorded by a runtime call rather
+  than inline; and a switch whose cases are the same transform under
+  different names is one call with the name looked up. Output is unchanged.
 - **`zpf` 0.5.1 is required** (`zpf>=0.5.1,<0.6`), for `params_digest=` on
   `decode_stage`, which kober asked for in
   [python-zipline#77](https://github.com/adamkjonsson/python-zipline/issues/77).
@@ -164,6 +192,14 @@ minor bump here too.
 
 ### Fixed
 
+- **A long condition, or one value compared with several literals, no longer
+  makes a generated module fail the project's own lint.** A nested `or` too
+  long for its line is split inside its brackets, and `x == 'a' or x == 'b'`
+  is written `x in ('a', 'b')` (`not in` under a `not`).
+- **`message_tail_fields` treats a `switch` whose every case reads nothing as
+  reading nothing** (#49), so a body followed by a transform chosen by a
+  switch is still where a message ends, and a run after a gap still resumes
+  there.
 - **`kober show` no longer reports a unit reached only through a `pointer` as
   unreachable** ([#52](https://github.com/adamkjonsson/zipline-kober/issues/52)).
   It walked switch cases and nothing else when working out
@@ -190,6 +226,18 @@ minor bump here too.
 
 ### Documentation
 
+- `docs/format/concepts.md` gains *A second offset space*, what a transform's
+  output is and what a file can and cannot say about it, and the rule that a
+  failed transform neither confirms nor declines; its last *cannot say* bullet
+  becomes what is still out of reach, state between messages. `DESIGN.md`'s
+  revision 12 adds byte transforms: §2.1, §3.1, §3.2's `Transform` and
+  `Concat`, §6's parameters, §11.5's taken branch, and §13.6 on what the
+  compressed-body corpus found. `docs/format/document.md` says that packeteer
+  0.16.0 refuses `transform`, `concat` and a string-cased `switch` at load, so
+  `examples/http.yaml` no longer loads there.
+- `tools/pipeline.py` checks every inflated body against the document that was
+  compressed: all 25 on the lossless compressed-body capture, and 21, every one
+  genuine, with loss.
 - `docs/dev/testing.md` gains *Transforms*: the four promises a transform
   adds, each fuzzed and each checked in the suite against an implementation
   broken the way it guards against; the decompression bombs and the
