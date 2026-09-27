@@ -382,9 +382,11 @@ At field granularity every record read from an output cites the transform's
 source and argument fields, and the source is not written as a record of its
 own: the output speaks for it. A transform that failed names its source's bytes
 `undecodable`, and one marked `emit: none` names them `skipped`. A source that
-is a `concat` is the exception, and names nothing: its bytes are its members',
-which keep their own records, and its range also covers the framing between
-them. At message granularity the message record holds the input as it arrived, so a failed
+is a `concat` has no bytes of its own, only its members', and its range also
+covers the framing between them, such as a chunked body's size lines. So its
+members are what the transform takes over: when it fails, each member's record
+is taken back and each non-empty member is named `undecodable`, while the size
+lines keep their records. At message granularity the message record holds the input as it arrived, so a failed
 transform is not visible in the file there, only in the tree.
 
 A message whose transform failed decoded whole, so the stream goes on after

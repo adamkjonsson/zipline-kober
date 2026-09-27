@@ -17,7 +17,7 @@ from kober.cli import main
 from kober.errors import CompileError
 from kober.loader import from_yaml
 from kober.pygen import render_spec
-from kober.spec import Spec
+from kober.spec import Emit, Spec
 
 #: A message whose body may be framed two ways, and a transform over it. Each
 #: test replaces a piece of it.
@@ -390,3 +390,37 @@ def test_the_compiler_refuses_a_transform_whose_type_is_not_a_unit():
     assert errors(built) == [], "the interpreter decodes it: the spec is valid"
     with pytest.raises(CompileError, match="only as a unit"):
         render_spec(built)
+
+
+def test_the_compiler_refuses_a_source_joining_different_members_on_different_branches():
+    """A failure takes over the members joined, and the compiler must know which.
+
+    Only where records are written: at message granularity nothing is taken over.
+    """
+    built = from_yaml("""
+name: t
+version: "1"
+entry: message
+units:
+  message:
+    fields:
+      - {name: which, bits: 8}
+      - {name: a, unit: chunk, until: "a.size == 0", condition: "which == 1"}
+      - {name: b, unit: chunk, until: "b.size == 0", condition: "which == 2"}
+      - name: body
+        switch:
+          dispatch: which
+          cases:
+            1: {concat: a.data}
+            2: {concat: b.data}
+      - name: content
+        transform: {from: body, with: gzip, limit: 64}
+  chunk:
+    fields:
+      - {name: size, bits: 8}
+      - {name: data, bytes: {size: {expr: size}}}
+""")
+    assert errors(built) == [], "the interpreter decodes it: the spec is valid"
+    render_spec(built, emit=Emit.MESSAGE)
+    with pytest.raises(CompileError, match="joins different members"):
+        render_spec(built, emit=Emit.FIELD)

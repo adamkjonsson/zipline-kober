@@ -1363,10 +1363,16 @@ with no transform compiles to the same source as before.
    which at field granularity is cited by every member's own record and by
    the size lines between them. It broke the promise that no byte is both
    cited and undecoded. Nothing had exercised it, because no example has a
-   transform and the take-over measurement used a length-framed body. **Rule:
-   a concat source names nothing**; its own record is still taken back, and
-   its members keep theirs. Where a switch may or may not have joined, the
-   compiled module decides at run time. This amends Stage 7's invariant 4.
+   transform and the take-over measurement used a length-framed body. A first
+   fix named nothing, which left the failure implicit in the file. **Rule,
+   decided 2026-09-27: a concat's members are taken over.** On failure each
+   member's record is taken back, empty ones included, and each non-empty
+   member is named `undecodable` (`skipped` for `emit: none`); the size lines
+   keep their records. That says per message what a length-framed body says.
+   Where a switch may or may not have joined, the compiled module decides at
+   run time; a switch joining *different* members on different branches is
+   refused by the compiler at field granularity. This amends Stage 7's
+   invariant 4.
 2. **The two drivers wrote a message's blocks in different orders.** The
    interpreter's step writes all of a message's records and then its regions,
    because `plan` returns them apart; a generated module writes in decode
@@ -1404,9 +1410,8 @@ before it is trusted:
    the corpus.
 4. A transform's source is spoken for exactly once: on success it is cited by
    the output's records and by no record of its own, on failure it is one
-   `undecodable` region and cited by nothing — except a `concat` source,
-   which on failure names nothing and stays cited by its members' records
-   (Stage 6). Checked against a version that
+   `undecodable` region and cited by nothing — for a `concat` source, one
+   region per non-empty member, and no member's record (Stage 6). Checked against a version that
    also writes the source's own record, and one that drops the region.
 
 Plus the existing set over the input space, unchanged, which is itself a

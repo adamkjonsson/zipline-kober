@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import gzip
 import sys
+import zlib
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 from cipher import seal, xor_open
+from test_decoder_transforms import chunked
+from test_decoder_transforms import spec as chunked_spec_for
 from test_stage import datagrams, write_transport
 from zpfcompare import assert_conformant, blocks
 
@@ -46,6 +49,11 @@ units:
 
 def spec(output: str = "type: {unit: document}", emit: str = "") -> Spec:
     return from_yaml(MESSAGE.format(output=output, emit=emit))
+
+
+def chunked_spec() -> Spec:
+    """Return a spec framing a body by its length or in chunks, then inflating it."""
+    return chunked_spec_for(codec="deflate")
 
 
 def message(document: bytes = b"\x05hello", *, corrupt: bool = False) -> bytes:
@@ -200,6 +208,39 @@ def test_a_stream_where_every_transform_fails_is_declined_saying_so(tmp_path: Pa
         "not t: every message that decoded had a transform fail; the first: "
         "gzip: not valid compressed data"
     }
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_a_failed_transform_over_chunks_names_each_chunks_data(tmp_path: Path, emit: Emit):
+    """A concat's members are taken over one by one; the size lines stay cited.
+
+    At field granularity each chunk's ``data`` is ``undecodable`` and has no
+    record, and every size line keeps its own. At message granularity the
+    failure is below the file's resolution, as for a length-framed body.
+    """
+    body = zlib.compress(b"\x05hello")
+    good = chunked(body, [4, len(body) - 4])
+    bad = chunked(b"not deflate data", [3, 13])
+    stream = good + bad + good
+    source = tmp_path / "in.zpf"
+    write_transport(source, [(1000, stream, 1001)])
+    written = decode(chunked_spec(), source, tmp_path, emit=emit)
+    start = len(good)
+    if emit is Emit.MESSAGE:
+        assert regions(written) == []
+        return
+    assert regions(written) == [
+        (start + 3, start + 6, "undecodable", None),
+        (start + 7, start + 20, "undecodable", None),
+    ]
+    roles = [role for role, spans in records(written) if spans[0][0] >= start]
+    assert roles[: roles.index("t.after")] == [
+        "t.chunked",
+        "t.n",
+        "t.chunks[0].size",
+        "t.chunks[1].size",
+        "t.chunks[2].size",
+    ], "every size line keeps its record, and no member does, even an empty one"
 
 
 def test_the_interpreted_step_reports_a_failed_transform_as_its_own_verdict():

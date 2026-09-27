@@ -394,21 +394,21 @@ def _transform(
     the source is ``skipped``. Inside another output none of the regions can be
     named, and every record cites the outermost transform's range.
 
-    A ``concat`` source names nothing. It has no bytes of its own, only its
-    members', which keep their records; its hull also covers the framing
-    between them. Its own record is still taken over.
+    A ``concat`` source has no bytes of its own, only its members', and its
+    hull also covers the framing between them. So the members are what is
+    taken over: on failure each member's record is taken back and each
+    non-empty member named, and the framing keeps its records.
     """
     kind = node.resolved_type
     source = parent.find(kind.source) if isinstance(kind, Transform) else None
-    named = (
-        source is not None
-        and source.width > 0
-        and cite is None
-        and not isinstance(source.resolved_type, Concat)
-    )
     if granularity is Emit.NONE or node.failed:
-        if named and source is not None:
-            reason = NodeStatus.SKIPPED if granularity is Emit.NONE else NodeStatus.UNDECODABLE
+        reason = NodeStatus.SKIPPED if granularity is Emit.NONE else NodeStatus.UNDECODABLE
+        if source is None:
+            return
+        if isinstance(source.resolved_type, Concat):
+            members = (source.resolved_type, path[:-1], reason)
+            _take_over_members(parent, *members, emissions, unclaimed, cite)
+        elif source.width > 0 and cite is None:
             unclaimed.append(Unclaimed(source.off_start, source.off_end, reason.value))
         return
     outer = cite if cite is not None else (node.off_start, node.off_end)
@@ -423,6 +423,33 @@ def _transform(
             emission.payload, kind.content_type or "prim:bytes", 0, 0, emission.role
         )
     emissions.append(_citing(emission, outer))
+
+
+def _take_over_members(
+    parent: Node,
+    kind: Concat,
+    names: list[str | None],
+    reason: NodeStatus,
+    emissions: list[Emission],
+    unclaimed: list[Unclaimed],
+    cite: tuple[int, int] | None,
+) -> None:
+    """Take back each record a ``concat``'s members wrote, and name their bytes."""
+    repetition = parent.find(kind.repeated)
+    if repetition is None:
+        return
+    members = [
+        (element, member)
+        for element in repetition.children
+        if (member := element.find(kind.member)) is not None
+    ]
+    roles = {field_path([*names, element.name, member.name]) for element, member in members}
+    emissions[:] = [emission for emission in emissions if emission.role not in roles]
+    if cite is not None:
+        return
+    for _, member in members:
+        if member.width > 0:
+            unclaimed.append(Unclaimed(member.off_start, member.off_end, reason.value))
 
 
 def _leaf(node: Node, path: list[str | None], parent: Node) -> Emission | None:

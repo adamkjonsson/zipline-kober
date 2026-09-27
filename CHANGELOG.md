@@ -51,8 +51,9 @@ minor bump here too.
   records cite the transform's source and argument fields, and the source is
   not written as a record of its own; a failed transform names its source
   `undecodable`, and `emit: none` names it `skipped`. A source that is a
-  `concat` names nothing, since its bytes are its members' and they keep
-  their own records. A message whose
+  `concat` has no bytes of its own, so its members are taken over instead:
+  each member's record is taken back and each non-empty member named, and a
+  chunked body's size lines keep their records. A message whose
   transform failed neither confirms nor declines its stream, and a stream in
   which every message that decoded had one fail is declined saying so.
   `kober run` and `kober try` take `--param NAME=VALUE`, read as the declared
@@ -63,8 +64,9 @@ minor bump here too.
   hashed; a file does not carry it yet
   ([python-zipline#77](https://github.com/adamkjonsson/python-zipline/issues/77)).
   **`kober compile` compiles them**, writing the same file as the interpreter
-  block for block. A transform's `type` must be a unit there (`CompileError`
-  otherwise, and the interpreter decodes it). A generated module binds its
+  block for block. A transform's `type` must be a unit there, and at field
+  granularity a source may not join different members on different branches
+  (`CompileError` otherwise; the interpreter decodes both). A generated module binds its
   transforms from `kober.transforms.DEFAULT` when it is imported, so a name
   nothing binds fails the import with `UnboundTransformError`. For a spec
   with `params:` its `decode` and `decode_from` take `params=`, as do

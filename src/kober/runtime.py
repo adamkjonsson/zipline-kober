@@ -497,6 +497,7 @@ def take_over(
     *,
     role: str | None = None,
     source: tuple[int, int] | None = None,
+    members: tuple[Sequence[Spanned] | None, str, str, str] | None = None,
     skipped: bool = False,
     record: tuple[str, str | None, tuple[int, int]] | None = None,
 ) -> None:
@@ -512,8 +513,12 @@ def take_over(
         value: What the transform produced: its output, or a
             :class:`TransformFailed`.
         role: The source's record to take back, if it has one.
-        source: The source's range to name, or ``None`` to name nothing —
-            a concat's bytes are its members', which keep their records.
+        source: The source's range to name, or ``None`` for a concat.
+        members: For a concat, what it joined: the repetition's elements,
+            the member's attribute, the repetition's path and the member's
+            name. A concat has no bytes of its own, and its range covers the
+            framing between its members, so on failure each member's record
+            is taken back and each non-empty member named instead.
         skipped: Whether the transform is ``emit: none``.
         record: For a type-less output: its content type, role and citation.
 
@@ -523,8 +528,16 @@ def take_over(
     if role is not None:
         sink.retract(role)
     failed = isinstance(value, TransformFailed)
+    reason = "skipped" if skipped else "undecodable"
     if source is not None and source[1] > source[0] and (failed or skipped):
-        sink.undecoded(*source, "skipped" if skipped else "undecodable")
+        sink.undecoded(*source, reason)
+    if members is not None and (failed or skipped):
+        elements, attribute, path, name = members
+        for index, element in enumerate(elements or ()):
+            sink.retract(f"{path}[{index}].{name}")
+            start, end = span(element, attribute)
+            if end > start:
+                sink.undecoded(start, end, reason)
     if record is not None and not failed and not skipped:
         content_type, output_role, cite = record
         sink.record(value, content_type, *cite, output_role)

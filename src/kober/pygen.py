@@ -2506,18 +2506,45 @@ class _Function:
             over.append(f"role={self.segment(field, field_index)}")
         joins = [] if field is None else [kind.concat is not None for kind in field.types]
         if source_local is not None and not all(joins or [False]):
-            # A concat names nothing: its bytes are its members', which keep
-            # their records. Where a switch may have joined, `_cite_` says so.
+            # Where a switch may have joined, `_cite_` says whether it did.
             named = f"(_s_{source_local}, _e_{source_local})"
             if any(joins):
                 named = f"{named} if _cite_{source_local} is None else None"
             over.append(f"source={named}")
+        if field is not None and any(joins):
+            members = self.members(index, field)
+            if not all(joins):
+                members = f"{members} if _cite_{source_local} is not None else None"
+            over.append(f"members={members}")
         if not self.emits(self.obj.fields[index]):
             over.append("skipped=True")
         elif not plan.typed:
             content = _literal(plan.content_type or "prim:bytes")
             over.append(f"record=({content}, {role}, _cite_{target})")
         self.lines.extend(_call("take_over", ["_sink", *over], indent))
+
+    def members(self, index: int, field: FieldPlan) -> str:
+        """Return what a concat source joined, as :func:`kober.runtime.take_over` takes it.
+
+        Raises:
+            CompileError: If the source's branches join different members.
+
+        """
+        joined = {kind.concat for kind in field.types if kind.concat is not None}
+        if len(joined) != 1:
+            msg = (
+                f"unit {self.obj.unit!r}: field {field.name!r} joins different members on "
+                "different branches, and a transform over it cannot say whose bytes failed; "
+                "use the interpreter"
+            )
+            raise CompileError(msg)
+        repeated, member = joined.pop()
+        elements = self.binding(index).render((repeated,))
+        item = self.obj.field(repeated)
+        element_unit = next((v.unit for v in item.types), None) if item is not None else None
+        attribute = self.names.attribute_of(element_unit or "", member)
+        path = self.segment(item, self.obj.fields.index(item)) if item is not None else "_path"
+        return f"({elements}, {_literal(attribute)}, {path}, {_literal(member)})"
 
     def select(self, index: int, value: ValueType, target: str | None, indent: int) -> None:
         """Emit the call to a select's function. The function itself is hoisted.

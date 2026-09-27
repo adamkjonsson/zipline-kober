@@ -201,23 +201,35 @@ def test_a_short_read_inside_the_output_is_never_truncated():
     assert all(node.status is not NodeStatus.TRUNCATED for node in tree.walk()), tree.render()
 
 
-@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
-def test_a_failed_transform_over_joined_chunks_names_no_byte_a_record_cites(emit: Emit):
-    """A concat's bytes are its members', and the members keep their records.
+def test_a_failed_transform_over_joined_chunks_names_each_chunks_data():
+    """A concat's bytes are its members': a failure takes them over, one by one.
 
-    Take-over names a failed transform's source ``undecodable``; over a concat
-    that was the hull, which covers the chunk data and the size lines between
-    them, every byte of it cited by a record of its own at field granularity.
-    Found by the compiler's adversarial corpus, in both backends at once.
+    Named as the hull, the failure covered the size lines between the chunks,
+    which are cited by records of their own, and the members' records too.
+    Naming nothing left the failure implicit. Each member's record is taken
+    back and its bytes named instead, which says what a length-framed body
+    says, and the framing keeps its records.
     """
     data = chunked(b"not deflate data", [3, 13])
     built = spec(codec="deflate")
     tree = Decoder(built).decode_bytes(data)
     assert content(tree).failed
-    records, regions = plan(built, tree, data, emit=emit)
-    cited = {at for record in records for at in range(record.off_start, record.off_end)}
-    named = {at for region in regions for at in range(region.off_start, region.off_end)}
-    assert not cited & named, (records, regions)
+    records, regions = plan(built, tree, data, emit=Emit.FIELD)
+    assert [(r.off_start, r.off_end, r.reason) for r in regions] == [
+        (3, 6, "undecodable"),
+        (7, 20, "undecodable"),
+    ]
+    roles = [record.role for record in records]
+    assert not [role for role in roles if role.endswith(".data")], roles
+    assert roles.count("t.chunks[1].size") == 1, "the framing keeps its records"
+
+
+def test_a_failed_transform_over_joined_chunks_is_not_visible_per_message():
+    """At message granularity the message record holds the input as it arrived."""
+    data = chunked(b"not deflate data", [3, 13])
+    built = spec(codec="deflate")
+    _, regions = plan(built, Decoder(built).decode_bytes(data), data, emit=Emit.MESSAGE)
+    assert regions == []
 
 
 # --- arguments, parameters and a caller's cipher --------------------------------------------------
