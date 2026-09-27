@@ -182,6 +182,11 @@ minor bump here too.
 
 ### Documentation
 
+- `docs/dev/testing.md` gains *Transforms*: the four promises a transform
+  adds, each fuzzed and each checked in the suite against an implementation
+  broken the way it guards against; the decompression bombs and the
+  misbehaving caller's transform in the corpus; and the driver fuzzed over
+  streams whose transforms fail.
 - `docs/format/concepts.md` gains *What a spec meets after a gap*;
   `DESIGN.md` §3.1 gains *After a gap* and is revision 12. It records why a
   refused attempt is retried where it stopped rather than scanned for byte by

@@ -1424,6 +1424,41 @@ join it. It asserts *Decided* 1: a transform failure neither confirms nor
 declines, and a message after one is still decoded. Only a stream in which no
 message decoded whole without one is declined.
 
+**Done, 2026-09-27. It found no bug**; Stage 6's differential had found the
+two there were.
+
+- **The four invariants** are in `test_fuzz.py`, over `TRANSFORM_SPEC` and
+  its variants. Each has a companion test that runs it against a broken
+  implementation and asserts that it fails there: a `_transform` that reads a
+  byte; a cursor that reports an output's end early, so its tail is never
+  looked at; `apply` with no bound; and an emitter that writes the source as
+  well, or drops its region. Invariant 2 needs no "inner non-`OK`" clause
+  under *Decided* 2: an output its type did not read to the end, or did not
+  decode, fails the transform, so a successful one is read byte for byte.
+  Invariant 4 is as Stage 6 amended it for a `concat` source.
+- **Seeds a broken implementation would pass.** Mutated compressed data almost
+  always fails, and a failure is what a broken bound or a lax tail check
+  also produces, so the corpus gained `TRANSFORM_ADVERSE`: a bomb for each
+  output (200 bytes against 64, 100 against 16) and an output with two bytes
+  over. Both join the compiler's adversarial corpus.
+- **A caller's transform that misbehaves**, `fuzzing.hostile`: it raises
+  `KeyError` and `RecursionError`, raises `TransformError` with a secret,
+  returns a `str`, ignores its limit, or works, by its input's first byte.
+  Every behaviour is asserted reached, none escapes a decode, the secret never
+  reaches a tree, a record or a region, and both backends agree on all of it.
+- **The driver, over streams with transforms** (`TOYX`): runs and datagrams,
+  gaps, messages that decode, fail a transform, belong to another protocol or
+  are cut short, through both drivers. The expected outcome is derived from
+  the verdicts alone: the first whole message with its transform working
+  confirms; an `undecodable` one before that declines; a failed transform, or
+  a lost attempt after a gap, is neither. A confirmed stream writes every
+  whole message, a failed one without its output; a declined one writes no
+  record, and says a transform failed when one did. It was watched failing
+  against a writer where a failed transform confirms, and one where it
+  declines.
+
+`docs/dev/testing.md` gains *Transforms*. 52 tests.
+
 ### Stage 8 — examples, documentation, and what has to be restated
 
 - `examples/http.yaml` gains `content`, decoded by `Content-Encoding`; its

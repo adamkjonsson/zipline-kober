@@ -36,6 +36,7 @@ from fuzzing import (
     SELECT_SPEC,
     STARVED_MESSAGE,
     STARVED_SPECS,
+    TRANSFORM_ADVERSE,
     TRANSFORM_MESSAGES,
     TRANSFORM_SPEC,
     cases,
@@ -49,6 +50,7 @@ from fuzzing import (
 from zpf.blocks import UNDECODED_REASONS
 from zpfcompare import assert_conformant, blocks
 
+from kober import transforms
 from kober.cli import main
 from kober.decoder import Decoder
 from kober.emit import Emission, Unclaimed, plan, root_emit
@@ -60,6 +62,7 @@ from kober.pygen import Names, render, render_spec
 from kober.runtime import Cursor, TransformFailed, span
 from kober.spec import Emit, Spec
 from kober.stage import run_compiled
+from kober.transforms import Registry
 
 if TYPE_CHECKING:
     from kober.ops import ObjectPlan
@@ -104,13 +107,20 @@ HTTP_MESSAGES = [
 _MODULES: dict[str, ModuleType] = {}
 
 
-def compiled(spec: Spec, emit: Emit = Emit.MESSAGE, *, check: bool = True) -> ModuleType:
+def compiled(
+    spec: Spec,
+    emit: Emit = Emit.MESSAGE,
+    *,
+    check: bool = True,
+    registry: Registry | None = None,
+) -> ModuleType:
     """Compile a spec and import the module, without going through a file.
 
     Registered in ``sys.modules`` because ``dataclasses`` looks a class's module
     up there while working out which annotations are ``ClassVar`` — which is
     also true of a generated module a consumer imports normally, so nothing is
-    being papered over.
+    being papered over. A module binds its transforms when it is imported, from
+    :data:`kober.transforms.DEFAULT`, so ``registry`` stands in for it then.
     """
     source = render(Plan.from_spec(spec, check=check), emit=emit)
     if source in _MODULES:
@@ -118,7 +128,13 @@ def compiled(spec: Spec, emit: Emit = Emit.MESSAGE, *, check: bool = True) -> Mo
     name = f"compiled_{spec.name}_{len(_MODULES)}"
     module = ModuleType(name)
     sys.modules[name] = module
-    exec(compile(source, f"<{name}>", "exec"), module.__dict__)  # noqa: S102
+    default = transforms.DEFAULT
+    if registry is not None:
+        transforms.DEFAULT = registry
+    try:
+        exec(compile(source, f"<{name}>", "exec"), module.__dict__)  # noqa: S102
+    finally:
+        transforms.DEFAULT = default
     _MODULES[source] = module
     return module
 
@@ -230,7 +246,13 @@ def merged(regions: list[Unclaimed]) -> list[Unclaimed]:
 
 
 def interpreted(
-    spec: Spec, data: bytes, emit: Emit, base: int = 0, *, check: bool = True
+    spec: Spec,
+    data: bytes,
+    emit: Emit,
+    base: int = 0,
+    *,
+    check: bool = True,
+    registry: Registry | None = None,
 ) -> tuple[list[Emission], list[Unclaimed]]:
     """Return what the interpreter would write for ``data``, tail included.
 
@@ -238,7 +260,7 @@ def interpreted(
     so the driver's part is done here — otherwise the two sides would be compared
     over different amounts of input.
     """
-    tree = Decoder(spec, check=check).decode_bytes(data, base=base)
+    tree = Decoder(spec, check=check, transforms=registry).decode_bytes(data, base=base)
     emissions, unclaimed = plan(spec, tree, data, emit=emit, base=base)
     end = base + len(data)
     if tree.off_end < end:
@@ -248,19 +270,33 @@ def interpreted(
 
 
 def emitted(
-    spec: Spec, data: bytes, emit: Emit, base: int = 0, *, check: bool = True
+    spec: Spec,
+    data: bytes,
+    emit: Emit,
+    base: int = 0,
+    *,
+    check: bool = True,
+    registry: Registry | None = None,
 ) -> tuple[list[Emission], list[Unclaimed]]:
     """Return what the generated module writes for ``data``."""
     sink = RecordingSink()
-    compiled(spec, emit, check=check).decode(data, base=base, sink=sink)
+    compiled(spec, emit, check=check, registry=registry).decode(data, base=base, sink=sink)
     sink.finish()
     return sink.records, sink.regions
 
 
-def writes(spec: Spec, data: bytes, emit: Emit, base: int = 0, *, check: bool = True) -> None:
+def writes(
+    spec: Spec,
+    data: bytes,
+    emit: Emit,
+    base: int = 0,
+    *,
+    check: bool = True,
+    registry: Registry | None = None,
+) -> None:
     """Require both implementations to write the same thing for ``data``."""
-    assert emitted(spec, data, emit, base, check=check) == interpreted(
-        spec, data, emit, base, check=check
+    assert emitted(spec, data, emit, base, check=check, registry=registry) == interpreted(
+        spec, data, emit, base, check=check, registry=registry
     )
 
 
@@ -1501,6 +1537,8 @@ AWKWARD["prefixes"] = """
 
 AWKWARD["transform"] = TRANSFORM_SPEC
 AWKWARD["transform framed by length"] = TRANSFORM_SPEC
+AWKWARD["transform bomb"] = TRANSFORM_SPEC
+AWKWARD["transform overlong"] = TRANSFORM_SPEC
 
 #: A concat with nothing transforming it: the joined bytes are a record of
 #: their own, citing the hull of the members.
@@ -1541,6 +1579,8 @@ AWKWARD_SEEDS: dict[str, bytes] = {
     "prefixes": b"HTTP/1.1 200 OK\r\nbody",
     "transform": TRANSFORM_MESSAGES[0],
     "transform framed by length": TRANSFORM_MESSAGES[1],
+    "transform bomb": TRANSFORM_ADVERSE[0],
+    "transform overlong": TRANSFORM_ADVERSE[1],
     "concat": bytes([2]) + b"ab" + bytes([1]) + b"c" + bytes([0]) + b"tail",
 }
 

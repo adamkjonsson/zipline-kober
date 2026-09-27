@@ -30,6 +30,8 @@ import random
 import struct
 import zlib
 
+from kober.errors import TransformError
+
 #: How many mutations per seed case. Small enough to keep the suite fast, large
 #: enough that each run covers every mutation kind several times.
 ROUNDS = 60
@@ -486,7 +488,7 @@ units:
 """
 
 _DOCUMENT = zlib.compress(b"\x05hello")
-_RAW = zlib.compress(b"abc")[2:-4]
+_RAW = zlib.compress(b"abc")[2:-4]  # raw deflate: no header, no checksum
 _TAIL = bytes([len(_RAW)]) + _RAW + bytes([0x7E])
 
 #: Well-formed messages for :data:`TRANSFORM_SPEC`: chunked, then by length.
@@ -501,8 +503,28 @@ TRANSFORM_MESSAGES = (
 )
 
 
+def _raw(data: bytes) -> bytes:
+    """Compress ``data`` as raw deflate: no header, no checksum."""
+    return zlib.compress(data)[2:-4]
+
+
+_BOMB = zlib.compress(b"\xc7" + b"a" * 199)
+_RAW_BOMB = _raw(b"a" * 100)
+_OVERLONG = zlib.compress(b"\x05hello!!")
+
+#: Messages every correct decode of :data:`TRANSFORM_SPEC` fails a transform
+#: on, each in a way an implementation could get wrong by succeeding. Both
+#: outputs of the first pass their limits (200 bytes against 64, and 100
+#: against 16), and would decode whole without them. The second's output
+#: decodes with two bytes left over, which its type does not read.
+TRANSFORM_ADVERSE = (
+    bytes([0, len(_BOMB)]) + _BOMB + bytes([len(_RAW_BOMB)]) + _RAW_BOMB + bytes([0x7E]),
+    bytes([0, len(_OVERLONG)]) + _OVERLONG + _TAIL,
+)
+
+
 def transform_cases(seed: int) -> list[bytes]:
-    """Build one batch of variants of both transform messages.
+    """Build one batch of variants of every transform message, adverse ones included.
 
     Args:
         seed: Which batch.
@@ -511,4 +533,98 @@ def transform_cases(seed: int) -> list[bytes]:
         The batch.
 
     """
-    return [data for message in TRANSFORM_MESSAGES for data in variants(message, seed)]
+    messages = (*TRANSFORM_MESSAGES, *TRANSFORM_ADVERSE)
+    return [*messages, *(data for message in messages for data in variants(message, seed))]
+
+
+#: A caller's transform that misbehaves in every way a callable can, chosen by
+#: its input's first byte: it raises an arbitrary exception, raises kober's
+#: own with a secret in the message, returns something that is not bytes,
+#: ignores its limit, recurses too deep, or works. What it raises must never
+#: escape a decode, and its messages must never reach the file.
+HOSTILE_SPEC = """
+name: hostile
+version: "1"
+entry: m
+transforms:
+  hostile: {}
+units:
+  m:
+    fields:
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: body, type: {bytes: {size: {expr: n}}}}
+      - name: out
+        transform: {from: body, with: hostile, limit: 8, type: {unit: doc}}
+      - {name: after, type: {int: {bits: 8}}}
+  doc:
+    fields:
+      - {name: length, type: {int: {bits: 8}}}
+      - {name: text, type: {string: {size: {expr: length}}}}
+"""
+
+#: What :func:`hostile` puts in the messages it raises, which must never be
+#: seen again.
+HOSTILE_SECRET = "hunter2"
+
+
+def hostile(data: bytes, *, limit: int) -> object:
+    """Misbehave according to ``data[0]``: see :data:`HOSTILE_SPEC`.
+
+    Args:
+        data: The source's bytes.
+        limit: The most bytes the output may have, which it may ignore.
+
+    Returns:
+        Something, usually not what a transform should.
+
+    Raises:
+        KeyError: Or another exception, according to ``data[0]``.
+
+    """
+    mode = data[0] % 7 if data else 6
+    if mode == 0:
+        raise KeyError(HOSTILE_SECRET)
+    if mode == 1:
+        raise TransformError(HOSTILE_SECRET)
+    if mode == 2:
+        return HOSTILE_SECRET
+    if mode == 3:
+        return b"\x01" * (limit + 1)
+    if mode == 4:
+        raise RecursionError(HOSTILE_SECRET)
+    if mode == 5:
+        return bytearray(data[1:])
+    return data[1:]
+
+
+#: One message per behaviour of :func:`hostile`, the working ones decoding.
+HOSTILE_MESSAGES = tuple(
+    bytes([len(body), *body, 0x7E])
+    for body in (
+        b"\x00",
+        b"\x01",
+        b"\x02",
+        b"\x03",
+        b"\x04",
+        b"\x05\x02hi",
+        b"\x06\x03abc",
+        b"\x06\x09ab",
+        b"\x06\x01a??",
+    )
+)
+
+
+def hostile_cases(seed: int) -> list[bytes]:
+    """Build one batch of variants of every :data:`HOSTILE_MESSAGES`.
+
+    Args:
+        seed: Which batch.
+
+    Returns:
+        The batch, the messages themselves first.
+
+    """
+    return [
+        *HOSTILE_MESSAGES,
+        *(data for message in HOSTILE_MESSAGES for data in variants(message, seed, rounds=10)),
+    ]

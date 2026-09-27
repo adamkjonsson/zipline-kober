@@ -83,6 +83,39 @@ get there the transport layers are gone.
 That is not tidiness: the differential can only compare results over inputs that
 match, and the mutations that break one are the ones worth showing the other.
 
+### Transforms
+
+A transform adds four promises of its own, and `test_fuzz.py` holds the
+interpreter to each over adversarial input:
+
+- the read position is the same after a transform as before it;
+- every byte of an output that decoded was read by its type, since output
+  its type does not read is a failure;
+- no output passes its `limit`, and one that would have is a failure saying so;
+- a transform's source is spoken for exactly once. On success the output's
+  records cite it and no record of its own does. On failure it is named
+  `undecodable` and cited by nothing; a `concat` source's members are named
+  one by one, and none keeps its record.
+
+**Each is also run against an implementation broken in the one way it exists
+to catch** — a transform that consumes a byte, a decoder that stops looking at
+its type's end, a codec with no bound, an emitter that writes the source as
+well or drops its region — and the test asserts that the check fails there.
+Those are tests in the suite rather than a one-off revert, so a check that
+stops catching anything fails the build.
+
+Most mutations of compressed data fail the transform, so the corpus holds
+seeds that every correct decode fails and a broken one would not: a
+decompression bomb for each output, and an output with bytes left over.
+`fuzzing.hostile` is a caller's transform that misbehaves in every way a
+callable can, chosen by its input's first byte, and
+`test_every_way_a_callable_misbehaves_is_reached` asserts that the corpus
+still reaches each one. What it raises must never escape, and its messages,
+which carry a secret, must never reach the file. Streams whose messages carry
+transforms, some failing, fuzz the driver as well: a failure neither confirms
+the stream nor declines it, and the message after one is still decoded. The
+compiled module is held to the same corpus by the differential.
+
 ### A seed is only worth the code it reaches
 
 Check what a seed *enters*, not only that its variants pass. `fuzzing.py` seeds

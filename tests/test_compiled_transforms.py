@@ -14,6 +14,8 @@ from types import ModuleType
 
 import pytest
 from cipher import seal, xor_open
+from fuzzing import HOSTILE_SPEC, hostile, hostile_cases
+from test_compiled import writes
 
 from kober import transforms
 from kober.errors import ParameterError, UnboundTransformError
@@ -167,3 +169,21 @@ def test_a_transform_nothing_binds_fails_the_import():
 def test_a_module_binds_what_was_registered_when_it_was_imported():
     module = tunnel()
     assert module.TRANSFORMS["xor"] is xor_open
+
+
+# --- a caller's transform that misbehaves ---------------------------------------------------
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+@pytest.mark.parametrize("seed", [1, 2])
+def test_the_two_agree_on_a_transform_that_misbehaves(seed: int, emit: Emit):
+    """Every way a caller's callable fails is contained, and worded alike in both."""
+    registry = Registry.standard()
+    registry.register("hostile", hostile)
+    spec = from_yaml(HOSTILE_SPEC)
+    for data in hostile_cases(seed):
+        try:
+            writes(spec, data, emit, registry=registry)
+        except AssertionError as exc:
+            exc.add_note(f"disagreed: hostile {emit.value} on {data!r}")
+            raise
