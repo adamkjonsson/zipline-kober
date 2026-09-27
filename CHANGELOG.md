@@ -60,9 +60,12 @@ minor bump here too.
   type (`hex:…` or `file:PATH` for bytes), and `--load-transforms MODULE`,
   which runs a module that registers transforms the standard library cannot:
   a cipher, or `br`. `Decoder.params_digest()` is a digest of the spec, the
-  granularity and every parameter's value, a secret one included only as
-  hashed; a file does not carry it yet
-  ([python-zipline#77](https://github.com/adamkjonsson/python-zipline/issues/77)).
+  granularity the entry unit resolves to and every parameter's value, a
+  secret one included only as hashed. Every output carries it as its Decoder
+  Descriptor's `params_digest`
+  ([python-zipline#77](https://github.com/adamkjonsson/python-zipline/issues/77)),
+  so a file says which configuration wrote it and a run with another key
+  reads as another configuration.
   **`kober compile` compiles them**, writing the same file as the interpreter
   block for block. A transform's `type` must be a unit there, and at field
   granularity a source may not join different members on different branches
@@ -72,8 +75,9 @@ minor bump here too.
   with `params:` its `decode` and `decode_from` take `params=`, as do
   `run_compiled` and `decode_stream_compiled`. A failed transform leaves a
   `kober.runtime.TransformFailed` with the interpreter's wording in its field,
-  and the message is still returned. A generated module does not carry the
-  digest yet.
+  and the message is still returned. A generated module carries `SPEC_DIGEST`,
+  and `run_compiled` writes the same `params_digest` the interpreter would; a
+  module compiled before it existed writes none.
 - **The Python binding for transforms**, `kober.transforms`
   ([#46](https://github.com/adamkjonsson/zipline-kober/issues/46)). A
   `Registry` binds names to callables; `Registry.standard()`, and the default
@@ -116,6 +120,10 @@ minor bump here too.
 
 ### Changed
 
+- **`zpf` 0.5.1 is required** (`zpf>=0.5.1,<0.6`), for `params_digest=` on
+  `decode_stage`, which kober asked for in
+  [python-zipline#77](https://github.com/adamkjonsson/python-zipline/issues/77).
+  0.5.1 reads and writes the same files as 0.5.0.
 - **Breaking: what a file says after a gap in a byte stream**
   ([#49](https://github.com/adamkjonsson/zipline-kober/issues/49)). A run after
   a gap used to be decoded from its first byte, which is usually the middle of

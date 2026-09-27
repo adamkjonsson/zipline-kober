@@ -26,6 +26,11 @@ VERSION = "1.0"
 #: the output's records assert about one another.
 EMIT = "field"
 
+#: A digest of the specification, which the stage driver combines with
+#: EMIT and the parameters into the output's ``params_digest``, the one
+#: the interpreter writes for the same configuration.
+SPEC_DIGEST = "ddad4b284b808a6f1e3da559fe660e809abc70c4ef9ae967a12fe9db2bacce91"
+
 #: How a text field's payload is labelled. Not ``prim:`` — that scheme
 #: has no text token — so the format's other fully specified one is used.
 TEXT_CONTENT_TYPE = "mime:text/plain; charset=utf-8"

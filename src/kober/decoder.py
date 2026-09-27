@@ -35,6 +35,7 @@ from kober.check import (
     starved_fields,
 )
 from kober.cursor import Cursor
+from kober.emit import root_emit
 from kober.errors import EvalError, TransformError, TruncatedRead
 from kober.expr import ExprValue, evaluate, references
 from kober.node import Node, NodeStatus
@@ -345,13 +346,18 @@ class Decoder:
 
         Computed over a canonical form of the spec model rather than its
         source, so a spec read from YAML and the same spec built in memory
-        agree, and where it was read from does not count.
+        agree, and where it was read from does not count. The granularity is
+        the one the entry unit resolves to, not the decoder's default: when the
+        entry names its own, the default changes nothing written, and a
+        generated module knows only the resolved one.
 
         Returns:
             ``sha256:`` and the hex digest.
 
         """
-        return params_digest(self.spec.digest(), self.emit.value, self._params)
+        return params_digest(
+            self.spec.digest(), root_emit(self.spec, self.emit).value, self._params
+        )
 
     def decode_bytes(self, data: bytes, *, base: int = 0) -> Node:
         """Decode one buffer as a single instance of the entry unit.

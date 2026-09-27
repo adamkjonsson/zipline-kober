@@ -1259,7 +1259,7 @@ inside an output, and every kind of contained failure. The pipeline moved 0 of
   start-line check Stage 1c added. Its diff against the Stage 1b baseline stays empty
   for every transform-free output.
 
-**Done except `params_digest`, 2026-09-26.**
+**Done, 2026-09-26; `params_digest` written on 2026-09-27.**
 
 - **Emission** (`emit.py`): a transform's source is not written as a record
   of its own when the transform is present. An output's records cite the
@@ -1298,6 +1298,20 @@ inside an output, and every kind of contained failure. The pipeline moved 0 of
   from left out), the granularity, and every parameter's value. Writing it is
   one argument in `stage.run` once #77 lands; the compiled driver's follows
   in Stage 6.
+
+  **Written, 2026-09-27**, when python-zipline 0.5.1 released #77, and pinned
+  `>=0.5.1,<0.6`. Both drivers write it: `stage.run` from
+  `Decoder.params_digest()`, and `run_compiled` from the module's new
+  `SPEC_DIGEST`, its `EMIT` and the parameters, through the same
+  `runtime.params_digest`. Making them agree changed one thing. The digest
+  covered the decoder's default granularity, which a generated module never
+  sees; when the entry unit names its own, that default changes nothing
+  written. It now covers the granularity the entry resolves to. `blocks()` in
+  `tests/zpfcompare.py` compares each decoder's descriptor with its digest,
+  so every differential and the pipeline hold the two to one digest. A module
+  from before `SPEC_DIGEST` writes none rather than a wrong one. The pipeline
+  was unchanged against the Stage 6 baseline before `blocks()` learnt the
+  descriptor.
 - **`--load-transforms MODULE`**, added at Adam's request: the CLI could not run
   a spec whose transform only a caller binds, a cipher. A path ending `.py` is
   loaded from its file and anything else is imported, which is packeteer's
@@ -1321,7 +1335,7 @@ must word a transform failure identically, and Q4's rule makes that wording
 kober's. `tests/compiled_dns.py` is regenerated and must diff empty: a spec
 with no transform compiles to the same source as before.
 
-**Done except the compiled digest, 2026-09-26.**
+**Done, 2026-09-26; the compiled digest followed on 2026-09-27 (Stage 5).**
 
 - **The shared code is in `kober.runtime`, not `ops.py`**: `ops.py` describes a
   spec to a backend and runs nothing. `run_transform` runs a transform,
@@ -1355,6 +1369,7 @@ with no transform compiles to the same source as before.
   `kober.transforms.DEFAULT`, so an unbound name fails the import once.
 - **The compiled digest is deferred** with the interpreter's, until
   python-zipline#77. `Spec.digest()` and `runtime.params_digest` exist for it.
+  (Written since: see Stage 5.)
 
 **Two bugs, both shared by the interpreter, found by the differential.**
 

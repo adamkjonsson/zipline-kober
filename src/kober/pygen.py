@@ -3542,7 +3542,8 @@ def render_enums(plan: Plan, names: Names | None = None) -> str:
 def _granularity_constants(plan: Plan, emit: Emit) -> list[str]:
     """Return the constants that say what a module is, and what it needs.
 
-    ``NAME`` and ``VERSION`` record which spec; ``EMIT`` records which way it
+    ``NAME`` and ``VERSION`` record which spec, and ``SPEC_DIGEST`` exactly
+    which; ``EMIT`` records which way it
     was built, as the :class:`~kober.spec.Emit` value's string rather than the
     enum, since a generated module imports :mod:`kober.runtime` only and the
     string is what a spec says. The stage driver reads ``EMIT`` to declare what
@@ -3564,6 +3565,11 @@ def _granularity_constants(plan: Plan, emit: Emit) -> list[str]:
         "#: one per leaf field, or none. The stage driver reads it to declare what",
         "#: the output's records assert about one another.",
         f"EMIT = {_literal(emit.value)}",
+        "",
+        "#: A digest of the specification, which the stage driver combines with",
+        "#: EMIT and the parameters into the output's ``params_digest``, the one",
+        "#: the interpreter writes for the same configuration.",
+        f"SPEC_DIGEST = {_literal(plan.spec_digest)}",
         "",
     ]
     if plan.params:

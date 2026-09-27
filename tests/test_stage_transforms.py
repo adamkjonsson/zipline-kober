@@ -311,3 +311,38 @@ def test_a_tunnel_writes_one_plaintext_per_datagram_citing_the_datagram(
         (offsets[corrupt] + 8, offsets[corrupt + 1], "undecodable", None)
     ]
     assert KEY.hex() not in repr(written)
+
+
+# --- the configuration a file says produced it (python-zipline#77) ------------------------------
+
+
+def digests(written: list[tuple[object, ...]]) -> list[object]:
+    return [block[3] for block in written if block[0] == "decoder"]
+
+
+def test_a_file_carries_the_digest_of_the_configuration_that_wrote_it(tmp_path: Path):
+    """Both drivers write it, the same one, and a different key is a different one."""
+    registry = Registry.standard()
+    registry.register("xor", xor_open)
+    source = tmp_path / "in.zpf"
+    datagrams(source, [sealed(b"packet", 0)])
+    built = from_yaml(TUNNEL)
+    found = []
+    for key in (KEY, bytes(16)):
+        written = decode(built, source, tmp_path, params={"key": key}, transforms=registry)
+        expected = Decoder(built, emit=Emit.FIELD, params={"key": key}, transforms=registry)
+        assert digests(written) == [expected.params_digest()]
+        assert key.hex() not in repr(written)
+        found.append(digests(written)[0])
+    assert found[0] != found[1], "the key is part of the configuration"
+
+
+def test_a_module_from_before_the_digest_writes_none(tmp_path: Path):
+    """Rather than a wrong one: it cannot say which spec it was generated from."""
+    source = tmp_path / "in.zpf"
+    write_transport(source, [(1000, message(), 1001)])
+    module = compiled(spec(), Emit.FIELD, None)
+    del module.SPEC_DIGEST
+    sink = tmp_path / "old.zpf"
+    stage.run_compiled(module, source, sink, produced_by="t", produced_at=1)
+    assert digests(blocks(sink)) == [None]

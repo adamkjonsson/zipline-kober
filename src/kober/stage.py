@@ -67,7 +67,7 @@ from kober.cursor import Cursor
 from kober.emit import plan, root_emit
 from kober.errors import EvalError, SpecError, TruncatedRead, Undecodable
 from kober.node import NodeStatus
-from kober.runtime import Held, document_params, first_failed
+from kober.runtime import Held, document_params, first_failed, params_digest
 from kober.spec import Emit, InputShape
 
 if TYPE_CHECKING:
@@ -767,6 +767,8 @@ def run(
     not passed: field granularity writes a unit sequence, message granularity
     carries the input's adjacency forward (``_adjacency``). A caller-
     supplied value would be a way to state something false about the file.
+    The decoder's :meth:`~kober.decoder.Decoder.params_digest` says which
+    configuration wrote it.
 
     Args:
         decoder: The decoder to drive.
@@ -785,6 +787,7 @@ def run(
         produced_at=produced_at,
         comment=comment,
         adjacency=_adjacency(root_emit(decoder.spec, decoder.emit)),
+        params_digest=decoder.params_digest(),
     ) as stage:
         for stream in stage.streams():
             decode_stream(decoder, stage, stream)
@@ -812,6 +815,10 @@ def run_compiled(
     fields is precisely the silent wrong statement the field exists to
     prevent, and a module compiled against an older `zpf` was never tested
     against this one anyway.
+
+    The output carries the same ``params_digest`` the interpreter's would, from
+    the module's ``SPEC_DIGEST``, its granularity and ``params``. A module from
+    before ``SPEC_DIGEST`` existed writes none rather than a wrong one.
 
     Args:
         module: A module produced by :func:`kober.pygen.render` — anything with
@@ -843,6 +850,8 @@ def run_compiled(
             "cannot be declared. Compile the spec again with `kober compile`."
         )
         raise TypeError(msg)
+    checked = document_params(module.NAME, getattr(module, "PARAMS", {}), params or {})
+    spec_digest = getattr(module, "SPEC_DIGEST", None)
     with zpf.decode_stage(
         source,
         sink,
@@ -851,6 +860,7 @@ def run_compiled(
         produced_at=produced_at,
         comment=comment,
         adjacency=_adjacency(Emit(emit)),
+        params_digest=None if spec_digest is None else params_digest(spec_digest, emit, checked),
     ) as stage:
         for stream in stage.streams():
             decode_stream_compiled(module, stage, stream, params=params)
