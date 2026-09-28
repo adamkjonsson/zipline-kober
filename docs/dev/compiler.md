@@ -93,16 +93,32 @@ They pass `ruff` with this repository's own configuration, and
 checked in and compared character for character. A diff in generated code is
 reviewable like any other, which is the point of keeping it.
 
+The configuration includes a limit of 20 branches a function, and a unit that
+frames a body and inflates it is where that bites: `examples/http.yaml`'s
+message unit reached 28 when it began to inflate its content. So what can be
+said once is said in {mod}`kober.runtime` rather than inline:
+{func}`~kober.runtime.run_transform` contains every way a transform fails,
+{func}`~kober.runtime.take_over` writes what its outcome says about its source,
+{func}`~kober.runtime.size_of` checks a size, {func}`~kober.runtime.decode_text`
+decodes a string, and {func}`~kober.runtime.present` refuses a reference to a
+field that holds nothing. An absent field is assigned before its condition
+rather than in an `else`, a record every branch writes alike is written once,
+and a switch of one transform under different names is one call with the name
+looked up.
+
 ### A generated module imports `kober.runtime` and nothing else
 
 No spec model, no `Node`, no YAML, no checker. That is what makes a decoder
 shippable, and it is why {func}`kober.runtime.read_int_le` exists at all — the
 one spec-shaped import happens there, once. It is also why a module says what
-it is in plain strings: `NAME` and `VERSION` for the spec, and `EMIT` for the
-granularity it was compiled at — the {class}`~kober.spec.Emit` value's string,
-since the enum lives in the spec model the module must not import. `EMIT`
-records a compile-time choice rather than offering one (`DESIGN.md` §14.3);
-what it is for is the driver.
+it is in plain strings: `NAME` and `VERSION` for the spec, `SPEC_DIGEST` for
+exactly which one, and `EMIT` for the granularity it was compiled at — the
+{class}`~kober.spec.Emit` value's string, since the enum lives in the spec model
+the module must not import. `EMIT` records a compile-time choice rather than
+offering one (`DESIGN.md` §14.3); what it is for is the driver. A spec with
+`params:` adds `PARAMS`, their declared types, and one with transforms adds
+`TRANSFORMS`, bound from {data}`kober.transforms.DEFAULT` when the module is
+imported, so a name nothing binds fails the import rather than every message.
 
 ### Both halves write through the same driver
 
@@ -113,9 +129,13 @@ implementation of them is one place for them to be wrong. The same goes for
 what the output *declares*: one `_adjacency()` derives it from the root
 granularity, the interpreter hands it the resolved entry and `run_compiled`
 hands it `Emit(module.EMIT)`, and a module without `EMIT` is refused rather
-than guessed at. The file-level differential in `tests/test_compiled.py`
-compares the participant line along with every record and region, so the two
-derivations cannot drift apart quietly.
+than guessed at. The decoder descriptor's `params_digest` is derived once as
+well, by {func}`kober.runtime.params_digest`, from the spec's digest, the
+resolved granularity and the parameters. The compiled step passes a message's
+regions on after its records, the order the interpreter's writes in. The
+file-level differential in `tests/test_compiled.py` compares the decoder
+descriptor and the participant line along with every record and region, so the
+two derivations cannot drift apart quietly.
 
 ## What the Python backend refuses
 
@@ -141,6 +161,12 @@ All deliberate, each with a message naming the spec's own words:
   element it chose, and an ordinary read's is where it stands; one pair of span
   locals cannot hold both, written down as they are before the branch is
   chosen. Every case a select compiles, and so does none.
+- **A `transform` whose `type` is not a unit.** Its output is decoded by
+  calling that unit's function over the output, and a scalar type has none.
+  Wrap it in a unit.
+- **A transform over a `switch` that joins different members on different
+  branches**, at field granularity. When it fails, the members are what is
+  named `undecodable`, and the module would not know whose.
 
 Each is narrower than what the interpreter accepts. That is the honest cost of
 compiling, and it is stated rather than worked around — a refusal naming the

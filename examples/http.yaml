@@ -222,7 +222,7 @@ units:
           The rest of the line, **leading whitespace included** — RFC 7230
           §3.2.3 permits it and this is where it survives. `to_int` strips it
           on the way past, so a length needs nothing; a comparison needs
-          `trim`, which is what `chunked` above does and why.
+          `trim`, which is what `framing` above does and why.
 
   trailer_section:
     doc: >

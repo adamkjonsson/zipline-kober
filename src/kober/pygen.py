@@ -145,11 +145,13 @@ RUNTIME_NAMES = frozenset(
         "TruncatedRead",
         "Undecodable",
         "cited",
+        "present",
         "prim_int",
         "record_int",
         "read_int_le",
         "shift_left",
         "shift_right",
+        "span",
         "to_int",
     }
 )
@@ -844,11 +846,15 @@ class Binding:
     element: str = ELEMENT_LOCAL
     index: int | None = None
 
-    def render(self, path: Sequence[str]) -> str:
+    def render(self, path: Sequence[str], *, guarded: bool = False) -> str:
         """Render one reference as a Python expression.
 
         Args:
             path: The reference's components, scope word included.
+            guarded: Whether a step that may hold nothing, a field under a
+                ``condition`` or a transform's, is read through
+                :func:`kober.runtime.present`. What an expression wants; a
+                caller passing a value on, or naming a local, does not.
 
         Returns:
             Python source for the value it names.
@@ -887,8 +893,29 @@ class Binding:
         else:
             local = self.names.attribute_of(head.unit, head.name)
         local = self.element if bound else prefix + local
-        return local + "".join(
-            f".{self.names.attribute_of(step.unit, step.name)}" for step in tail
+        if not guarded:
+            return local + "".join(
+                f".{self.names.attribute_of(step.unit, step.name)}" for step in tail
+            )
+        spelled = _literal(".".join(parts))
+        text = local
+        if not head.param and not bound and self._maybe_missing(head.unit, head.name):
+            text = f"present({text}, {spelled}, {_literal(head.name)}, None)"
+        previous = head.name
+        for step in tail:
+            text = f"{text}.{self.names.attribute_of(step.unit, step.name)}"
+            if self._maybe_missing(step.unit, step.name):
+                text = f"present({text}, {spelled}, {_literal(step.name)}, {_literal(previous)})"
+            previous = step.name
+        return text
+
+    def _maybe_missing(self, unit: str, name: str) -> bool:
+        """Whether a field may hold nothing: under a ``condition``, or a transform's."""
+        item = self.plan.object(unit).field(name)
+        if item is None:
+            return False
+        return item.condition is not None or any(
+            kind.transform is not None for kind in item.types
         )
 
     def _document(self, word: str | None, rest: Sequence[str]) -> str | None:
@@ -999,7 +1026,7 @@ def _expr(expr: Expr, binding: Binding, limit: int) -> str:
     if isinstance(expr, BoolLiteral):
         return "True" if expr.value else "False"
     if isinstance(expr, Ref):
-        return binding.render(expr.path)
+        return binding.render(expr.path, guarded=True)
     if isinstance(expr, UnaryOp):
         if expr.op == "not" and isinstance(expr.operand, BoolOp):
             negated = _membership(expr.operand, binding, negate=True)
@@ -1973,9 +2000,9 @@ class _Function:
         assert value.expr is not None  # noqa: S101 - the caller checked
         ranges: list[str] = []
         for ref in references(value.expr):
-            local = self.reachable(ref.path)
-            if local is not None and f"_s_{local}" in self.spans:
-                ranges.append(f"(_s_{local}, _e_{local})")
+            found = self.cited_range(ref.path)
+            if found is not None:
+                ranges.append(found)
         if not ranges:
             return start, end
         one = f"{pad}_cites = cited([{', '.join(ranges)}], ({start}, {end}))"
@@ -1992,6 +2019,39 @@ class _Function:
             self.emit(f"{pad}    ({start}, {end}),")
             self.emit(f"{pad})")
         return "_cites[0]", "_cites[1]"
+
+    def cited_range(self, path: tuple[str, ...]) -> str | None:
+        """Return the range a reference's value was read from, as a Python expression.
+
+        A field of this unit has its span locals. A path into a nested unit
+        reads the field's span off the object that holds it
+        (:func:`kober.runtime.span`), as the interpreter cites that field's
+        node. A path that passes through a transform stops there: past it the
+        offsets are the output's, so the transform's own range is the
+        evidence. ``None`` for what this function holds nothing for.
+        """
+        local = self.reachable(path[:1] if path[0] != "this" else path[:2])
+        if local is None or f"_s_{local}" not in self.spans:
+            return None
+        parts = path[1:] if path[0] == "this" else path
+        if len(parts) == 1:
+            return f"(_s_{local}, _e_{local})"
+        steps = walk_path(self.plan, self.obj.unit, parts)
+        holder = local
+        for position, step in enumerate(steps):
+            item = self.plan.object(step.unit).field(step.name)
+            is_transform = item is not None and any(
+                kind.transform is not None for kind in item.types
+            )
+            if position == 0:
+                if is_transform:
+                    return f"(_s_{local}, _e_{local})"
+                continue
+            attribute = self.names.attribute_of(step.unit, step.name)
+            if is_transform or position == len(steps) - 1:
+                return f"span({holder}, {_literal(attribute)})"
+            holder = f"{holder}.{attribute}"
+        return None
 
     def reachable(self, path: tuple[str, ...]) -> str | None:
         """Return the local a reference names, if it is one of this unit's fields.
@@ -3140,11 +3200,13 @@ def _fallible(rendered: str) -> bool:
     ``to_int`` is here because the differential put it here: text that is not a
     number raises, and without the wrapper a generated decoder let `EvalError`
     escape — breaking the promise that a decode never raises, on input the
-    interpreter had already turned into an undecodable region.
+    interpreter had already turned into an undecodable region. ``present`` is
+    here for the same reason: a field under a condition may be absent, and a
+    transform's may have failed.
     """
     return any(
         token in rendered
-        for token in ("//", " % ", "shift_left(", "shift_right(", "to_int(")
+        for token in ("//", " % ", "shift_left(", "shift_right(", "to_int(", "present(")
     )
 
 

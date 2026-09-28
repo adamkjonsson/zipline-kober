@@ -22,6 +22,7 @@ import importlib.util
 import re
 import struct
 import sys
+import zlib
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
@@ -862,6 +863,53 @@ def test_a_computed_field_cites_the_fields_it_read():
     writes(spec, b"\x02\x00", Emit.FIELD)
 
 
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_a_computed_field_reading_a_nested_unit_cites_the_field_it_read(emit: Emit):
+    """`h.v` is the evidence, not the empty position the computed field stands at.
+
+    Since the compiler's first version it cited its own position for any
+    dotted path, and the interpreter the field; no spec in the corpus read one.
+    """
+    spec = inline("""
+        name: nested
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: h, unit: hdr}
+              - {name: pad, bits: 8}
+              - {name: x, computed: "h.v + 1"}
+          hdr:
+            fields:
+              - {name: w, bits: 8}
+              - {name: v, bits: 8}
+    """)
+    data = bytes([1, 2, 3])
+    writes(spec, data, emit)
+    records, _ = interpreted(spec, data, Emit.FIELD)
+    assert {r.role: (r.off_start, r.off_end) for r in records}["nested.x"] == (1, 2)
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+@pytest.mark.parametrize("data", [bytes([2, 9]), bytes([1, 9])], ids=["absent", "present"])
+def test_an_expression_naming_an_absent_field_is_undecodable_in_both(data: bytes, emit: Emit):
+    """A generated module let a `TypeError` escape here: a decode must never raise."""
+    spec = inline("""
+        name: absent
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: n, bits: 8}
+              - {name: a, bits: 8, condition: "n == 1"}
+              - {name: x, computed: "a + 1"}
+    """)
+    compare(spec, data)
+    writes(spec, data, emit)
+
+
 def test_a_computed_integer_is_sized_by_its_value():
     """Nothing declares a width for it, so the token comes from the number."""
     spec = inline("""
@@ -1543,6 +1591,31 @@ AWKWARD["prefixes"] = """
 AWKWARD["transform"] = TRANSFORM_SPEC
 AWKWARD["transform framed by length"] = TRANSFORM_SPEC
 AWKWARD["transform bomb"] = TRANSFORM_SPEC
+
+#: Expressions naming a field that may hold nothing: one under a condition, and
+#: a transform's output, read by a dotted path and as bytes. Until this was in
+#: the corpus a generated module let a `TypeError` escape for the first and an
+#: `AttributeError` for the second, and cited its own position for both.
+AWKWARD["maybe missing"] = """
+    name: missing
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - {name: n, type: {int: {bits: 8}}}
+          - {name: a, type: {int: {bits: 8}}, condition: "n == 1"}
+          - {name: next, type: {computed: "a + 1"}}
+          - {name: size, type: {int: {bits: 8}}}
+          - {name: body, type: {bytes: {size: {expr: size}}}}
+          - {name: doc, transform: {from: body, with: deflate, limit: 64, type: {unit: d}}}
+          - {name: raw, transform: {from: body, with: deflate, limit: 64}}
+          - {name: v, type: {computed: "doc.v * 2"}}
+          - {name: same, type: {computed: "raw == body"}}
+      d:
+        fields:
+          - {name: v, type: {int: {bits: 8}}}
+"""
 AWKWARD["transform overlong"] = TRANSFORM_SPEC
 
 #: A concat with nothing transforming it: the joined bytes are a record of
@@ -1585,6 +1658,7 @@ AWKWARD_SEEDS: dict[str, bytes] = {
     "transform": TRANSFORM_MESSAGES[0],
     "transform framed by length": TRANSFORM_MESSAGES[1],
     "transform bomb": TRANSFORM_ADVERSE[0],
+    "maybe missing": bytes([1, 9, len(zlib.compress(b"\x05"))]) + zlib.compress(b"\x05"),
     "transform overlong": TRANSFORM_ADVERSE[1],
     "concat": bytes([2]) + b"ab" + bytes([1]) + b"c" + bytes([0]) + b"tail",
 }

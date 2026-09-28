@@ -1,10 +1,11 @@
 # kober — design
 
 **Status:** implemented, exercised against real captures, and released as
-`0.x` — `v0.1.0` to `v0.3.0`, and now `0.4.0`, each pinning one `zpf` minor.
-The spec model, expression language, checker, decode engine, emitter, stage
-driver, all five CLI verbs, the **compiler** (§14), and the `Pointer` construct
-(§3.2) exist, in both implementations. What is *not* built is marked as such:
+`0.x` — `v0.1.0` to `v0.4.0`, each pinning one `zpf` minor, with `0.5.0` in
+development. The spec model, expression language, checker, decode engine,
+emitter, stage driver, all five CLI verbs, the **compiler** (§14), the
+`Pointer` construct (§3.2), and byte transforms (§3.2, revision 12) exist, in
+both implementations. What is *not* built is marked as such:
 everything in §11 that is still a question.
 
 **Sections marked [verified] were executed, not reasoned about** — against
@@ -939,7 +940,7 @@ its static answer, since a spec's validity would come to depend on what a
 caller had registered. That extension point is question 5's *hooks* branch, and
 the shape it wants is the spec **naming** a transform while a registry supplies
 it — the spec file staying data, which is also what keeps a non-Python backend
-possible.
+possible. It was built that way in revision 12, as a field type (§3.2).
 
 This is the "richer expressions" branch of question 5, taken.
 
@@ -1816,6 +1817,15 @@ which reads it to declare what the output's records assert about one another
 refuses a module without it rather than guessing, since a stale field module
 writing `contiguous` over sub-byte fields is the silent wrong statement
 `adjacency` exists to prevent.
+
+Revision 12 adds what a transform needs. A field that holds a transform's
+output is annotated `| TransformFailed` as well, since a failure is contained
+and the message still returned: the value says why, in the interpreter's
+words. A module carries `SPEC_DIGEST`, so `run_compiled` writes the same
+`params_digest` the interpreter does; `PARAMS`, when the spec declares any,
+which `decode` and `decode_from` then take as `params=`; and `TRANSFORMS`,
+bound from the default registry when the module is imported, so a name
+nothing binds fails the import once rather than every message.
 
 ### 14.4 Names, and refusing rather than renaming
 

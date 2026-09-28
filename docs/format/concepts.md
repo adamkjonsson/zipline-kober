@@ -177,6 +177,10 @@ Arguments bind positionally and their types are checked, so a unit that takes an
 like a field, but it decodes nothing and appears in no output — it is a value,
 not a region of bytes.
 
+The document has parameters too, a different thing with the same key:
+[`params`](document.md#params) at the top level are supplied by whoever runs
+the spec, a key say, and are in scope in every unit.
+
 ### Why not just nest the fields?
 
 Two reasons, and neither is style.

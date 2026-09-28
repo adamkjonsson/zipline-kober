@@ -2,7 +2,7 @@
 
 Expressions appear wherever a spec needs a value it cannot know in advance: a
 size, a repeat count, a condition, a switch's dispatch, a unit argument, a
-guard.
+guard, a select's predicate and projection, a transform's arguments.
 
 ```yaml
 size: {expr: "header.length * 4"}
@@ -16,8 +16,9 @@ exists**.
 
 ## The language
 
-Arithmetic, comparison, boolean operators, references, and literals. No calls,
-no loops, no indexing, no conditional expressions.
+Arithmetic, comparison, boolean operators, references, literals, and the
+closed table of [functions](#functions) below. No other calls, no loops, no
+indexing, no conditional expressions.
 
 | | |
 | --- | --- |
@@ -30,8 +31,9 @@ no loops, no indexing, no conditional expressions.
 Precedence and associativity are Python's, because the parser is Python's —
 `ast.parse` in expression mode, with a whitelist of node types. That is why "no
 calls, no loops" holds by construction: a construct is refused because it is
-absent from the whitelist, and refused **by name** (`a function call is not
-allowed in an expression`) rather than by an AST class.
+absent from the whitelist, and refused **by name** (`'foo' is not one of the
+expression language's functions; there are only endswith(), lower(),
+startswith(), to_int(), trim()`) rather than by an AST class.
 
 ### Four types, and no coercion
 
@@ -73,8 +75,15 @@ Follows Kaitai. A bare name is shorthand for `this`.
 | `parent.` | The unit that referenced this one |
 | `root.` | The entry unit |
 
-Unit parameters are in scope by name. A dotted path descends into a nested
-unit: `header.length` reads the `length` field of the `header` field's unit.
+Unit parameters are in scope by name, and so are the document's
+[`params`](document.md#params), in every unit. A dotted path descends into a
+nested unit: `header.length` reads the `length` field of the `header` field's
+unit.
+
+A [`transform`](types.md#transform)'s field is its output: bytes, or the unit
+its `type` names, into which a dotted path descends as into any other. A
+value read that way cites the transform's range, since the output's offsets
+name no input byte.
 
 ### A field may only reference fields declared before it
 
@@ -176,11 +185,13 @@ registered.
 
 ## Decode-time failure
 
-Two things a total, side-effect-free language still cannot rule out
-statically, both of which make the affected region `undecodable` rather than
-raising:
+What a total, side-effect-free language still cannot rule out statically, each
+of which makes the affected region `undecodable` rather than raising:
 
 - **Division or modulo by zero**, where the divisor came off the wire.
 - **A shift count that is negative or absurd.** `1 << n` with `n` from the wire
   is a memory-exhaustion vector, so counts above
   {data}`kober.expr.MAX_SHIFT` are refused rather than computed.
+- **Text that is not a number**, handed to `to_int`.
+- **A field that holds nothing**: one its `condition` left absent (`'a' has not
+  been decoded`), or a transform that failed (`'doc' failed:` and why).

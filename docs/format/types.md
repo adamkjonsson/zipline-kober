@@ -371,6 +371,18 @@ in every process. A key, which a spec cannot hold, is a
 A `transform` cannot repeat, and its source may not be `emit: none`: the
 transform's outcome is what speaks for the source's bytes.
 
+A transform may be a `switch` case, which is how a content coding chooses one:
+
+```yaml
+- name: content
+  condition: "encoding == 'gzip' or encoding == 'deflate'"
+  switch:
+    dispatch: encoding
+    cases:
+      deflate: {transform: {from: body, with: deflate, limit: 16777216}}
+    default: {transform: {from: body, with: gzip, limit: 16777216}}
+```
+
 **A transform that fails does not fail its message.** Bad compressed data, an
 output past `limit`, an argument that cannot be evaluated, an output its `type`
 does not decode or does not read to its end: the message still decodes whole,
@@ -386,8 +398,13 @@ is a `concat` has no bytes of its own, only its members', and its range also
 covers the framing between them, such as a chunked body's size lines. So its
 members are what the transform takes over: when it fails, each member's record
 is taken back and each non-empty member is named `undecodable`, while the size
-lines keep their records. At message granularity the message record holds the input as it arrived, so a failed
-transform is not visible in the file there, only in the tree.
+lines keep their records. An argument field marked `emit: none` is spoken for
+by an output that succeeded, which cites it, so it names nothing then, and is
+`skipped` when the transform fails. That is how a tunnel's header, a nonce
+say, stays out of a first stage's output while the plaintext cites it: one
+record per datagram, for a second stage to read. At message granularity the
+message record holds the input as it arrived, so a failed transform is not
+visible in the file there, only in the tree.
 
 A message whose transform failed decoded whole, so the stream goes on after
 it. It neither confirms the stream nor declines it: a transform is often a
@@ -398,7 +415,9 @@ transform fail is declined at its end, saying so.
 `kober compile` compiles both, and the module writes the same file as the
 interpreter. It decodes a transform's output only when its `type` is a unit,
 by calling that unit's function over the output. Any other `type` is refused
-with a `CompileError`; wrap it in a unit, or decode with the interpreter. A
+with a `CompileError`; wrap it in a unit, or decode with the interpreter. So
+is a source whose `switch` joins different members on different branches, at
+field granularity, since the module could not say whose bytes failed. A
 generated module binds its transforms when it is imported, from the registry
 `kober.transforms.register` fills, so a program registers a cipher before
 importing the module. A failed transform leaves a
@@ -432,9 +451,10 @@ Any other name is the spec's own, a cipher say, declared with its parameters.
 **What a name is bound to is the program's business, not the spec's.** kober
 binds what the Python standard library can run, and a program adds the rest
 with {func}`kober.transforms.register`, or a {class}`kober.transforms.Registry`
-of its own, or from the command line in a module `--load-transforms` runs: a cipher, which the standard library has none of, or `br` from a
-Brotli package. A transform is a callable taking the source's bytes, `limit`,
-and the spec's `args` by name, and returning at most `limit` bytes. What it
+of its own, or from the command line in a module `--load-transforms` runs: a
+cipher, which the standard library has none of, or `br` from a Brotli package.
+A transform is a callable taking the source's bytes, `limit`, and the spec's
+`args` by name, and returning at most `limit` bytes. What it
 raises makes the source `undecodable`, and its message is never written out: a
 cipher's error text can hold a key. A name a spec uses that nothing binds is
 refused before any input is read, saying whether it is a well-known name this
@@ -530,8 +550,8 @@ trailing field to fail on an empty cursor.
 rejected. An integer contributes its `bits`; a `bytes` or `string` sized `fixed`
 contributes its length; a nested unit contributes the sum of its own fields; a
 `switch` counts only when every case *and* a present `default` agree on a width.
-A `computed`, `select` or `pointer` reads nothing where it stands and so claims
-none of the trailer.
+A `computed`, `select`, `pointer`, `concat` or `transform` reads nothing where
+it stands and so claims none of the trailer.
 
 Refused, because each would make the boundary a guess: a trailing field with a
 `condition`, a repeat whose count the spec does not fix, a trailing size that is
@@ -576,8 +596,9 @@ the message through 'data', but 'trailer' is decoded after it and would have
 no bytes left
 ```
 
-A field that reads nothing where it stands — a `computed`, `select` or
-`pointer` — may follow, since nothing starves it. A `remaining` inside a
+A field that reads nothing where it stands — a `computed`, `select`,
+`pointer`, `concat` or `transform`, or a `switch` whose every case is one of
+those — may follow, since nothing starves it. A `remaining` inside a
 `pointer`'s target counts for nothing either: the target is read on its own
 cursor at another offset. A `remaining` under a `repeat` is refused outright,
 as a repeating `fill` is. The rule is the same under `input: stream`, and the

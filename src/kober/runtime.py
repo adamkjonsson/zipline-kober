@@ -86,6 +86,7 @@ __all__ = [
     "first_failed",
     "normalize_int",
     "params_digest",
+    "present",
     "prim_int",
     "record_int",
     "prim_token",
@@ -485,6 +486,39 @@ def record_int(
     labelled = prim_int(value)
     if labelled is not None:
         sink.record(*labelled, off_start, off_end, role)
+
+
+def present(value: object, path: str, name: str, parent: str | None) -> object:
+    """Return a referenced field's value, or say why an expression cannot have it.
+
+    A field under a ``condition`` may be absent, and a transform's field holds a
+    :class:`TransformFailed` when it failed. Either makes an expression naming it
+    unevaluable, which is the region's ``undecodable``, worded as the
+    interpreter words it.
+
+    Args:
+        value: What the field holds.
+        path: The whole reference, as the spec wrote it.
+        name: The field's name.
+        parent: The field it was reached through, or ``None`` for the first.
+
+    Returns:
+        ``value``.
+
+    Raises:
+        EvalError: If the field is absent or its transform failed.
+
+    """
+    if isinstance(value, TransformFailed):
+        msg = f"{path}: {name!r} failed: {value.detail}"
+        raise EvalError(msg)
+    if value is None:
+        if parent is None:
+            msg = f"{path}: {name!r} has not been decoded"
+        else:
+            msg = f"{path}: {name!r} is not a field of {parent!r}"
+        raise EvalError(msg)
+    return value
 
 
 def size_of(want: int, at: int) -> int:

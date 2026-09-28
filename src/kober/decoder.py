@@ -249,16 +249,30 @@ class _Environment:
         if node is None:
             msg = f"{'.'.join(path)}: {head!r} has not been decoded"
             raise EvalError(msg)
+        _usable(node, path)
         for part in rest:
             child = node.find(part)
             if child is None:
                 msg = f"{'.'.join(path)}: {part!r} is not a field of {node.name!r}"
                 raise EvalError(msg)
             node = child
+            _usable(node, path)
         if node.value is None:
             msg = f"{'.'.join(path)}: {node.name!r} has no scalar value"
             raise EvalError(msg)
         return node.value
+
+
+def _usable(node: Node, path: tuple[str, ...]) -> None:
+    """Refuse a reference through a transform that failed, saying so.
+
+    Its node holds nothing, and "not a field of" would blame the spec for what
+    the input did. :func:`kober.runtime.present` says the same for a generated
+    module.
+    """
+    if node.failed:
+        msg = f"{'.'.join(path)}: {node.name!r} failed: {node.detail}"
+        raise EvalError(msg)
 
 
 class Decoder:

@@ -534,6 +534,10 @@ def _lookup(path: Sequence[str], parent: Node) -> Node | None:
         if node is None:
             return None
         node = node.find(part)
+        if node is not None and isinstance(node.resolved_type, Transform):
+            # Past here the offsets are the output's and name no input byte:
+            # the transform's own range is what the value was computed from.
+            return node
     return node
 
 

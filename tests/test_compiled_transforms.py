@@ -10,16 +10,19 @@ from __future__ import annotations
 
 import gzip
 import sys
+import zlib
 from types import ModuleType
 
 import pytest
 from cipher import seal, xor_open
 from fuzzing import HOSTILE_SPEC, hostile, hostile_cases
-from test_compiled import writes
+from test_compiled import interpreted, writes
 
 from kober import transforms
+from kober.decoder import Decoder
 from kober.errors import ParameterError, UnboundTransformError
 from kober.loader import from_yaml
+from kober.node import NodeStatus
 from kober.pygen import render_spec
 from kober.runtime import TransformFailed
 from kober.spec import Emit, Spec
@@ -187,3 +190,54 @@ def test_the_two_agree_on_a_transform_that_misbehaves(seed: int, emit: Emit):
         except AssertionError as exc:
             exc.add_note(f"disagreed: hostile {emit.value} on {data!r}")
             raise
+
+
+# --- an expression reading a transform's output ------------------------------------------------
+
+READS_OUTPUT = """
+name: reads
+version: "1"
+entry: m
+units:
+  m:
+    fields:
+      - {name: n, bits: 8}
+      - {name: body, bytes: {size: {expr: n}}}
+      - {name: doc, transform: {from: body, with: deflate, limit: 64, type: {unit: d}}}
+      - {name: raw, transform: {from: body, with: deflate, limit: 64}}
+      - {name: next, computed: "doc.v + 1"}
+      - {name: same, computed: "raw == body"}
+      - {name: after, bits: 8}
+  d:
+    fields:
+      - {name: v, bits: 8}
+"""
+
+
+def reads_output(inner: bytes | None) -> bytes:
+    """Frame a body inflating to ``inner``, or one that does not inflate at all."""
+    body = b"bad" if inner is None else zlib.compress(inner)
+    return bytes([len(body)]) + body + b"\x07"
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+@pytest.mark.parametrize("inner", [b"\x05", None], ids=["inflates", "fails"])
+def test_an_expression_reading_an_output_agrees_in_both(emit: Emit, inner: bytes | None):
+    """A failed transform makes the expression unevaluable, and nothing escapes."""
+    writes(from_yaml(READS_OUTPUT), reads_output(inner), emit)
+
+
+def test_an_expression_through_a_failed_transform_says_it_failed():
+    """Not that `v` is not a field of `doc`, which would blame the spec."""
+    tree = Decoder(from_yaml(READS_OUTPUT)).decode_bytes(reads_output(None))
+    assert tree.status is NodeStatus.UNDECODABLE
+    assert tree.detail == "doc.v: 'doc' failed: deflate: not valid compressed data"
+
+
+def test_a_value_read_from_an_output_cites_the_transforms_range():
+    """An output's offsets name no input byte, so the transform's range is the evidence."""
+    spec = from_yaml(READS_OUTPUT)
+    data = reads_output(b"\x05")
+    records, _ = interpreted(spec, data, Emit.FIELD)
+    cites = {record.role: (record.off_start, record.off_end) for record in records}
+    assert cites["reads.next"] == (1, len(data) - 1) == cites["reads.doc.v"]

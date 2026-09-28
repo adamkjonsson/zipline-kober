@@ -57,7 +57,11 @@ minor bump here too.
   `emit: none` names nothing when the transform succeeds, since the output
   cites its bytes, and is `skipped` when it fails: that is what lets a
   tunnel's first stage write one plaintext record per datagram, for a second
-  stage to read. A message whose
+  stage to read. An expression may read a transform's output, as bytes or by a
+  dotted path into its unit; one reading a transform that failed makes its
+  field `undecodable`, saying `'doc' failed: …` and why, and a value read from
+  an output cites the transform's range, since the output's offsets name no
+  input byte. A message whose
   transform failed neither confirms nor declines its stream, and a stream in
   which every message that decoded had one fail is declined saying so.
   `kober run` and `kober try` take `--param NAME=VALUE`, read as the declared
@@ -127,9 +131,9 @@ minor bump here too.
   guard has held, and `kober.errors.Refused`, which a generated module raises
   for that refusal. Both are re-exported from `kober`. `Held.retract(role)`
   takes back a transform's source record.
-- `kober.runtime.size_of`, `decode_text` and `record_int`, which generated
-  modules call where they used to branch, and `Held.withdraw`. Re-exported
-  from `kober`.
+- `kober.runtime.size_of`, `decode_text`, `record_int` and `present`, which
+  generated modules call where they used to branch or raise, and
+  `Held.withdraw`. Re-exported from `kober`.
 - For generated modules' transforms, all re-exported from `kober`:
   `kober.runtime.run_transform`, `take_over`, `concat`, `Output`,
   `TransformFailed`, `first_failed`, `bind_transforms`, `document_params` and
@@ -192,6 +196,14 @@ minor bump here too.
 
 ### Fixed
 
+- **A compiled module no longer raises out of a decode when an expression
+  names a field its `condition` left absent.** It let a `TypeError` escape,
+  where the interpreter makes the field `undecodable` with `'a' has not been
+  decoded`; now both do. Nothing in the shipped examples referenced a
+  conditional field, which is why the differential never saw it.
+- **A computed field reading a nested unit's field (`h.v`) cites that field in
+  a compiled module too.** It cited its own empty position there, since the
+  compiler's first version, where the interpreter cited the field it read.
 - **A long condition, or one value compared with several literals, no longer
   makes a generated module fail the project's own lint.** A nested `or` too
   long for its line is split inside its brackets, and `x == 'a' or x == 'b'`
@@ -226,6 +238,14 @@ minor bump here too.
 
 ### Documentation
 
+- A sweep for what 0.5.0 left stale: the README's count of field types, its
+  `zpf` requirement, and what `compile` and the pipeline do with transforms;
+  the type-kind table in `document.md` and what `params` do to the digest;
+  `types.md` on transforms as switch cases, `emit: none` arguments, and what
+  reads nothing after a `fill` or `remaining`; `expressions.md` on its calls
+  and on naming parameters and transform outputs; and `compiler.md`,
+  `architecture.md`, `testing.md` and `contributing.md` on the runtime helpers,
+  the new tests, and where a new construct has to be registered.
 - `docs/format/concepts.md` gains *A second offset space*, what a transform's
   output is and what a file can and cannot say about it, and the rule that a
   failed transform neither confirms nor declines; its last *cannot say* bullet

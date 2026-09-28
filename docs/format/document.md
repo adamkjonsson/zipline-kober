@@ -136,10 +136,19 @@ parameter.
 Every one is required, and a run without one does not start. From the command
 line, `--param NAME=VALUE`, read as the declared type: `bytes` as `hex:0a0b` or
 `file:PATH`, never as bare text; `int` as a decimal; `bool` as `true` or
-`false`; `str` as given. From Python, `Decoder(spec, params={...})`.
+`false`; `str` as given. From Python, `Decoder(spec, params={...})`, and a
+compiled module's `decode(data, params={...})` or
+`run_compiled(module, ..., params={...})`.
 
 `secret: true` marks a value that must never be written anywhere: not in a
-record, a region's comment, or a diagnostic.
+record, a region's comment, or a diagnostic. Every value goes into the
+`params_digest` the output's decoder descriptor carries, a digest of the spec,
+the granularity and the parameters, so a file says which configuration wrote
+it; a secret one is in it only as part of the hash.
+
+These are the **document's** parameters, supplied by whoever runs the spec. A
+unit's own `params` (below) are supplied by the field that references the
+unit, and are a different thing.
 
 ## Units
 
@@ -212,7 +221,7 @@ lets the type and the repetition be written directly on it:
 | | Keys |
 | --- | --- |
 | **Its own** | `name`, `condition`, `const`, `emit`, `doc`, and the two wrappers below |
-| **A type kind** | `bits`, `int`, `bytes`, `string`, `unit`, `switch`, `computed`, `pointer`, `select` |
+| **A type kind** | `bits`, `int`, `bytes`, `string`, `unit`, `switch`, `computed`, `pointer`, `select`, `concat`, `transform` |
 | **A repeat kind** | `count`, `until`, `to_end` |
 
 | Key | Required | Meaning |
@@ -398,8 +407,8 @@ is why it is not in the table above.
 
 Since packeteer 0.13.0 the two dialects share one spelling: it renamed its
 switch key to `dispatch` and took kober's shorthands, so a spec from either
-repository loads in the other, with the exceptions kober 0.5.0 added below. What does *not* cross is now the mirror image
-of the table above — constructs of kober's that packeteer reads and declines by
+repository loads in the other, with the exceptions kober 0.5.0 added below.
+What does *not* cross is now the mirror image of the table above — constructs of kober's that packeteer reads and declines by
 name, since it builds messages as well as reads them and several of these have
 no encoding — and two places where the same key is accepted differently.
 Checked against packeteer 0.16.0; `tests/test_packeteer.py` covers the other
@@ -415,7 +424,9 @@ level, and a recursive unit. On `examples/dns.yaml` that is four named errors.
 `transform` and `concat`, which it does not know as keys, and a `switch` with a
 string case, since its cases are integers. `examples/http.yaml` has all three
 since kober 0.5.0, which is when it began to inflate its bodies; before that,
-packeteer loaded it and declined each of its fields by name.
+packeteer loaded it and declined each of its fields by name. Both are filed
+([packeteer#170](https://github.com/adamkjonsson/packeteer/issues/170),
+[packeteer#171](https://github.com/adamkjonsson/packeteer/issues/171)).
 
 **`input: stream` is refused unless the entry unit has exactly one field
 deriving `size_of`** — packeteer decodes one packet at a time and needs the

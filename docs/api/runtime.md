@@ -16,6 +16,12 @@ and the interpreter use the same ones, which is what makes the two comparable.
 
 ```{eval-rst}
 .. autofunction:: kober.runtime.read_int_le
+
+.. autofunction:: kober.runtime.size_of
+
+.. autofunction:: kober.runtime.decode_text
+
+.. autofunction:: kober.runtime.present
 ```
 
 ## What a record is made of
@@ -36,6 +42,8 @@ and the interpreter use the same ones, which is what makes the two comparable.
 .. autofunction:: kober.runtime.normalize_int
 
 .. autofunction:: kober.runtime.prim_int
+
+.. autofunction:: kober.runtime.record_int
 
 .. autofunction:: kober.runtime.cited
 ```

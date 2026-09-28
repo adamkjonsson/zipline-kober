@@ -24,6 +24,7 @@ writes it through `zpf`.
                    ▼
                  cli.py
 
+  transforms.py                               what a transform's name is bound to
   runtime.py                                  what generated code imports
   errors.py                                   used by all of it
 ```
@@ -51,6 +52,7 @@ outside `stage.py` is almost certainly in the wrong module.
 | `spec.py` | The model — `Spec`, `Unit`, `Field`, the field types, sizes, and repeats — as frozen dataclasses. Validates only what one object can see by itself. |
 | `loader.py` | YAML/JSON documents to that model, with a strict schema: an unknown key is an error, and YAML's implicit typing is guarded by name. |
 | `check.py` | Whole-spec validation: scoping, ordering, expression types, reachability, non-terminating recursion. Collects findings rather than raising. |
+| `transforms.py` | The well-known transform names and their tiers, the `Registry` that binds a name to a callable, and `apply`, the one place a transform runs, held to its limit and failing in kober's words. The spec never sees it: `check` types a transform from the spec alone. |
 | `cursor.py` | A bit-level read cursor. Owns the read position, translates run-relative reads into absolute citations, and rounds a sub-byte field out to its containing bytes. |
 | `node.py` | The in-memory decode tree, and `NodeStatus` — whose values *are* `zpf`'s `reason=` strings. Deliberately never written to a file. |
 | `decoder.py` | The decode engine: walks a spec over a cursor and returns a tree. Catches every decode-time signal and turns it into a node status. |
@@ -81,8 +83,13 @@ a hard message boundary. Within a contiguous run it builds a
 {class}`kober.cursor.Cursor` and calls the engine repeatedly until the run is
 exhausted. A run after a gap usually starts inside a message. Where the message
 the gap cut said where it ends, the run resumes there; where nothing did, its
-first message is held until it decodes whole (`DESIGN.md` §3.1, *After a gap*). The engine walks the spec, reading through the cursor and building
-{class}`kober.node.Node` objects. Per stream, the driver holds everything
+first message is held until it decodes whole (`DESIGN.md` §3.1, *After a
+gap*). The engine walks the spec, reading through the cursor and building
+{class}`kober.node.Node` objects. A transform runs on bytes a field already
+decoded, and its `type` is decoded on a second cursor over the output, whose
+nodes carry the transform's name as their `space`. A transform that fails
+leaves its message whole, and the message neither confirms nor declines the
+stream. Per stream, the driver holds everything
 until the first whole message **confirms** the stream, and **declines** a
 stream that fails before that or ends without one. A declined stream keeps no
 record: what was tried is `undecodable`, the rest `skipped` untried, each with
@@ -91,7 +98,9 @@ is believed*).
 
 **Emit.** {func}`kober.emit.plan` walks the tree and returns two lists:
 `Emission` (records to write) and `Unclaimed` (regions to mark, with a reason).
-It does no I/O.
+It does no I/O. A transform's outcome speaks for its source: an output's
+records cite the transform's range in the input, and a failure names the
+source `undecodable`.
 
 **Write.** The driver writes them, attaching a seam where a hole-class region
 lies between two records, and accounts for whatever the tree did not reach.
@@ -102,7 +111,7 @@ granularity in force at the entry unit ({func}`kober.emit.root_emit`) — the
 same for the interpreter and for a generated module, which records its own in
 `EMIT`.
 
-## The redirect seam, and what it is not yet used for
+## The redirect seam, and what a transform took from it
 
 {meth}`kober.cursor.Cursor.view` hands out a second read position over the same
 run: its own bytes, its own base so the spans it reports stay absolute, and its
@@ -114,17 +123,20 @@ nothing.
 citation a sub-decode reports *is* the range it read. That is the identity
 case.
 
-**It was built with one more caller in mind, and since 0.5.0 that caller
-exists.** A byte transform — decompressing a `Content-Encoding: gzip` body,
-decrypting a datagram — is the same shape with one variable changed: the
-bytes come from somewhere else, and what a record cites is the input region it
-was *computed from* rather than a region holding it. The Zipline format already
-allows exactly that: a decoder MAY emit bytes that appear nowhere in its input,
-and `spans` asserts correspondence rather than identity.
+**It was built with one more case in mind, and 0.5.0 met it.** A byte
+transform — decompressing a `Content-Encoding: gzip` body, decrypting a
+datagram — is the same shape with one variable changed: the bytes come from
+somewhere else, and what a record cites is the input region it was *computed
+from* rather than a region holding it. The Zipline format already allows
+exactly that: a decoder MAY emit bytes that appear nowhere in its input, and
+`spans` asserts correspondence rather than identity.
 
-So the seam takes the bytes to read, the offset they start at, and the offset
-it may not read past. What a transform added was not a fourth parameter but
-a *vocabulary*: which codec, with what configuration, supplied by a registry
+It did not go through `view` in the end. A transform's output is not the run's
+bytes, so it gets a {class}`~kober.cursor.Cursor` of its own at offset 0, and
+the nodes read there carry the transform's name as their `space`: their
+offsets are the output's, and the emitter cites the transform's range for them
+instead. What a transform added was not a parameter to the seam but a
+*vocabulary*: which codec, with what configuration, supplied by a registry
 rather than by the spec file (`DESIGN.md` §11.5).
 
 The test that the seam was drawn in the right place was stated before the
@@ -175,6 +187,14 @@ crafted input could otherwise turn into hangs are bounded: a repetition whose
 element consumes nothing, and unit nesting past
 {data}`kober.decoder.MAX_DEPTH`.
 
+A transform is the one place a caller's code runs, and whatever it raises
+becomes a {class}`kober.errors.TransformError` in {func}`kober.transforms.apply`,
+so it is contained like any failure: the source is `undecodable`, and the
+message goes on. A generated module reads a field that may hold nothing, one
+under a `condition` or a transform's output, through
+{func}`kober.runtime.present`, which refuses in the interpreter's words; until
+0.5.0 an expression naming an absent field raised out of a compiled decode.
+
 `tests/test_fuzz.py` asserts this over adversarial input, because it is a claim
 about all input rather than some.
 
@@ -185,7 +205,7 @@ four reasons — `undecodable`, `truncated`, `gap`, `skipped` — and
 {class}`kober.node.NodeStatus`'s values are those strings, so the emitter needs
 no translation table.
 
-Two consequences that are easy to get wrong, and both have been:
+Consequences that are easy to get wrong, and all have been:
 
 - A unit that failed part-way still **cited** what it decoded first, so marking
   its whole range would claim bytes twice. Uncovered runs are computed by
@@ -203,6 +223,12 @@ Two consequences that are easy to get wrong, and both have been:
   forward, which is what a stage reading a unit sequence must do. The seam is
   still written under `units`, redundant but permitted, because both drivers
   share one writer. `DESIGN.md` §5 has the argument.
+- A transform speaks for bytes other fields also cite, which opened two new
+  ways to cite and name one byte, each found only once a spec reached it: a
+  failed transform over a `concat` naming the hull its members' records cite,
+  and an argument field marked `emit: none` named `skipped` under the output
+  that cites it. A `concat`'s members are now taken over one by one, and a
+  transform that succeeds speaks for its `emit: none` arguments.
 
 ### The field path is formatted in exactly one place
 
