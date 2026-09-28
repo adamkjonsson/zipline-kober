@@ -1,8 +1,7 @@
 # kober — design
 
 **Status:** implemented, exercised against real captures, and released as
-`0.x` — `v0.1.0` to `v0.4.0`, each pinning one `zpf` minor, with `0.5.0` in
-development. The spec model, expression language, checker, decode engine,
+`0.x` — `v0.1.0` to `v0.5.0`, each pinning one `zpf` minor. The spec model, expression language, checker, decode engine,
 emitter, stage driver, all five CLI verbs, the **compiler** (§14), the
 `Pointer` construct (§3.2), and byte transforms (§3.2, revision 12) exist, in
 both implementations. What is *not* built is marked as such:
