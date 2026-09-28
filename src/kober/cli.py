@@ -28,6 +28,8 @@ region is a legitimate, conformant result, and ``run`` reports it and exits
 from __future__ import annotations
 
 import argparse
+import importlib
+import importlib.util
 import sys
 import textwrap
 from datetime import UTC, datetime
@@ -37,14 +39,15 @@ from typing import TYPE_CHECKING
 from kober import __version__
 from kober.check import Severity, check
 from kober.decoder import Decoder
-from kober.errors import KoberError
-from kober.expr import unparse
+from kober.errors import KoberError, ParameterError
+from kober.expr import ExprType, ExprValue, unparse
 from kober.node import NodeStatus
 from kober.ops import Plan
 from kober.pygen import render_spec
 from kober.spec import (
     BytesType,
     Computed,
+    Concat,
     Count,
     Emit,
     Fill,
@@ -59,6 +62,7 @@ from kober.spec import (
     Switch,
     Terminated,
     ToEnd,
+    Transform,
     UnitRef,
     Until,
 )
@@ -135,6 +139,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=f"kober {__version__}",
         help="what to record as the producer",
     )
+    _add_params(runner)
+    _add_loads(runner)
 
     compiler = verbs.add_parser("compile", help="write a decoder for a spec, as Python")
     _add_spec(compiler)
@@ -165,7 +171,121 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="BYTES",
         help="the buffer as hex, e.g. 0a0b or '0a 0b'",
     )
+    _add_params(prober)
+    _add_loads(prober)
     return parser
+
+
+def _add_loads(verb: argparse.ArgumentParser) -> None:
+    """Add ``--load-transforms``, which runs a module that registers transforms."""
+    verb.add_argument(
+        "--load-transforms",
+        action="append",
+        default=[],
+        metavar="MODULE",
+        help=(
+            "a Python module to run before decoding, which registers transforms "
+            "with kober.transforms.register: a cipher, or br. A path ending .py, or "
+            "an importable name; repeatable. A module is code and is run as code"
+        ),
+    )
+
+
+def _load_transforms(modules: Sequence[str]) -> None:
+    """Run each ``--load-transforms`` module, so what it registers is bound.
+
+    A path is loaded from its file and anything else is imported by name, which
+    is packeteer's ``--load-protocol`` rule. Whatever a module raises is
+    reported as a failure to load it, since it happened before any decode.
+    """
+    for index, module in enumerate(modules):
+        try:
+            if module.endswith(".py") or "/" in module:
+                path = Path(module)
+                spec = importlib.util.spec_from_file_location(
+                    f"kober_transforms_{index}_{path.stem}", path
+                )
+                if spec is None or spec.loader is None:
+                    msg = f"--load-transforms {module}: not a Python module"
+                    raise KoberError(msg)
+                loaded = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = loaded
+                spec.loader.exec_module(loaded)
+            else:
+                importlib.import_module(module)
+        except KoberError:
+            raise
+        except Exception as exc:
+            msg = f"--load-transforms {module}: {type(exc).__name__}: {exc}"
+            raise KoberError(msg) from exc
+
+
+def _add_params(verb: argparse.ArgumentParser) -> None:
+    """Add ``--param``, which supplies a value for one of the spec's ``params:``."""
+    verb.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help=(
+            "a value for one of the spec's params, repeatable. Read as the "
+            "parameter's declared type: bytes as hex:0a0b or file:PATH, int as a "
+            "decimal, bool as true or false, str as given"
+        ),
+    )
+
+
+def _params(spec: Spec, pairs: Sequence[str]) -> dict[str, ExprValue]:
+    """Read ``--param NAME=VALUE`` pairs as the types the spec declares.
+
+    A bytes value is never guessed from text: it is ``hex:`` or ``file:``, so a
+    key cannot be read in the wrong encoding. No message quotes a value, since
+    one may be a secret.
+    """
+    declared = {param.name: param.type for param in spec.params}
+    values: dict[str, ExprValue] = {}
+    for pair in pairs:
+        name, equals, text = pair.partition("=")
+        if not equals or not name:
+            msg = f"--param takes NAME=VALUE, got {pair.partition('=')[0]!r}"
+            raise ParameterError(msg)
+        if name not in declared:
+            msg = f"--param {name}: spec {spec.name!r} declares no such parameter"
+            raise ParameterError(msg)
+        values[name] = _param_value(name, declared[name], text)
+    return values
+
+
+def _param_value(name: str, kind: ExprType, text: str) -> ExprValue:
+    """Read one ``--param`` value as its declared type."""
+    if kind is ExprType.BYTES:
+        form, colon, rest = text.partition(":")
+        if colon and form == "hex":
+            try:
+                return bytes.fromhex(rest)
+            except ValueError as exc:
+                msg = f"--param {name}: not valid hex"
+                raise ParameterError(msg) from exc
+        if colon and form == "file":
+            try:
+                return Path(rest).read_bytes()
+            except OSError as exc:
+                msg = f"--param {name}: cannot read {rest!r}: {exc.strerror}"
+                raise ParameterError(msg) from exc
+        msg = f"--param {name}: a bytes value is hex:… or file:PATH"
+        raise ParameterError(msg)
+    if kind is ExprType.INT:
+        try:
+            return int(text, 10)
+        except ValueError as exc:
+            msg = f"--param {name}: not a decimal integer"
+            raise ParameterError(msg) from exc
+    if kind is ExprType.BOOL:
+        if text in ("true", "false"):
+            return text == "true"
+        msg = f"--param {name}: a bool is true or false"
+        raise ParameterError(msg)
+    return text
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -185,6 +305,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _check(spec, strict=args.strict)
         if args.verb == "show":
             return _show(spec)
+        if args.verb in ("run", "try"):
+            _load_transforms(args.load_transforms)
         if args.verb == "run":
             return _run(spec, args)
         if args.verb == "compile":
@@ -197,7 +319,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _run(spec: Spec, args: argparse.Namespace) -> int:
     """Decode a file into a decode stage, then report what landed in it."""
-    decoder = Decoder(spec, emit=Emit(args.emit))
+    decoder = Decoder(spec, emit=Emit(args.emit), params=_params(spec, args.param))
     decoder.run(
         args.input,
         args.output,
@@ -268,7 +390,7 @@ def _try(spec: Spec, args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"kober: --hex is not valid hex: {exc}", file=sys.stderr)
         return FAILED
-    tree = Decoder(spec).decode_bytes(data)
+    tree = Decoder(spec, params=_params(spec, args.param)).decode_bytes(data)
     print(tree.render())
     print()
     print(f"{tree.off_end} of {len(data)} byte(s) decoded: {tree.status.value}")
@@ -372,13 +494,21 @@ def _doc_lines(doc: str | None, prefix: str) -> list[str]:
 
 
 def _nested(kind: FieldType) -> list[FieldType]:
-    """Return a type and every type nested in it."""
+    """Return a type and every type nested in it.
+
+    A pointer's target and a transform's output type count, as they do for
+    :func:`kober.check.check`: a unit reached only through one of them is still
+    reached. Leaving the pointer out used to make ``show`` call such a unit
+    unreachable.
+    """
     found = [kind]
     if isinstance(kind, Switch):
         for case in kind.cases.values():
             found.extend(_nested(case))
         if kind.default is not None:
             found.extend(_nested(kind.default))
+    elif isinstance(kind, Pointer) or (isinstance(kind, Transform) and kind.type is not None):
+        found.extend(_nested(kind.type))
     return found
 
 
@@ -396,7 +526,9 @@ def _unit_lines(spec: Spec, unit: Unit, prefix: str, seen: tuple[str, ...]) -> l
 
 
 def _descend(spec: Spec, kind: FieldType, prefix: str, seen: tuple[str, ...]) -> list[str]:
-    """Expand a unit reference, guarding against recursion."""
+    """Expand a unit reference, or a transform's output unit, guarding against recursion."""
+    if isinstance(kind, Transform) and kind.type is not None:
+        kind = kind.type
     if not isinstance(kind, UnitRef):
         return []
     target = spec.units.get(kind.unit)
@@ -454,6 +586,17 @@ def _render_type(kind: FieldType) -> str:
             f"select from {kind.source}{bound} where {unparse(kind.where)}"
             f" → {unparse(kind.value)} else {unparse(kind.default)}"
         )
+    if isinstance(kind, Concat):
+        return f"concat {kind.repeated}.{kind.member}"
+    if isinstance(kind, Transform):
+        args = "".join(f", {name}={unparse(value)}" for name, value in kind.args.items())
+        head = f"{kind.name}({kind.source}{args})"
+        if kind.type is not None:
+            # A unit reference renders with its own arrow; one is enough.
+            output = _render_type(kind.type).removeprefix("→ ")
+            return f"{head} → {output}, at most {kind.limit} bytes"
+        label = kind.content_type or "bytes"
+        return f"{head} → {label}, at most {kind.limit} bytes"
     if isinstance(kind, Switch):
         cases = ", ".join(f"{key!r}" for key in kind.cases)
         tail = "" if kind.default is not None else ", no default"

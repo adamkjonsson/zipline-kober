@@ -22,6 +22,262 @@ minor bump here too.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-28
+
+### Added
+
+- **Transforms in the spec language, decoded by both backends**
+  ([#46](https://github.com/adamkjonsson/zipline-kober/issues/46)). Two field
+  types and two top-level keys:
+  - `transform: {from, with, limit, args, type, content_type}`: bytes already
+    decoded, after a named transform, and optionally what they decode as.
+  - `concat: repeated.member`: one field of every element of a repetition,
+    joined, such as a chunked body.
+  - `transforms:` declares the transforms a spec uses that are not core, with
+    their parameters' types. `params:` declares values supplied when a decode
+    is set up, such as a key, with `secret: true` for one never to be written.
+
+  `check` types them against the spec alone, never a registry: a source
+  must be an earlier field that is bytes on every branch; a name must be core
+  or declared; `args` must match the declaration; `limit` is required; and a
+  transform's source may not be `emit: none`. `show` renders them. The names a
+  spec may use are `kober.transforms.WELL_KNOWN`, each defined by a
+  specification and in a tier: `gzip`, `deflate` (RFC 1950) and `deflate-raw`
+  are core, and `br`, `zstd`, `bzip2` and `xz` are extended and must be
+  declared. **The interpreter decodes them**: `Decoder(spec, params=…,
+  transforms=…)` takes the document's parameters, checked against their
+  declared types (`ParameterError` otherwise), and binds every transform the
+  spec uses before any input. A transform's output is decoded as its `type`
+  in its own offset space (`Node.space`), and a transform that fails leaves
+  its message whole, marked `Node.failed`. At field granularity an output's
+  records cite the transform's source and argument fields, and the source is
+  not written as a record of its own; a failed transform names its source
+  `undecodable`, and `emit: none` names it `skipped`. A source that is a
+  `concat` has no bytes of its own, so its members are taken over instead:
+  each member's record is taken back and each non-empty member named, and a
+  chunked body's size lines keep their records. An argument field marked
+  `emit: none` names nothing when the transform succeeds, since the output
+  cites its bytes, and is `skipped` when it fails: that is what lets a
+  tunnel's first stage write one plaintext record per datagram, for a second
+  stage to read. An expression may read a transform's output, as bytes or by a
+  dotted path into its unit; one reading a transform that failed makes its
+  field `undecodable`, saying `'doc' failed: …` and why, and a value read from
+  an output cites the transform's range, since the output's offsets name no
+  input byte. A message whose
+  transform failed neither confirms nor declines its stream, and a stream in
+  which every message that decoded had one fail is declined saying so.
+  `kober run` and `kober try` take `--param NAME=VALUE`, read as the declared
+  type (`hex:…` or `file:PATH` for bytes), and `--load-transforms MODULE`,
+  which runs a module that registers transforms the standard library cannot:
+  a cipher, or `br`. `Decoder.params_digest()` is a digest of the spec, the
+  granularity the entry unit resolves to and every parameter's value, a
+  secret one included only as hashed. Every output carries it as its Decoder
+  Descriptor's `params_digest`
+  ([python-zipline#77](https://github.com/adamkjonsson/python-zipline/issues/77)),
+  so a file says which configuration wrote it and a run with another key
+  reads as another configuration.
+  **`kober compile` compiles them**, writing the same file as the interpreter
+  block for block. A transform's `type` must be a unit there, and at field
+  granularity a source may not join different members on different branches
+  (`CompileError` otherwise; the interpreter decodes both). A generated module binds its
+  transforms from `kober.transforms.DEFAULT` when it is imported, so a name
+  nothing binds fails the import with `UnboundTransformError`. For a spec
+  with `params:` its `decode` and `decode_from` take `params=`, as do
+  `run_compiled` and `decode_stream_compiled`. A failed transform leaves a
+  `kober.runtime.TransformFailed` with the interpreter's wording in its field,
+  and the message is still returned. A generated module carries `SPEC_DIGEST`,
+  and `run_compiled` writes the same `params_digest` the interpreter would; a
+  module compiled before it existed writes none.
+- **`examples/http.yaml` inflates the content** a `Content-Encoding` of
+  `gzip`, `x-gzip` or `deflate` compressed into the body, as a new field
+  `content`, framed by length or in chunks. `body` is now one field either
+  way: the chunks' data, joined, when the message is chunked. Two selects
+  join it, `framing` (`'chunked'` or `'length'`) and `encoding`, and `chunked`
+  is computed from `framing`. At field granularity each message writes a
+  `framing` and an `encoding` record, a chunked one a `body` record, and an
+  inflated body's record is replaced by its `content`; message-granularity
+  output is unchanged. A coding it does not decode (`br`, `zstd`, a list such
+  as `gzip, br`) leaves the body as it arrived, and a `304` or a `HEAD` reply
+  that names a coding but sends no body inflates nothing. Two
+  `Transfer-Encoding` headers are now read as one list, so a message with
+  `gzip` then `chunked` is chunked, as RFC 7230 §3.3.1 says.
+- **The Python binding for transforms**, `kober.transforms`
+  ([#46](https://github.com/adamkjonsson/zipline-kober/issues/46)). A
+  `Registry` binds names to callables; `Registry.standard()`, and the default
+  registry `register` and `lookup` act on, bind `gzip`, `deflate`,
+  `deflate-raw`, `bzip2` and `xz` from the standard library, and `zstd` where
+  it has one (Python 3.14 and later). `br` is not bound, since the standard
+  library has no Brotli, and a program registers one. Every codec is held to
+  its `limit` as it inflates, so a decompression bomb stops at the limit in
+  memory the limit bounds. `Registry.bind(spec)` refuses before any input is
+  read with `UnboundTransformError`, saying whether a missing name is a
+  well-known one this backend does not bind or the spec's own. `apply` runs
+  one and raises `TransformError` in kober's own words: a codec's message is
+  kober's, and a caller's callable is reported by its exception's class only,
+  never its text, which could hold a key.
+- **`startswith(s, prefix)` and `endswith(s, suffix)`** in the expression
+  language ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50)),
+  typed `(str, str) -> bool`, exact as to case, in both backends. They are what
+  a spec needs to say what the start of its message looks like, and that a
+  value's last list item is something.
+- `kober.errors.Undecodable.refused`: whether a unit's own `confirm` or
+  `reject` is what failed, which the stage driver reads after a gap.
+- `kober.check.message_tail_fields()`: the fields after which nothing in the
+  message reads a byte, keyed `(unit, field index)`
+  ([#49](https://github.com/adamkjonsson/zipline-kober/issues/49)).
+  `kober.ops.FieldPlan.tail` carries each field's answer to a backend.
+- `TruncatedRead.reach` and `Node.reach`: where a message would have ended,
+  when the read that ran out was its last and its length was already decided.
+- `Node.refused`: whether a unit's own `confirm` or `reject` refused it.
+- `kober.runtime.Held`, a sink that keeps a guarded unit's records until its
+  guard has held, and `kober.errors.Refused`, which a generated module raises
+  for that refusal. Both are re-exported from `kober`. `Held.retract(role)`
+  takes back a transform's source record.
+- `kober.runtime.size_of`, `decode_text`, `record_int` and `present`, which
+  generated modules call where they used to branch or raise, and
+  `Held.withdraw`. Re-exported from `kober`.
+- For generated modules' transforms, all re-exported from `kober`:
+  `kober.runtime.run_transform`, `take_over`, `concat`, `Output`,
+  `TransformFailed`, `first_failed`, `bind_transforms`, `document_params` and
+  `params_digest`; `kober.transforms.Registry.bind_names`; `Spec.digest()`;
+  and in the plan a backend reads, `kober.ops.TransformPlan`,
+  `ValueType.concat` and `ValueType.transform`, and `Plan.transforms`,
+  `Plan.params` and `Plan.spec_digest`.
+
+### Changed
+
+- **A generated module branches less**, so a unit that frames and inflates a
+  body stays under the branch limit it is linted to: `examples/http.yaml`'s
+  message sat at exactly 20 before `content` was added. An absent field is
+  written before its condition rather than in an `else`; a record written the
+  same way on every branch of a switch is written once; a size is checked,
+  text decoded and a value-sized integer recorded by a runtime call rather
+  than inline; and a switch whose cases are the same transform under
+  different names is one call with the name looked up. Output is unchanged.
+- **`zpf` 0.5.1 is required** (`zpf>=0.5.1,<0.6`), for `params_digest=` on
+  `decode_stage`, which kober asked for in
+  [python-zipline#77](https://github.com/adamkjonsson/python-zipline/issues/77).
+  0.5.1 reads and writes the same files as 0.5.0.
+- **Breaking: what a file says after a gap in a byte stream**
+  ([#49](https://github.com/adamkjonsson/zipline-kober/issues/49)). A run after
+  a gap used to be decoded from its first byte, which is usually the middle of
+  a message. The rest of a body was read as a new message, and where the body
+  had no line ending, that phantom swallowed the real message behind it. Now:
+  - **when the message the gap cut said where it ends** (a fixed-size or
+    counted read, such as an HTTP body after its `Content-Length`, with nothing
+    after it reading a byte), the run resumes there. The bytes before it are
+    `skipped`, commented `rest of a message cut by a gap`;
+  - **when nothing said**, the run's first message is written only if it
+    decodes whole. If it does not, nothing it read is written, and its bytes
+    are `undecodable`, commented `no message boundary found after a gap`. If
+    the spec's `confirm` or `reject` refused it, the next attempt starts where
+    it stopped; any other failure loses the rest of the run. None of this
+    declines the stream. A stream that ends unconfirmed is still declined, and
+    its comment says `every attempt ran out of input or found no message
+    boundary after a gap` when one of those attempts failed some other way.
+
+  On a lossy HTTP capture with large bodies, all 30 responses are now decoded
+  at their real offsets, where 4 were swallowed and 8 phantom messages were
+  written before, and none is written now: `examples/http.yaml` refuses them
+  (below). A consumer that read the records after a gap should expect
+  `skipped` and `undecodable` regions there instead. Datagram input is
+  unchanged. In the deeper pipeline one output's decline comment changed, and
+  the generated HTTP stream's two phantom messages became one `undecodable`
+  region; nothing else moved.
+- **`examples/http.yaml` says what a start line looks like, and reads
+  `gzip, chunked`** ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50)).
+  The `message` unit has a `confirm`: a status line starts with `HTTP/`, a
+  request line ends with ` HTTP/1.1` or ` HTTP/1.0`. After a gap that is what
+  refuses a chunk-size line or a body's tail read as a start line, which used
+  to decode as a message with no headers. A message whose start line is
+  neither (HTTP/2's `PRI * HTTP/2.0`, or any foreign text ending in a line
+  break) is now refused as well, and a stream that begins with one is
+  declined. `chunked` is recognised as the last item of `Transfer-Encoding`
+  (`gzip, chunked`) and not only as the whole of it; such a message used to
+  read as unframed.
+
+### Fixed
+
+- **A compiled module no longer raises out of a decode when an expression
+  names a field its `condition` left absent.** It let a `TypeError` escape,
+  where the interpreter makes the field `undecodable` with `'a' has not been
+  decoded`; now both do. Nothing in the shipped examples referenced a
+  conditional field, which is why the differential never saw it.
+- **A computed field reading a nested unit's field (`h.v`) cites that field in
+  a compiled module too.** It cited its own empty position there, since the
+  compiler's first version, where the interpreter cited the field it read.
+- **A long condition, or one value compared with several literals, no longer
+  makes a generated module fail the project's own lint.** A nested `or` too
+  long for its line is split inside its brackets, and `x == 'a' or x == 'b'`
+  is written `x in ('a', 'b')` (`not in` under a `not`).
+- **`message_tail_fields` treats a `switch` whose every case reads nothing as
+  reading nothing** (#49), so a body followed by a transform chosen by a
+  switch is still where a message ends, and a run after a gap still resumes
+  there.
+- **`kober show` no longer reports a unit reached only through a `pointer` as
+  unreachable** ([#52](https://github.com/adamkjonsson/zipline-kober/issues/52)).
+  It walked switch cases and nothing else when working out
+  which units the entry reaches; `check` and the decoder always followed the
+  pointer.
+- **A generated module no longer writes a line longer than the project's
+  limit for a long expression.** The compiler put every expression on one
+  line, and a condition, `computed`, `select` value or guard long enough failed
+  the `ruff` check generated modules are held to. One is now bound to a local
+  and split at its top-level `or` or `and`, and a long citation list is written
+  one range per line. `http.yaml`'s test for `chunked` as the last coding was
+  the first expression long enough.
+- **A unit its guard refuses is no longer written field by field.**
+  `DESIGN.md` §3.1 promised that a `confirm` or `reject` that does not hold
+  makes the unit an honest `undecodable` region instead of a fabricated field
+  tree. That held at message granularity only. At field granularity both
+  backends wrote the refused unit's fields and then stopped, with nothing in
+  the file saying the unit was refused. Now its bytes are one `undecodable`
+  region, and a guard that cannot be decided refuses the same way. Fields
+  read before the unit, and everything read before a truncation, are written
+  as before. No shipped example uses a guard. A module compiled from a spec
+  with `confirm` or `reject` at field granularity should be regenerated with
+  `kober compile`.
+
+### Documentation
+
+- A sweep for what 0.5.0 left stale: the README's count of field types, its
+  `zpf` requirement, and what `compile` and the pipeline do with transforms;
+  the type-kind table in `document.md` and what `params` do to the digest;
+  `types.md` on transforms as switch cases, `emit: none` arguments, and what
+  reads nothing after a `fill` or `remaining`; `expressions.md` on its calls
+  and on naming parameters and transform outputs; and `compiler.md`,
+  `architecture.md`, `testing.md` and `contributing.md` on the runtime helpers,
+  the new tests, and where a new construct has to be registered.
+- `docs/format/concepts.md` gains *A second offset space*, what a transform's
+  output is and what a file can and cannot say about it, and the rule that a
+  failed transform neither confirms nor declines; its last *cannot say* bullet
+  becomes what is still out of reach, state between messages. `DESIGN.md`'s
+  revision 12 adds byte transforms: §2.1, §3.1, §3.2's `Transform` and
+  `Concat`, §6's parameters, §11.5's taken branch, and §13.6 on what the
+  compressed-body corpus found. `docs/format/document.md` says that packeteer
+  0.16.0 refuses `transform`, `concat` and a string-cased `switch` at load, so
+  `examples/http.yaml` no longer loads there.
+- `tools/pipeline.py` checks every inflated body against the document that was
+  compressed: all 25 on the lossless compressed-body capture, and 21, every one
+  genuine, with loss.
+- `docs/dev/testing.md` gains *Transforms*: the four promises a transform
+  adds, each fuzzed and each checked in the suite against an implementation
+  broken the way it guards against; the decompression bombs and the
+  misbehaving caller's transform in the corpus; and the driver fuzzed over
+  streams whose transforms fail.
+- `docs/format/concepts.md` gains *What a spec meets after a gap*;
+  `DESIGN.md` §3.1 gains *After a gap* and is revision 12. It records why a
+  refused attempt is retried where it stopped rather than scanned for byte by
+  byte, with the measurement.
+- `tools/pipeline.py` gains two inputs, `gzip_lossy` and `gzip_clean`: HTTP
+  responses with gzip and deflate bodies, from `tools/gzip_http.py`, carried
+  through packeteer by `tools/blob.yaml`, since its HTTP payload cannot carry
+  them. The lossless one is checked exactly against the reference reader.
+- `tools/pipeline.py` checks that every HTTP start line looks like one, not
+  only how many there are. A count had hidden two phantom start lines in the
+  generated HTTP stream since 0.4.0, because the same gaps also took two real
+  ones.
+
 ## [0.4.0] - 2026-09-23
 
 **The verdict release.** Each change here is about what a file *says* about
@@ -1934,7 +2190,8 @@ installed from a checkout (see the README).
   parses `comment` back. Whether to follow `zpf` 0.3 (#58, #59) is recorded as
   an open question rather than settled.
 
-[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.1.0...v0.2.0

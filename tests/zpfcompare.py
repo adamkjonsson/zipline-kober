@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import zpf
-from zpf.blocks import Participant, Record, Undecoded
+from zpf.blocks import Decoder, Participant, Record, Undecoded
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,7 +27,9 @@ def blocks(path: Path) -> list[tuple[object, ...]]:
     that is a statement about every record in it, derived separately by each
     implementation. A region's comment is included because it is the only
     place a region can say *why*, and two implementations that disagree about
-    that have written different files. Read from the raw block stream rather
+    that have written different files. Each decoder's descriptor is included
+    with its ``params_digest``, since the two must say the same configuration
+    produced the file. Read from the raw block stream rather
     than the session views, because the order the two implementations write in
     is part of what is being compared.
 
@@ -35,14 +37,16 @@ def blocks(path: Path) -> list[tuple[object, ...]]:
         path: A decoded ``.zpf`` file.
 
     Returns:
-        One tuple per participant, record and undecoded region, tagged with
-        its kind.
+        One tuple per decoder, participant, record and undecoded region,
+        tagged with its kind.
 
     """
     out: list[tuple[object, ...]] = []
     with zpf.open(path) as handle:
         for block in handle.blocks():
-            if isinstance(block, Participant):
+            if isinstance(block, Decoder):
+                out.append(("decoder", block.name, block.version, block.params_digest))
+            elif isinstance(block, Participant):
                 out.append(("participant", block.participant_id, zpf.Adjacency(block.adjacency)))
             elif isinstance(block, Record):
                 spans = tuple((s.off_start, s.off_end) for s in block.spans)

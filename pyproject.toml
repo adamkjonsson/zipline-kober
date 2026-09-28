@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "kober"
 # The single source of truth for the version; `kober.__version__`
 # reads it back out of the installed metadata.
-version = "0.4.0"
+version = "0.5.0"
 description = "Decode network protocols from a declarative specification into Zipline decode stages"
 readme = "README.md"
 license = "MIT"
@@ -30,7 +30,10 @@ classifiers = [
 # minor is a break with no upgrade path promised, so a range spanning two of
 # them would be a promise neither project can keep.
 #
-# The floor is 0.5.0, which implements Zipline Payload Format v0.21. What this
+# The floor is 0.5.1, for `params_digest=` on `decode_stage`: kober's transforms
+# take document parameters such as a key, and the digest is where a file says
+# which configuration produced it (python-zipline#77, filed for this). 0.5.0
+# implements Zipline Payload Format v0.21. What this
 # project needs landed *in* it: `adjacency=` on `decode_stage`, the Participant
 # Descriptor field that lets field-granularity output say its records are a
 # unit sequence rather than leaving a consumer to assume they join. The earlier
@@ -38,7 +41,7 @@ classifiers = [
 # derived from `cites`, both 0.3.0 — but a 0.3 or 0.4 build cannot read a file
 # written at 0.21 at all, so the version gate would refuse it before any of
 # that mattered.
-dependencies = ["zpf>=0.5.0,<0.6"]
+dependencies = ["zpf>=0.5.1,<0.6"]
 
 [project.optional-dependencies]
 # YAML is the authoring format for specs, and comments are the reason: a

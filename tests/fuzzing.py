@@ -26,8 +26,12 @@ a story about a run that happened once.
 
 from __future__ import annotations
 
+import gzip
 import random
 import struct
+import zlib
+
+from kober.errors import TransformError
 
 #: How many mutations per seed case. Small enough to keep the suite fast, large
 #: enough that each run covers every mutation kind several times.
@@ -63,9 +67,39 @@ HTTP_COUNTED = (
     b'{"id": 89163, "ok": false}'
 )
 
+_HTML = b"<html><body>hello, inflated world</html>"
+_GZIPPED = gzip.compress(_HTML, mtime=0)
+_DEFLATED = zlib.compress(_HTML)
+
+#: A gzip body framed by its length, and a deflate one in chunks: the two
+#: ways `examples/http.yaml` reaches its `content`. A mutation of either body
+#: almost always fails to inflate, so the transform fails far more often than
+#: not, and a mutation of the headers leaves it inflating.
+HTTP_GZIPPED = (
+    b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: "
+    + str(len(_GZIPPED)).encode()
+    + b"\r\n\r\n"
+    + _GZIPPED
+)
+HTTP_DEFLATED_CHUNKED = (
+    b"HTTP/1.1 200 OK\r\nContent-Encoding: deflate\r\nTransfer-Encoding: chunked\r\n\r\n"
+    + b"%x\r\n" % 9
+    + _DEFLATED[:9]
+    + b"\r\n"
+    + b"%x\r\n" % (len(_DEFLATED) - 9)
+    + _DEFLATED[9:]
+    + b"\r\n0\r\n\r\n"
+)
+
 #: Every framing arm the shipped example chooses between, so a sweep covers the
-#: choice and not only one side of it.
-HTTP_FRAMINGS: tuple[bytes, ...] = (HTTP_REQUEST, HTTP_CHUNKED, HTTP_COUNTED)
+#: choice and not only one side of it, and both ways it inflates a body.
+HTTP_FRAMINGS: tuple[bytes, ...] = (
+    HTTP_REQUEST,
+    HTTP_CHUNKED,
+    HTTP_COUNTED,
+    HTTP_GZIPPED,
+    HTTP_DEFLATED_CHUNKED,
+)
 
 #: A real DNS response, from `python-zipline-wire`'s ``dns_example.pcapng``.
 #: Its answer's owner name is ``c0 0c`` — the compression pointer of RFC 1035
@@ -301,7 +335,7 @@ def framing_cases(seed: int) -> list[bytes]:
         seed: Which batch.
 
     Returns:
-        The batch, the three seeds' variants interleaved in a fixed order.
+        The batch, each seed's variants in a fixed order.
 
     """
     out: list[bytes] = []
@@ -435,3 +469,193 @@ def starved_cases(seed: int) -> list[bytes]:
 
     """
     return variants(STARVED_MESSAGE, seed)
+
+
+#: A body framed by its length or in chunks, joined, inflated, and decoded as a
+#: unit in its own offset space; and a second kept as bytes, in a unit of its
+#: own so neither function passes ruff's branch limit. A mutation of the
+#: compressed bytes is almost always a failed transform, so this reaches the
+#: take-over — the source named ``undecodable`` in place of its record — far
+#: more often than a success. No example spec has a transform yet, and a
+#: concat's hull overlapping its members' records on failure went unseen
+#: until this did.
+TRANSFORM_SPEC = """
+name: xform
+version: "1"
+entry: m
+units:
+  m:
+    fields:
+      - {name: chunked, type: {int: {bits: 8}}}
+      - {name: n, type: {int: {bits: 8}}}
+      - name: chunks
+        type: {unit: chunk}
+        until: "chunks.size == 0"
+        condition: "chunked == 1"
+      - name: body
+        switch:
+          dispatch: chunked
+          cases:
+            1: {concat: chunks.data}
+          default: {bytes: {size: {expr: n}}}
+      - name: content
+        transform: {from: body, with: deflate, limit: 64, type: {unit: doc}}
+      - {name: rest, type: {unit: tail}}
+  tail:
+    fields:
+      - {name: m2, type: {int: {bits: 8}}}
+      - {name: raw, type: {bytes: {size: {expr: m2}}}}
+      - name: plain
+        transform: {from: raw, with: deflate-raw, limit: 16, content_type: "prim:bytes"}
+      - {name: after, type: {int: {bits: 8}}}
+  chunk:
+    fields:
+      - {name: size, type: {int: {bits: 8}}}
+      - {name: data, type: {bytes: {size: {expr: size}}}}
+  doc:
+    fields:
+      - {name: length, type: {int: {bits: 8}}}
+      - {name: text, type: {string: {size: {expr: length}}}}
+"""
+
+_DOCUMENT = zlib.compress(b"\x05hello")
+_RAW = zlib.compress(b"abc")[2:-4]  # raw deflate: no header, no checksum
+_TAIL = bytes([len(_RAW)]) + _RAW + bytes([0x7E])
+
+#: Well-formed messages for :data:`TRANSFORM_SPEC`: chunked, then by length.
+TRANSFORM_MESSAGES = (
+    bytes([1, 0, 4])
+    + _DOCUMENT[:4]
+    + bytes([len(_DOCUMENT) - 4])
+    + _DOCUMENT[4:]
+    + bytes([0])
+    + _TAIL,
+    bytes([0, len(_DOCUMENT)]) + _DOCUMENT + _TAIL,
+)
+
+
+def _raw(data: bytes) -> bytes:
+    """Compress ``data`` as raw deflate: no header, no checksum."""
+    return zlib.compress(data)[2:-4]
+
+
+_BOMB = zlib.compress(b"\xc7" + b"a" * 199)
+_RAW_BOMB = _raw(b"a" * 100)
+_OVERLONG = zlib.compress(b"\x05hello!!")
+
+#: Messages every correct decode of :data:`TRANSFORM_SPEC` fails a transform
+#: on, each in a way an implementation could get wrong by succeeding. Both
+#: outputs of the first pass their limits (200 bytes against 64, and 100
+#: against 16), and would decode whole without them. The second's output
+#: decodes with two bytes left over, which its type does not read.
+TRANSFORM_ADVERSE = (
+    bytes([0, len(_BOMB)]) + _BOMB + bytes([len(_RAW_BOMB)]) + _RAW_BOMB + bytes([0x7E]),
+    bytes([0, len(_OVERLONG)]) + _OVERLONG + _TAIL,
+)
+
+
+def transform_cases(seed: int) -> list[bytes]:
+    """Build one batch of variants of every transform message, adverse ones included.
+
+    Args:
+        seed: Which batch.
+
+    Returns:
+        The batch.
+
+    """
+    messages = (*TRANSFORM_MESSAGES, *TRANSFORM_ADVERSE)
+    return [*messages, *(data for message in messages for data in variants(message, seed))]
+
+
+#: A caller's transform that misbehaves in every way a callable can, chosen by
+#: its input's first byte: it raises an arbitrary exception, raises kober's
+#: own with a secret in the message, returns something that is not bytes,
+#: ignores its limit, recurses too deep, or works. What it raises must never
+#: escape a decode, and its messages must never reach the file.
+HOSTILE_SPEC = """
+name: hostile
+version: "1"
+entry: m
+transforms:
+  hostile: {}
+units:
+  m:
+    fields:
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: body, type: {bytes: {size: {expr: n}}}}
+      - name: out
+        transform: {from: body, with: hostile, limit: 8, type: {unit: doc}}
+      - {name: after, type: {int: {bits: 8}}}
+  doc:
+    fields:
+      - {name: length, type: {int: {bits: 8}}}
+      - {name: text, type: {string: {size: {expr: length}}}}
+"""
+
+#: What :func:`hostile` puts in the messages it raises, which must never be
+#: seen again.
+HOSTILE_SECRET = "hunter2"
+
+
+def hostile(data: bytes, *, limit: int) -> object:
+    """Misbehave according to ``data[0]``: see :data:`HOSTILE_SPEC`.
+
+    Args:
+        data: The source's bytes.
+        limit: The most bytes the output may have, which it may ignore.
+
+    Returns:
+        Something, usually not what a transform should.
+
+    Raises:
+        KeyError: Or another exception, according to ``data[0]``.
+
+    """
+    mode = data[0] % 7 if data else 6
+    if mode == 0:
+        raise KeyError(HOSTILE_SECRET)
+    if mode == 1:
+        raise TransformError(HOSTILE_SECRET)
+    if mode == 2:
+        return HOSTILE_SECRET
+    if mode == 3:
+        return b"\x01" * (limit + 1)
+    if mode == 4:
+        raise RecursionError(HOSTILE_SECRET)
+    if mode == 5:
+        return bytearray(data[1:])
+    return data[1:]
+
+
+#: One message per behaviour of :func:`hostile`, the working ones decoding.
+HOSTILE_MESSAGES = tuple(
+    bytes([len(body), *body, 0x7E])
+    for body in (
+        b"\x00",
+        b"\x01",
+        b"\x02",
+        b"\x03",
+        b"\x04",
+        b"\x05\x02hi",
+        b"\x06\x03abc",
+        b"\x06\x09ab",
+        b"\x06\x01a??",
+    )
+)
+
+
+def hostile_cases(seed: int) -> list[bytes]:
+    """Build one batch of variants of every :data:`HOSTILE_MESSAGES`.
+
+    Args:
+        seed: Which batch.
+
+    Returns:
+        The batch, the messages themselves first.
+
+    """
+    return [
+        *HOSTILE_MESSAGES,
+        *(data for message in HOSTILE_MESSAGES for data in variants(message, seed, rounds=10)),
+    ]

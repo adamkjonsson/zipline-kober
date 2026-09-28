@@ -44,7 +44,7 @@ built as a mapping in memory — carries the path alone.
 
 ### What a spec can say
 
-Eight field types, and each one's answer for *what happens when it does not
+Ten field types, and each one's answer for *what happens when it does not
 match* is half of what it means — a construct with no such answer is how a
 decoder ends up guessing.
 
@@ -57,6 +57,8 @@ decoder ends up guessing.
 | `computed` | A value derived from earlier fields. Reads nothing; cites the fields its expression read. |
 | `pointer` | *Read this type at that offset, and carry on where you were.* Real DNS needs it — an answer's owner name is usually two bytes meaning "the name at offset 12". |
 | `select` | Ask a question about a **repeated** field and get one scalar back. What lets an HTTP message frame its own body by asking whether any header said `chunked`. |
+| `concat` | One field of every element of a repetition, joined into one value: a chunked body as the bytes it carries. Reads nothing. |
+| `transform` | Bytes already decoded, after a named transform (`gzip`, or a cipher the spec declares), and optionally what they decode as, in an offset space of their own. Reads nothing, and a `limit` bounds its output. |
 
 Fields repeat by count, by a condition tested after each element, or to the end
 of the run; they can be conditional; and a field can carry a `const` — a magic
@@ -64,13 +66,15 @@ number, or reserved bits that must be zero — which refuses traffic that is not
 this protocol's at the field that says so, rather than after a whole message
 has been read against the wrong one. The expression language behind all of that
 is small on purpose — arithmetic, comparison, field references, and a
-closed table of three functions an author cannot add to.
+closed table of five functions an author cannot add to.
 
 What it deliberately cannot do is move the read cursor. That is the invariant
 the coverage guarantee rests on, and it is why constructs get added rather than
 hooks: `pointer` and `select` both exist because a real capture needed
 something sayable, and saying it declaratively kept `check` able to answer
-before any data exists.
+before any data exists. A `transform` is the one place code of the caller's
+runs, a cipher say, and it is given bytes and returns bytes: the spec names it,
+`check` types it from the spec alone, and it never sees a position.
 
 The [spec format reference](docs/format/index.md) documents every key;
 [`examples/dns.yaml`](examples/dns.yaml) and
@@ -123,7 +127,9 @@ what was tried marked `undecodable` and the rest `skipped`, each region saying
 why (`not dns: …`). A stream in the right protocol whose first message is
 corrupt, or whose only message was cut short, is declined too. The bytes cannot
 tell it apart from a foreign one ([What a spec meets in someone else's
-stream](docs/format/concepts.md)).
+stream](docs/format/concepts.md)). A message whose transform failed, a body
+that does not inflate or a datagram that does not decrypt, decoded whole: it
+neither confirms nor declines, and the message after it is decoded.
 
 A field-granularity file also says what its records are: a **unit sequence**
 (`adjacency=units`, spec 0.21), meaning no two adjacent records may be assumed
@@ -150,6 +156,23 @@ message  [0, 29)
 
 Unlike `run`, it fails when the decode did not complete — answering that is the
 point of it.
+
+A spec that declares `params:` (a key, say) takes each with `--param`, on `run`
+and `try` alike, read as its declared type: `--param key=hex:00112233` or
+`--param key=file:key.bin`. A transform the standard library cannot run, a
+cipher or `br`, is registered by a module of your own, which
+`--load-transforms ciphers.py` runs first: it is code, and it is run as code.
+The output's decoder descriptor carries a `params_digest` over the spec, the
+granularity and every parameter, a secret one only hashed, so a file says
+which configuration wrote it. From Python:
+
+```python
+from kober import Decoder, Registry, Spec
+
+transforms = Registry.standard()
+transforms.register("aes-gcm", my_aes_gcm)  # a cipher: never in the standard library
+decoder = Decoder(Spec.from_file("tunnel.yaml"), params={"key": key}, transforms=transforms)
+```
 
 ## Compiling
 
@@ -180,6 +203,13 @@ file exactly as `run` drives the interpreter: the module records the
 granularity it was built at in `EMIT`, beside `NAME` and `VERSION`, and the
 driver reads it to declare the output's adjacency the same way. A module
 compiled by a kober before 0.3.0 has no `EMIT` and is refused — recompile it.
+
+A spec with transforms compiles too. The module binds them when it is
+imported, from what the program registered with `kober.transforms.register`,
+so a cipher is registered before the import; a spec with `params:` takes them
+as `dns.decode(payload, params={...})`, and `run_compiled(..., params=...)`. A
+transform that fails leaves a `kober.runtime.TransformFailed` in its field,
+saying why in the interpreter's words, and the message is still returned.
 
 The interpreter is not going anywhere: it is what `try` should always use, and
 it is the reference implementation the generated code is tested against — the
@@ -227,11 +257,12 @@ python3 -m venv .venv
 ```
 
 **Why `zpf` is installed from a checkout.** This project depends on
-`zpf>=0.5.0,<0.6` — it is built on `zpf.decode_stage` and its `adjacency=`
-keyword, which is `0.5.0` work, on the per-record `role=` label, and on a
-record timestamp derived from `cites`. `zpf` `0.5.0` is released and tagged,
-but at the time of writing PyPI publishes only `0.1.0`, so the dependency has
-to come from a local (or git) install. Once it reaches PyPI the checkout becomes a convenience rather
+`zpf>=0.5.1,<0.6` — it is built on `zpf.decode_stage` and its `adjacency=`
+keyword, which is `0.5.0` work, its `params_digest=` keyword, which is
+`0.5.1`, on the per-record `role=` label, and on a record timestamp derived
+from `cites`. `zpf` `0.5.1` is released and tagged, but at the time of writing
+PyPI publishes only `0.1.0`, so the dependency has to come from a local (or
+git) install. Once it reaches PyPI the checkout becomes a convenience rather
 than a requirement, and the first line above can be dropped.
 
 The pin covers a single `zpf` minor deliberately: that library is in `0.x`,
@@ -272,13 +303,14 @@ It needs two sibling checkouts with their own venvs,
 [`packeteer`](https://github.com/adamkjonsson/packeteer) and
 [`python-zipline-wire`](https://github.com/adamkjonsson/python-zipline-wire)
 (`--packeteer` and `--wire` if they are not at `../`). It fuzzes and generates
-DNS and chunked HTTP, converts them and four real captures to `.zpf`, and runs
-both example specs through the interpreter and a freshly compiled module at both
-granularities. Every output must be conformant and account for every byte; each
+DNS and chunked HTTP, builds HTTP responses with gzip and deflate bodies,
+converts them and four real captures to `.zpf`, and runs both example specs
+through the interpreter and a freshly compiled module at both granularities. Every output must be conformant and account for every byte; each
 interpreter/compiled pair must be identical block for block; and the decoded
 **shape** must be right — counted against an independent reader where the
 stream is lossless — because coverage alone cannot tell a chunked body from
-twenty imaginary messages. `--baseline DIR` compares every output with an
+twenty imaginary messages. Every inflated body must be byte for byte a
+document that was compressed. `--baseline DIR` compares every output with an
 earlier run's `--work DIR`. The in-suite fuzzing covers the decoder and emitter;
 only this covers the **stage driver**, because reaching it needs real stream
 structure — gaps, truncated messages between whole ones, several records per

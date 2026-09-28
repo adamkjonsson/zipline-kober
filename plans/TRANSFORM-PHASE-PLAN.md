@@ -1,15 +1,39 @@
 # Phase plan: transforms — decompression and decryption
 
-**State: planned.** Nothing has landed. Every design question below carries a
-*leaning*, not a decision; Stage 1 is the spike that settles them, and the
-plan is rewritten from what the spike finds, as the pointer and repetition
-plans were.
+**State: Stage 1 done; its three decisions made (2026-09-26).** Stage 0 landed (`0.5.0.dev0`,
+a pipeline baseline). The Stage 1 spike ran on 2026-09-24 and is recorded in
+*What the Stage 1 spike found*, below. Where it proved a leaning wrong, the
+leaning is rewritten and says so. Where it turned a leaning into a choice
+between two defensible designs, the choice is listed under *Decisions the
+spike leaves open*, and *Decided, 2026-09-26* records the answers.
+*Stage 1b* ([#49](https://github.com/adamkjonsson/zipline-kober/issues/49)),
+*Stage 1c* ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50)) and
+Stages 2, 3 and 4 are done, and their results are recorded there. Next is
+Stage 5.
 
 > **Written 2026-09-19** against `0.3.0`, `DESIGN.md` revision 9, `zpf` 0.5.0
 > (spec 0.21), packeteer 0.16.0. The prompt was a question — *zipline is ready
 > for protocols that change data; what does kober need?* — and the short
 > answer is: nothing from the format, and one construct plus its plumbing
 > from us.
+
+> **Revised 2026-09-23, against `0.4.0`**, before any of it was started. The
+> upstream state is unchanged (`zpf` 0.5.0, spec 0.21, packeteer 0.16.0), so
+> nothing the format settles moved. What moved is kober: the verdict phase
+> ([`VERDICT-PHASE-PLAN.md`](VERDICT-PHASE-PLAN.md)) shipped between this
+> plan's writing and its start, and three of its changes bear on transforms.
+> **Stream confirmation** (#32) declines a stream whose first message is
+> `undecodable`, which a transform failure is, so a wrong key would be written
+> as *not this protocol*: new **Q10**. A decline **quotes the failure detail
+> into the file**, so Q4's promise about secrets and Q6's wording now reach
+> the output. And the fix to a `count` that raised is a reminder that *a
+> decode never raises* is one registered callable away from false: Q6 gains a
+> bullet. Beside those, the plan now uses the tools 0.4.0 built
+> (`tools/pipeline.py` and its `--baseline`, `tests/zpfcompare.py`), gains a
+> Stage 0, corrects its version targets to `0.5.0` and its `DESIGN.md`
+> revision to 12 (the header's "revision 9" was already wrong: `0.3.0` was
+> revision 10), follows code that moved, and adds the terminal rule's
+> exemption that the tunnel shape needs.
 
 `kober` gains the ability to say **these bytes, after this transform, are
 this** — the one thing [`concepts.md`](../docs/format/concepts.md) still lists
@@ -38,7 +62,7 @@ before this project could use any of it:
 | May a decoder emit bytes its input does not hold? | Yes: a decoder *frames, recodes, or does both*. | § *Typing a decoded record* |
 | What does a recoded record cite? | The input region it was **computed from** — *correspondence, not identity*. A record of 8 bytes may span 16 000. | § *TLV option framing* |
 | May two records cite the same input? | Yes; only *spanned and Undecoded* is forbidden. A nonce and tag fed every unit in a packet. | same |
-| What is a failed decryption? | `undecodable`, bytes-class; the neighbours do not join, so a Discontinuity `decrypt-failed`. | § *Worked example: a decrypted tunnel* |
+| What is a failed decryption? | A bytes-class region (the vector's reason is `decrypt-failed`, not `undecodable`, as Stage 1 found); the neighbours do not join, so a Discontinuity `decrypt-failed`. | § *Worked example: a decrypted tunnel* |
 | Where does a key live? | In the config `params_digest` covers — the reproducibility contract holds, but only a key-holder can act on it. | § *Decoder Descriptor* |
 
 So kober needs **no change to the file it writes**, only to what it can say
@@ -70,7 +94,9 @@ offset space.* The plan takes that as given rather than reopening it.
 **What makes it affordable** is the same list as last time, one phase longer:
 the differential holds the interpreter and compiler to the same records; the
 fuzz suite asserts the promises no example can; the deeper pipeline reaches
-the driver; and `packeteer` can now put an arbitrary `raw:` body into an
+the driver, and since `0.4.0` is a checked-in script
+([`tools/pipeline.py`](../tools/pipeline.py)) that can diff a change against
+a baseline; and `packeteer` can now put an arbitrary `raw:` body into an
 impaired stream, which is how a gzip body reaches a capture at all.
 
 ## What the format leaves to us, in one sentence
@@ -81,6 +107,321 @@ the inside of an inflated body, it says in the tree, in `kober try`, in a
 generated module's `__spans__`, and in its own invariants, **never** in an
 `Undecoded` block. That is the one genuine cost, and Q5 is about being honest
 about it rather than hiding it.
+
+## What the Stage 1 spike found
+
+Written 2026-09-24. The spike was interpreter-only, on a throwaway branch
+(`spike_transform`, stashed rather than committed): `transform` with `from`,
+`with`, `limit` and an optional `type`; `concat` as a field type; `space` on
+`Node`; `gzip`, `zlib` and raw `deflate` bound from `zlib` with the limit
+enforced incrementally; and a spike `http.yaml` that inflates its body.
+**Not exercised**: `transforms:` declarations (Q3), `params:` and
+`params_digest` (Q4), statefulness (Q8), a decompression bomb, and the
+compiler. Nothing below is evidence about those.
+
+### The corpus (Q9)
+
+The route Q9 named does not work, and a different one does.
+
+- **`packeteer stream --payload http` ignores `--protocol-messages` without
+  saying so.** It generated its own REST traffic, and the gzip bodies were
+  not in the capture. That is worth filing against packeteer: a flag
+  accepted and dropped.
+- **What works is a packeteer protocol spec of kober's own**: `blob`, one
+  `data: bytes remaining` field, `input: datagram` over TCP. It needs a port
+  packeteer's `http` does not claim (both 80 and 8080 are taken, and the error
+  blames "a bug in packeteer's compiler"), and its messages are keyed by the
+  protocol's field name (`{"data": hex}`), not `raw`.
+- **A custom protocol's message is always one TCP segment.** `--mss` is
+  HTTP-only, a 3.8 KB message went out as one segment, and `--mtu` fragments
+  at the IP layer instead. So the script cuts the HTTP byte stream into
+  200-byte pieces and sends each piece as a message: `--mss` done by hand,
+  which is what puts a loss in the middle of a body.
+- **`blob` sends from the client only.** The corpus is therefore a response
+  direction on its own, which is also what makes Q10 testable: a request
+  first would confirm the stream before any body was read.
+
+The resulting corpus: 30 responses (15 gzip, 10 deflate, 5 identity; 19
+length-framed, 11 chunked, some with trailers), 38 576 bytes, 193 pieces, and
+a manifest with each body's SHA-256. The spike's `http.yaml` inflated **all 25
+compressed bodies exactly** on the clean capture and **21, every one genuine,**
+on the 5%-loss capture, conformant with full coverage at both granularities.
+The builder is `spike/corpus.py` on the spike branch. Stage 5 turns it into
+pipeline inputs.
+
+### Q2 — `concat` is required, not optional
+
+`from:` names one field, and `http.yaml` frames a body two ways: `body` when
+length-framed, `chunks[*].data` when chunked. With `from:` naming one field,
+inflating *whichever body this message has* cannot be written without a
+transform per framing. What works is `concat` **as a field type**, so that
+`body` becomes one switch with a `concat` case and a `bytes` case, and
+`from: body` covers both. Q2 listed that as a nicety. It is what makes the
+driving example expressible.
+
+The switch needs a second `select` (`framing`, valued `'chunked'` or
+`'length'`), because `check` refuses a switch on a boolean and the language
+has no conditional expression. That is expressible today, only verbose.
+
+**The hull said one false thing, and it is fixed by a rule.** The terminating
+chunk's `data` is empty and sits *after* its `0\r\n` line, so the hull
+stretched over that line. An empty member cites nothing. With that rule the
+hull runs from the first data byte to the last, the interior size lines and
+CRLFs are cited twice, and conformance holds on both captures. Nothing else
+false was found, so **multi-range citation stays out.** One cost to note: at
+field granularity a `concat` leaf is itself written as a `prim:bytes` record,
+duplicating the chunk data it joins.
+
+### Q5 — `space` does disturb the emitter, in two places
+
+- **`_walk` needs the citation override**: every leaf under a transform
+  cites the transform's source range. It is a parameter on the walk, in
+  `emit.py`, not in the decoder.
+- **`_reason_for` misattributes a hole to an inner node.** It picks the
+  narrowest failing node containing an uncovered run, and it walks inner
+  nodes too, whose offsets are in another space. A crafted spec (a message at
+  offset 0 whose inner decode truncates over as many bytes as the message
+  has) was written as **`truncated` over `[0, 12)`**: a false hole, for a
+  message that arrived whole. `_holes` and `_reason_for` must skip nodes in
+  another space. Stage 7's inner-coverage invariant would not have caught this,
+  since it is about the output; the input-space fuzz invariants should gain
+  transform-bearing specs whose inner decodes fail.
+- An inner `emit: none` has nothing it can be written as, since a `skipped`
+  region would carry inner offsets. The spike drops it.
+- The differential's `compare()` checks each field's span against the tree,
+  so Stage 6 has to say what an inner object's span is compared against.
+
+Also: `check` passes the spike spec without knowing the new kinds exist, and
+warns that the `document` unit is *never referenced* because it does not look
+inside `transform.type`. Stage 2 is the whole checker, not a few rules.
+
+### What happens to the source's bytes (new)
+
+**`emit: none` on the field a transform reads crashes the run.** Its bytes
+are written `skipped`, the transform's inner records cite the same bytes, and
+`zpf` refuses the file at close: `ZpfError: [96, 338) is both decoded and
+explicitly marked Undecoded`, raised out of `kober.stage.run`. A tunnel spec
+would naturally write exactly that, since nobody wants the ciphertext written
+as a record of its own. Either `check` refuses `emit: none` on a transform's
+source, or the transform takes over its source's bytes (decision 1 below).
+
+### Q6 and Q10 — the failure model is wrong in a way Q10 did not see
+
+Two captures with a corrupted gzip body, run through the unchanged 0.4.0
+driver:
+
+| capture | what the file says | messages kept |
+| --- | --- | --- |
+| `first_bad`, first response corrupt | the stream declined, `not http: gzip: …` | **0 of 30** |
+| `mid_bad`, fourth response corrupt, after confirmation | the rest of the connection `undecodable` | **3 of 30** |
+
+Q10 foresaw the first row. The second is worse and was not foreseen: **in a
+byte stream, any `undecodable` message ends the run** (`_decode_run`), before
+or after confirmation, and the driver resumes only after the next gap. That
+is right for a desync, where the extent is unknown. A transform failure is not
+a desync. The framing decoded whole and the cursor sits exactly at the end of
+the message, and on a lossless keep-alive connection the next gap is the end
+of the connection. Q10's flag on `_Verdict` fixes only the first row.
+
+The spike then tried **containment**: a transform failure leaves its node
+`OK` with the failure as its `detail`, which is the precedent a malformed
+string already sets (§3.2: *a fact about the input, not a failure of the
+decoder*). Both captures then kept **30 of 30** messages, 24 of 25 bodies
+inflated, and the files were conformant. **But the file says nothing about
+the failed body.** It is one inner record short, with no region. The failure
+is visible in the tree and in `kober try`, and nowhere in the output.
+
+### The tunnel vector does not have the shape Q6 and acceptance 2 assume
+
+`../zipline/vectors/tunnel/packets.jsonl`, the decrypt stage:
+
+- one record per datagram, **citing the whole datagram**, not a ciphertext
+  field inside it;
+- a failed datagram is an `Undecoded` region with the **custom reason
+  `decrypt-failed`**, classed `bytes`, not `undecodable`;
+- and **a Discontinuity `decrypt-failed`** in the output participant, because
+  the plaintext on either side does not join.
+
+Q6 says *no seam is owed* and acceptance 2 says *no seam*, while this plan's own
+opening table says the Discontinuity is there. kober writes a seam only after
+a hole-class region. At field granularity (a unit sequence) a Discontinuity
+would be redundant, and at message granularity kober writes the message, not
+the plaintext. So what "matches `vectors/tunnel/` in shape" means has to be
+decided, not assumed (decision 3).
+
+### Wording
+
+The declined stream's comment quoted **zlib's own text** (`Error -3 while
+decompressing data: invalid code lengths set`). CPython's wording would then
+be written into the file, and a second backend or another Python version
+could say it differently. Q4's rule, kober's own wording, applies to the
+**shipped** codecs too, not only to callers'.
+
+### Q7 — the table, checked
+
+Checked against each platform's documentation on 2026-09-24, and Node 18
+probed directly. Go and Java are as the table says. The rest has moved:
+
+| | deflate-raw | zlib | gzip | bzip2 | xz | br | zstd |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Python ≥ 3.11 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | 3.14+ only |
+| Node | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ 10.16+ | ✅ 22.15+, experimental |
+| Go | ✅ | ✅ | ✅ | decompress only | ❌ | ❌ | ❌ |
+| Java | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| .NET | ✅ | ✅ 6+ | ✅ | ❌ | ❌ | ✅ | ✅ in current docs |
+| Browser `DecompressionStream` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ listed | ✅ listed |
+
+Three consequences:
+
+- **`deflate` is a trap.** In HTTP's `Content-Encoding` *and* in the browser
+  API, `deflate` means **zlib** (RFC 1950), and raw RFC 1951 is `deflate-raw`.
+  The plan defines `deflate` as RFC 1951. An author who copies the header value
+  into `with:` would get the wrong codec and fail on every body. The spike's
+  own spec had to map `deflate` to `zlib` by hand. Q7 is rewritten to follow
+  the browser's names.
+- **`br` and `zstd` are now more portable than `bzip2` and `xz`**, which
+  remain Python's extras. The core tier (the three deflate containers) is
+  unchanged. The extended tier's order of likely demand is `br`, `zstd`,
+  then the two Python-only names.
+- **This backend's bound set depends on the interpreter.** `zstd` is in the
+  standard library from Python 3.14, and kober supports 3.11. A capability
+  set is a property of the *runtime*, not only the backend. Acceptance 8's
+  static refusal has to be computed where the code runs.
+
+### The seam test
+
+**It passes in the interpreter.** The spike's diff to `decoder.py` only adds
+code: two branches in `_value`'s dispatch, and the new methods. `_unit`,
+`_field`, `_repeat`, `_elements`, `_one` and `_constrained` are unchanged,
+`_Read` gained nothing, and the second cursor is `Cursor(output, 0)` with a
+fresh `_Read(origin=0)`. What the seam did *not* carry is on the emitting side
+(Q5 above). The existing suite passed on the spike except three
+documentation-coverage tests, which fail because the new kinds are
+undocumented, and which will hold Stage 8 to its word.
+
+### Decisions the spike leaves open
+
+1. **What a transform failure does, and what the file says about it.** Three
+   shapes, all measured or measurable:
+   - *Stop* (the plan as written): the message is `undecodable`, so the rest
+     of the run is lost, and before confirmation the stream is declined.
+     Visible, at 27 of 30 messages' cost on `mid_bad`.
+   - *Contain*: the node stays `OK` with the failure as its detail. Nothing
+     is lost, and the file says nothing about the failure. No change to the
+     driver or the decoder's loops. Q10 disappears.
+   - *Take over the source*: a transform's outcome speaks for its source's
+     bytes. On success the output records cite them and the source is not
+     written as a record of its own. On failure they become an `undecodable`
+     region, and the message carries on. This is the tunnel vector's shape,
+     it is what makes `emit: none` on the source unnecessary, and it is the
+     only one of the three where the file says a body failed without losing
+     what follows. It costs a rule in the emitter and a change to what a
+     source field writes. **Leaning, pending Adam: this one.**
+
+   **Measured**, same day, with take-over paired with the rule that a
+   message whose transform failed **neither confirms nor declines** the
+   stream. That pairing matters: a transform is often a weakly framed
+   protocol's only real identity check (an AEAD tag that verifies), so a
+   failure must not confirm, and a stream where every transform fails is
+   declined at its end with a comment that says so. A fifth capture,
+   `all_bad`, has every body compressed and every body corrupt, which is what
+   a wrong key looks like to a decoder. Messages kept, field granularity, every
+   output conformant:
+
+   | capture | stop | contain | take over |
+   | --- | --- | --- | --- |
+   | `clean` | 30, 25 inflated | 30, 25 inflated | 30, 25 inflated |
+   | `first_bad` | **0**, declined | 30, failure not in the file | **30, 24 inflated, 1 `undecodable` region** |
+   | `mid_bad` | **4**, rest of the connection lost | 30, failure not in the file | **30, 24 inflated, 1 `undecodable` region** |
+   | `all_bad` | 0, declined | **30 confirmed, 0 inflated, nothing said** | 0, declined at the end |
+
+   The region is exactly the corrupt body (`[96, 338)` in `first_bad`), and
+   nothing else is marked. `all_bad` is declined with `not http: no message
+   decoded whole; every transform failed, the first with gzip: not valid
+   compressed data`. The comment's wording needs work, since for a wrong key
+   *not http* is still false, but it is honest about what was seen. `contain`
+   is ruled out by the last row: it confirms a stream in which nothing
+   inflated and says nothing about it. At message granularity all three modes
+   write 30 whole message records for `first_bad` and `mid_bad`. The message
+   record cites the body, so no region can name its failure there. That is
+   message granularity's resolution, and the docs should say so.
+
+   What it cost the spike: in the decoder, a failure leaves the node `OK`
+   carrying its detail, and the loops are still untouched. In the emitter, a
+   transform's source is skipped when the transform is present, and a failed
+   transform names the source's range `undecodable`. In the driver, a step
+   verdict meaning *decoded whole but held*, and the new end-of-stream
+   comment. On `clean`, take-over writes 25 fewer records, one per compressed
+   body, since those bodies are no longer written as records of their own.
+
+2. **The output's unread tail.** A `type` that reads less than the whole
+   output leaves bytes no inner node claims. The plan is silent. The spike made
+   it `undecodable`, which is strict. The alternative is an inner `skipped`,
+   which the file cannot carry anyway.
+3. **What acceptance 2 means by "the tunnel's shape".** Whole-datagram
+   citation, a custom `decrypt-failed` reason, and a Discontinuity are each a
+   different feature from what kober writes. The minimum honest target is
+   *one output record per datagram, citing input the datagram holds; a
+   failed datagram named `undecodable`; the next datagram decoded*.
+
+
+### Decided, 2026-09-26
+
+Adam settled all three. The rest of this plan is rewritten to agree; where a
+passage argued otherwise, it says so.
+
+1. **Take over the source**, with a failed transform **neither confirming
+   nor declining** the stream. Accepted with it:
+   - a. A transform's source is not written as a record of its own when the
+     transform is present. The outcome speaks for those bytes: the output's
+     records cite them on success, and an `undecodable` region names them on
+     failure. A source whose transform is absent (its condition false) is
+     written as before. `emit: none` on a source is therefore unnecessary,
+     and `check` refuses it rather than let `zpf` raise at close.
+   - b. Failure covers the codec, `limit`, **and the inner decode**. An
+     output that does not decode as its `type` fails the whole transform,
+     and inner records that did decode are dropped, since they would cite
+     bytes marked `undecodable`.
+   - c. No seam after the failed source. `undecodable` is bytes-class, and a
+     field-granularity file is a unit sequence anyway.
+   - d. At message granularity the failure is not in the file. The message
+     record cites the body. This is documented as that granularity's
+     resolution.
+   - e. A stream that ends unconfirmed because every message that decoded had
+     a transform fail is declined, keeping the `not <spec>:` prefix the
+     pipeline and consumers read, worded as what was seen: `not http: every
+     message that decoded had a transform fail; the first: gzip: not valid
+     compressed data`.
+2. **Strict.** Output a `type` does not read to its end is a transform
+   failure, and so, under 1, the whole source is `undecodable`. An author
+   expecting trailing bytes says so with a `remaining` field.
+3. **Acceptance 2 is reworded** (below), and **the args citation rule is
+   adopted**: a transform cites its source **and every field its `args`
+   read**, as one range from the first to the last, the way a `computed`
+   field cites what its expression read. For an AEAD whose nonce and
+   associated data are the header, that is the whole datagram, which is the
+   tunnel vector's citation. Only the source is taken over under 1. The
+   argument fields keep their own records, and the overlap is legal. Custom
+   reasons such as `decrypt-failed` and a Discontinuity after a failure stay
+   out of this phase. The first would extend kober's reason vocabulary for one
+   user. The second is redundant under a unit sequence, and message
+   granularity does not write plaintext at all.
+
+### Found on the way: phantom messages after a gap (not a transform issue)
+
+The lossy capture shows **34 start lines for 30 responses**, under every mode
+and under the shipped `examples/http.yaml` on 0.4.0 too. After each of its 8
+gaps, the driver resumes mid-body, reads body bytes up to a chance CRLF as a
+start line, truncates, and, the stream being confirmed, writes that partial
+tree. That breaks `tools/pipeline.py`'s lossy bound (*no more start lines
+than messages sent*). packeteer's own HTTP bodies are small, so a gap had
+never landed mid-body often enough to show it. This corpus's bodies span
+dozens of pieces. It is a 0.4.0 issue in resynchronising after a gap, filed
+as [#49](https://github.com/adamkjonsson/zipline-kober/issues/49) and added to
+the `0.5.0` milestone. Reproducing it for the issue showed the damage goes
+past the phantom line: the **next real status line is read as a header
+value**. It is scheduled as *Stage 1b*, since it fails Stage 5's pipeline
+input until it is fixed.
 
 ## Design questions to settle first
 
@@ -170,6 +511,12 @@ accepts; the spike measures which.
 value — is useful on its own and comes at no extra cost. It should be a field
 type in its own right, and `transform.from` accepts a field of that type.
 
+*Stage 1:* it is **required**, not merely useful. Only as a field type can
+one `body` field hold either framing, so that `from: body` covers both. The
+spelling that worked is `concat: chunks.data` as a switch case. An empty
+member cites nothing, which keeps the hull off the terminating chunk's size
+line. The hull said nothing else false on the corpus.
+
 ### Q3 — How does `check` type `args` when the registry is process-local?
 
 This is the objection §11.5 raised against caller-registered *functions*, and
@@ -224,8 +571,16 @@ params:
   document plus every parameter value, so the reproducibility contract holds
   — and a `secret: true` value is hashed, never echoed in `comment`, `role`
   or a diagnostic.
+- **Since `0.4.0` a failure detail is written into the file.** A declined
+  stream's regions carry `not <spec>: <detail>, stopped at offset <n>`, with
+  the detail quoted as the decoder gave it. Under Q6 a transform's failure
+  detail would be its exception's message — text a caller's cipher controls
+  and kober does not. So the detail kober reports for a transform failure is
+  **kober's own wording**, naming the transform and the kind of failure, never
+  the callable's message passed through; a test puts a secret in a raising
+  transform's message and asserts it appears nowhere in the output.
 - Reading back at message granularity goes through
-  [`content_registry`](../src/kober/stage.py#L497), which hands a record's
+  [`content_registry`](../src/kober/stage.py#L665), which hands a record's
   payload to `decode_bytes`; a spec with a keyed transform needs the key at
   read time too, so the registry is built from a `Decoder`, which already
   holds it. Nothing changes in the API shape.
@@ -249,6 +604,9 @@ every leaf under a transform to the `from` range.**
   it is why the file needs no new vocabulary. At field granularity the `body`
   record and every inner leaf cite the same input; overlap is legal, and it is
   the *nonce and tag* case the specification describes.
+  *Decided 2026-09-26:* the range is the source **plus every field the
+  `args` read**, first to last, and the source is taken over rather than
+  written as its own record (*Decided*, 1 and 3).
 - **Inner coverage is kober's promise, not the file's.** An inner byte no leaf
   claims cannot be an `Undecoded` block — its input is spanned, and *spanned
   and Undecoded* is the one contradiction the format forbids. So the fuzz
@@ -273,10 +631,27 @@ optional.**
   is a wrong claim about input that arrived, never input that did not. The
   node is `UNDECODABLE` with the transform's message as `detail`; no seam is
   owed. This is the pointer's rule 3 and needs no new argument.
+  *Stage 1: open again.* An `undecodable` message ends its run, so this
+  loses every message after it, and the tunnel vector writes a
+  Discontinuity after a failed decryption. Decision 1 and decision 3 under
+  *What the Stage 1 spike found* replace this bullet.
 - A **short read inside the inner decode** is converted from `truncated` to
-  `undecodable`, exactly as [`_pointer`](../src/kober/decoder.py#L626) converts
+  `undecodable`, exactly as [`_pointer`](../src/kober/decoder.py#L722) converts
   it: `truncated` is hole-class and would declare a break the stream never
-  had.
+  had. `DESIGN.md` §11.5 now states this as a principle — `truncated` is never
+  claimed for bytes that arrived — with `pointer` and, since `0.4.0`, a field
+  starved under `check=False` as its two applications. This is the third.
+- **Whatever a registered callable raises is converted, not only
+  `TransformError`.** A caller's `aes-gcm` from `cryptography` raises
+  `InvalidTag`, and the compiled step catches only `TruncatedRead`,
+  `EvalError`, `Undecodable` and `ZeroDivisionError`
+  ([`stage.py`](../src/kober/stage.py#L469)). `0.4.0` found and fixed one
+  escape from *a decode never raises* (a `count` dividing by zero), which no
+  spec in the fuzz corpus could reach; a registry that trusted its callables'
+  exception types would open another. The wrapper in `ops.py`, shared by both
+  backends, converts any `Exception` from the callable to `undecodable` with
+  kober's own wording (Q4), and the fuzz corpus gets a transform that raises
+  something foreign.
 - **`limit:` is required, and exceeding it is `undecodable`.** A kilobyte of
   gzip inflates to a gigabyte; a transform with no output bound is not total,
   and totality is what §2.1's first bullet demands of every construct. The
@@ -345,10 +720,16 @@ driving example, is where that would have been felt.
 portability, and bound per backend.**
 
 1. **A name means a specification, not an implementation.** `deflate` =
-   RFC 1951, `zlib` = RFC 1950, `gzip` = RFC 1952, `br` = RFC 7932, plus
-   `bzip2` and `xz`. That is what makes a name portable, independent of who
-   has the codec.
-2. **Two tiers.** A **core** tier — `deflate`, `zlib`, `gzip` — that any
+   RFC 1950 (zlib), `deflate-raw` = RFC 1951, `gzip` = RFC 1952, `br` =
+   RFC 7932, `zstd` = RFC 8878, plus `bzip2` and `xz`. That is what makes a
+   name portable, independent of who has the codec. *Stage 1 changed this
+   line*: the first draft had `deflate` = RFC 1951 and `zlib` = RFC 1950,
+   which disagrees with HTTP's `Content-Encoding` and with the browser's
+   `DecompressionStream`, the two vocabularies a spec author is copying
+   from. The names now follow the browser's. `zlib` may be kept as a synonym
+   for `deflate` if it earns its place; it is not a name a header will
+   carry.
+2. **Two tiers.** A **core** tier — `deflate`, `deflate-raw`, `gzip` — that any
    backend must bind to claim conformance, and an **extended** tier a backend
    may decline. A spec that stays in core is portable by construction; one
    that does not says so in its own `transforms:` block, where an author can
@@ -360,15 +741,20 @@ portability, and bound per backend.**
    nothing more. This is Q3's discipline applied one level up — the spec
    declares, the binder supplies, and the two are checked at different times.
 4. **What this implementation ships is then a separate, short sentence.** The
-   core tier plus `bzip2` and `xz`, all from the standard library; `br` and
-   `zstd` through the same caller registration that ciphers use. No new
-   mechanism, only a different framing of the one below.
+   core tier plus `bzip2` and `xz`, all from the standard library, and `zstd`
+   on Python 3.14 and later, where the standard library has it. `br`, and
+   `zstd` before 3.14, go through the same caller registration that ciphers
+   use. No new mechanism, only a different framing of the one below. Because
+   the bound set moves with the interpreter, the capability set is computed
+   at run time, not written down once per backend.
 
 The registry itself is unchanged by any of this:
 
 - `kober.transforms`: `register(name, fn)`, `lookup(name)`, and the bound set
   above. Each is `(data: bytes, *, limit: int, **args) -> bytes`, raising one
-  `TransformError` that becomes `undecodable`.
+  `TransformError` that becomes `undecodable`. That is what the shipped
+  bindings do. A caller's callable may raise anything, and Q6 says why the
+  wrapper converts that too.
 - **Decryption is always caller-registered**, and the docs say so in the first
   paragraph: the standard library has no AES, no ChaCha20 and no GCM, and
   `CLAUDE.md` forbids reaching for one. A caller registers `aes-gcm` from
@@ -394,7 +780,7 @@ TLS 1.3 derives each record's nonce from a per-connection counter; deflate
 with context takeover (WebSocket `permessage-deflate`) keeps its window across
 messages; HPACK keeps a dynamic table. All three carry state from one message
 to the next, and kober's step is per message
-([`stage.py`](../src/kober/stage.py#L291)) with nothing between two calls.
+([`stage.py`](../src/kober/stage.py#L442)) with nothing between two calls.
 
 **Leaning: not in this phase, and nothing in this phase may make it harder.**
 A stream-scoped instance — the driver calling a factory once per stream and
@@ -417,7 +803,10 @@ already available:
 
 - **packeteer `--protocol-messages FILE`** with `raw:` sections: bodies built
   by Python's own `gzip` in a small script, framed as HTTP by hand, fed
-  through `packeteer stream --packet-loss --gap-jitter`. This is the only way
+  through `packeteer stream --packet-loss --gap-jitter`. *Stage 1: not as
+  written.* `--payload http` ignores the flag, so the bytes go through a
+  `blob` protocol spec of kober's own, cut into pieces by the script. See
+  *What the Stage 1 spike found*. This is the only way
   to get a gzip body into an *impaired* stream, and it is the same route the
   compressed-DNS case took. Chunked + gzip is the same script with the body
   split into chunks — and since packeteer's own chunking cannot be applied to
@@ -431,6 +820,62 @@ already available:
 If the raw-section route turns out to be too awkward to script, a
 `--content-encoding` flag belongs in packeteer as a protocol feature, not
 filed as a kober workaround.
+
+Both corpora become pinned inputs of `tools/pipeline.py`, which did not exist
+when this was written. It is where a gzip body meets the driver, and a
+lossless one can have its shape counted exactly by the script's independent
+HTTP reader. `0.4.0` found that bounds on the counts let a real bug through
+([`VERDICT-PHASE-PLAN.md`](VERDICT-PHASE-PLAN.md) §9.2).
+
+### Q10 — Does a transform failure decline the stream? *(added against `0.4.0`)*
+
+> *Stage 1:* this question was too narrow. The spike measured the decline
+> (0 of 30 messages kept) and also found the larger loss after confirmation
+> (3 of 30), which the flag below does not touch. It is folded into
+> decision 1 under *What the Stage 1 spike found*. Two of that decision's
+> answers make this question go away. The text is kept as it was argued.
+> *Decided 2026-09-26:* take-over, and a failed transform neither confirms
+> nor declines. That keeps this question's leaning for the first message
+> and adds the half it missed: the message decodes whole, so the run goes on.
+
+Since `0.4.0` a stream is **confirmed** by its first whole message, and one
+that meets an `undecodable` first is **declined** (`DESIGN.md` §3.1). The
+driver keeps no record for it, marks what it tried `undecodable` and the rest
+`skipped`, and writes `not <spec>: <detail>` on every region. A failed field
+ends its unit and makes the message `undecodable`
+([`decoder.py`](../src/kober/decoder.py#L413)), so under Q6 as written:
+
+- **A wrong or missing key declines every stream it touches**, each labelled
+  `not tunnel` or `not http`. That is false. The protocol is right, and the
+  key is wrong. §3.1 accepted the declining of a right-protocol stream whose
+  first message fails because none of the 22 real captures had one. A
+  transform makes it systematic: every stream, every time the key is wrong.
+- **A corrupt body or an exceeded `limit` in the first response** loses the
+  whole connection, where a desync after confirmation would have lost one
+  message.
+- Acceptance 2 as first written avoided the question by corrupting the
+  *third* datagram.
+
+The confirmation rule exists to stop a **guess about the protocol** from
+writing a fabricated tree. A transform failure is not evidence about the
+protocol. The framing that located the transformed bytes was read whole, and
+they were rejected by a codec or a key. **Leaning: a failure inside a
+transform does not decline, and it does not confirm.** Its message is
+written as an ordinary post-confirmation failure would be: the transform node
+`undecodable` and its input cited. The stream stays unconfirmed until a
+message decodes whole, and it declines at its end if none ever does, which
+keeps the end-of-stream rule intact. What that needs is for the step's
+verdict to tell a failure inside a transform from any other. `_Verdict`
+gains a flag, set by both backends from the one place in `ops.py` that
+converts a transform's failure. The driver reads it. The decoder's loops do
+not change, which keeps the seam test honest.
+
+The alternative, **accept and document**, costs no code, and it writes a
+false statement into every file decoded with the wrong key. It is considered,
+and it loses on the one thing 0.4.0 was about: what a file says about the
+bytes it was given. The spike (Stage 1) runs the corpus both ways, and the
+pipeline's declined-stream count is the measure: a key that is right should
+decline nothing that was confirmed before this phase.
 
 ## The insight, restated as a test
 
@@ -448,7 +893,17 @@ knowing before the compiler copies the mistake.
 
 ## Stages
 
-### Stage 1 — settle Q1–Q9, with a spike
+### Stage 0 — `0.5.0.dev0`, and the baseline
+
+`pyproject.toml` → `0.5.0.dev0`. Run `tools/pipeline.py` on the unchanged
+`0.4.0` code and keep its output as the baseline. `0.4.0` found this the most
+useful decision in its plan ([`VERDICT-PHASE-PLAN.md`](VERDICT-PHASE-PLAN.md)
+§9.1). Every later stage diffs against it with `--baseline`, and for a
+transform-free spec that diff must stay empty through the whole phase,
+**except for what Stage 1b moves**. #49 changes what 0.4.0 writes for a lossy
+stream, so Stage 1b is checked against this baseline and then replaces it.
+
+### Stage 1 — settle Q1–Q10, with a spike
 
 Build the gzip corpus (Q9) first, because every later stage needs it and
 because building it says whether packeteer's raw route is usable. Then, on a
@@ -461,12 +916,141 @@ leanings that were wrong.
 Two things the spike should try that the plan cannot decide on paper: whether
 `concat`'s hull citation says anything false on the chunked corpus (Q2), and
 whether `space` on `Node` disturbs any of `emit._walk`, `_holes`, or the
-differential's comparison (Q5).
+differential's comparison (Q5). A third: a stream whose first gzip body is
+corrupt, and one decoded with the wrong key, through the driver under both of
+Q10's answers, with the declined-stream counts compared.
 
 One thing it should *check* rather than try: Q7's table is one row verified
 and seven recalled. Confirm what Go, Java, .NET, Rust and the browser
 actually have before the tiering is written down, because the tier boundary
 is a promise the format has to keep.
+
+### Stage 1b — phantom messages after a gap ([#49](https://github.com/adamkjonsson/zipline-kober/issues/49))
+
+A driver fix, independent of every transform decision, and first for two
+reasons. Stage 5's lossy gzip input fails the pipeline's shape bound until it
+lands. And it moves transform-free output, so doing it before any transform
+code means one diff against the Stage 0 baseline shows exactly what it
+moved, and nothing else can be mixed into that diff.
+
+- **Decided 2026-09-26**, and recorded on
+  [#49](https://github.com/adamkjonsson/zipline-kober/issues/49#issuecomment-5845321378).
+  Measured first: all 8 gaps in the lossy gzip capture land inside a body.
+  The 4 in `Content-Length` bodies are exactly the 4 real responses the
+  phantoms swallowed, and the 4 in chunked bodies left junk messages. Three
+  parts land here, in both backends:
+  1. **Resume at a known end.** A gap that cuts a read whose length was
+     already decided, with nothing after it up to the entry unit reading
+     bytes, leaves the message's end known. The next run resumes there. The
+     bytes from the gap to that end are `skipped`, with the comment *rest of
+     a message cut by a gap*.
+  2. **Where the end is not known**, the first message after a gap is held.
+     If it decodes whole it is released. If not, its partial tree is
+     discarded and the rest of the run is `undecodable`, with a comment
+     saying no message boundary was found after the gap. Such a failure never
+     declines the stream. No forward scanning.
+  3. **A failed guard writes no fields**, anywhere. It was a separate defect
+     against `DESIGN.md` §3.1, found on the way, and part 2 depends on it. No
+     shipped spec has a guard, so no example output moves.
+
+  The fourth part, a spec recognising its own start line, needs
+  `startswith`/`endswith`: [#50](https://github.com/adamkjonsson/zipline-kober/issues/50),
+  also in `0.5.0`, not in this stage. Datagram input is untouched, since a
+  datagram cannot be cut by a gap.
+- **Tests first**, reverted-and-watched: #49's reproduction as a stage-level
+  test through both drivers, and the lossy gzip capture's shape (*no more
+  start lines than responses sent*) as the property. The stage-level fuzz
+  0.4.0 added gets streams with gaps landing inside messages.
+- **Measure against the Stage 0 baseline.** Every output the fix moves must
+  be one it means to move, checked stream by stream as 0.4.0 checked its
+  declines (`VERDICT-PHASE-PLAN.md` §9.1). Then run the pipeline again into
+  a **new baseline** (`../kober-baselines/0.5.0-stage1b`), which is what
+  every later stage keeps.
+- `CHANGELOG.md` under `Unreleased`: `Fixed`, and `Breaking:` under `Changed`
+  if what a file says about a lossy stream changes the way #32's did.
+
+**Done, 2026-09-26.** All three parts, in both backends, with every
+regression test watched failing against the code it guards, including two
+tests that pin down the *wrong* fixes (dropping records on any failure, and
+guessing a refusal from a unit whose fields all decoded). A new stage-level
+fuzz cuts gaps anywhere in framed streams and checks, against ground truth,
+that no message start is cited inside a message and that every whole message
+after a known cut is decoded. It was watched failing with the resume
+disabled. What it found:
+
+- **On the lossy gzip capture**, start lines went from 34 (26 real, 8
+  phantom) to 32: **all 30 responses at their real offsets**, 4 `skipped` cut
+  regions, 2 `undecodable` lost runs, and 2 phantoms left, both after a gap
+  into a chunked body, both decoding whole. That is #50's case. The capture
+  therefore still breaks the lossy bound (32 > 30) until #50 lands.
+- **Against the Stage 0 baseline, 4 of 64 outputs moved**, all one stream:
+  the generated HTTP traffic under `dns.yaml`, declined as before over the
+  same bytes, now with the end-of-stream comment instead of the specific
+  failure, because the attempt that failed came after a gap. No HTTP output
+  moved: the pipeline's lossy HTTP input has only 2 gaps.
+- **The pipeline's lossy HTTP input has had 2 phantom start lines since
+  0.4.0** (`b''` and `b'19'`, chunk framing read as start lines), hidden by
+  its count bound because the same gaps took 2 real start lines. A check that
+  every start line looks like one would have caught them. It belongs with
+  #50, since it fails until #50 lands.
+- The guard fix moved nothing: no shipped spec has a guard.
+- An end-of-stream decline after a lost attempt needed its own wording, since
+  0.4.0's "every attempt ran out of input" is false when one failed some other
+  way.
+
+The new baseline is `../kober-baselines/0.5.0-stage1b`.
+
+### Stage 1c — `startswith` and `endswith` ([#50](https://github.com/adamkjonsson/zipline-kober/issues/50))
+
+Added 2026-09-26, at Adam's request, before Stage 2, since Stage 1b left two
+phantoms only a spec able to recognise its start line can refuse.
+
+**Done, 2026-09-26.** Two functions in the expression language, typed
+`(str, str) -> bool`, in both backends. `examples/http.yaml` uses them twice:
+a `confirm` on `message` (a status line starts with `HTTP/`, a request line
+ends with the version), and `chunked` recognised as the *last* transfer
+coding, so `gzip, chunked` is no longer read as unframed. Tests were watched
+failing against the old spec, including one that pins down the wrong fix (a
+bare *ends with `chunked`* would accept `xchunked`).
+
+**It exposed a cascade, and #49's second rule was amended for it.** With the
+`confirm`, the first attempt after a gap into a chunked body is correctly
+refused. Under Stage 1b's rule that lost the rest of the run, so the next run
+had no known end either, its attempt was refused too, and so on: the lossy
+gzip capture recovered **6 of 30** responses, where it had recovered 30 by luck
+without the `confirm`. Two fixes were prototyped and measured:
+
+| after a failed first attempt | gzip: real / 30 | phantoms | `http_gen` (58 real) | time |
+| --- | --- | --- | --- | --- |
+| lose the rest of the run (1b) | 6 | 0 | 51 | 0.01 s |
+| **retry where a refusal stopped** | **30** | **0** | **58** | 0.02 s |
+| scan byte by byte | 30 | 0 | 58 | 1.30 s |
+
+Adam chose the retry: an attempt a guard refused was read far enough for the
+guard to run, so where it stopped is known. It is linear; the scan is
+quadratic in the distance to the next real message. `DESIGN.md` §3.1 records
+the scan as the fallback, and the one case it would win. Both backends report
+a refusal to the driver: the interpreter from `Node.refused`, a generated
+module from `Undecodable.refused`, which a guard's `Refused` sets and the
+wrapper keeps. A fuzz over a guarded framed spec checks the retry happens,
+lands on real messages, and never cites a start inside one, and was watched
+failing without it. The comment recording it is on #49.
+
+Found on the way and fixed: **the compiler wrote a long expression on one
+line**, and generated modules are held to `ruff`. `http.yaml`'s test for
+`chunked` as the last coding was the first expression long enough. Long
+expressions are now bound to a local, split at their top-level `or` or `and`,
+and a long citation list is written one range per line.
+
+**`tools/pipeline.py` now checks that every HTTP start line looks like one**,
+by its own pattern rather than the spec's `confirm`. It fails on the Stage 1b
+baseline's two phantoms and passes now.
+
+Against the Stage 1b baseline, **4 of 64 outputs moved, all `http_gen`
+under the HTTP spec**: its two phantoms became one `undecodable` region, and
+all 58 real start lines stayed. `http_stream_1`'s 2000 real messages did not
+move. The lossy gzip capture decodes all 30 responses at their real offsets
+with no phantom, and so now meets the lossy bound Stage 5 needs.
 
 ### Stage 2 — the constructs in the model, loader, and checker
 
@@ -481,9 +1065,65 @@ is a promise the format has to keep.
   `type` resolves; `content_type` is well-formed and only present without
   `type`; a `concat` names a repeated field's element field and nothing else.
   A transform in a repetition without progress is refused the way a repeated
-  pointer is. **No rule here consults a binding** — that is Q7's split, and
+  pointer is.
+- **The terminal rule exempts both constructs.** `check` refuses a field after
+  a `remaining` unless it reads nothing where it stands, and only `computed`,
+  `select` and `pointer` are listed as such
+  ([`check.py`](../src/kober/check.py#L521)). `payload: remaining` followed by
+  `transform: {from: payload}` is the tunnel shape, acceptance 2's own spec,
+  and would be refused. `transform` and `concat` join the exemption, and
+  `starved_fields` must agree, since both backends convert from it.
+- *Stage 1:* `check` must also **look inside** the new kinds: it walks a
+  `transform`'s `type` for reachability, scope and typing, as it does a
+  `pointer`'s. And it refuses `emit: none` on a transform's source: the
+  transform takes over those bytes (*Decided*, 1a), so the setting has
+  nothing to do, and a spec written before that rule would otherwise make
+  the run raise `ZpfError` at close.
+- **No rule here consults a binding** — that is Q7's split, and
   it is what keeps `check` answering the same way against every backend.
 - `kober show` renders `content: gzip(body) → json_document`.
+
+**Done, 2026-09-26.** As listed above, with these differences, each decided
+while building it:
+
+- **The name table arrived here, not in Stage 3**, because `check` needs it to
+  tell a well-known name from an unknown one: `kober.transforms.WELL_KNOWN`,
+  each name with its normative reference and tier. Stage 3 adds the binding
+  to the same module.
+- **A core name may be used undeclared; an extended or custom one must be
+  declared** under `transforms:`, which is how Q7.2 wanted a spec to say it is
+  not portable. A well-known name declared with parameters is an error, and a
+  declared name nothing uses is a warning.
+- **`from:` names a field or a parameter, and nothing else.** Q2's inline
+  `from: {concat: …}` is dropped: Stage 1 showed that `concat` as a field,
+  and a `switch` holding a body however it was framed, is what a transform
+  needs. A source must be *bytes on every branch*: `bytes`, `concat`, a
+  type-less `transform`, or a `switch` of those. That rule is separate from
+  expression typing, since a switch cannot be referenced in an expression.
+- **A repeated transform or concat is refused.** The plan said "the way a
+  repeated pointer is", and nothing refused a repeated pointer: every
+  zero-width field that repeats fails at run time with "consumed no input".
+  The new constructs are refused statically. `computed`, `select` and
+  `pointer` have the same hole, which predates this phase and is filed as
+  [#51](https://github.com/adamkjonsson/zipline-kober/issues/51).
+- **Document `params:` are in scope in every unit**, and may not share a name
+  with any field or unit parameter, so nothing is shadowed. `secret` is
+  allowed on document parameters only.
+- A typed transform is referenced as the type it decodes to (`content.text`),
+  a type-less one and a `concat` as bytes.
+- **Until Stages 4 and 6**, a message reaching a transform is `undecodable`
+  ("not implemented by this decoder"), and the compiler raises a
+  `CompileError` naming the construct, rather than the `TypeError` it raised
+  for an unknown type.
+- Found on the way and fixed: **`show` reported a unit reached only through
+  a `pointer` as unreachable**
+  ([#52](https://github.com/adamkjonsson/zipline-kober/issues/52)), because its own walk followed switch cases
+  and nothing else. It now follows pointers and transform outputs, and
+  expands a transform's output unit in place.
+
+41 checker tests cover every rule, each case pinned to its message. Nothing
+decodes differently: the pipeline moved 0 of 64 outputs against the Stage 1c
+baseline, and `compiled_dns.py` is unchanged.
 
 ### Stage 3 — the well-known names, the registry, and the bound set
 
@@ -491,35 +1131,196 @@ Two things, and Q7 says why they are two:
 
 - **The name table** — the well-known names with their normative references
   and their tier, in the package but not tied to any binding. `check` reads
-  it; a backend's capability set is declared against it. Core is `deflate`,
-  `zlib`, `gzip`; extended is `bzip2`, `xz`, `br`, `zstd`.
+  it; a backend's capability set is declared against it. Core is `deflate`
+  (RFC 1950), `deflate-raw`, `gzip`; extended is `br`, `zstd`, `bzip2`, `xz`
+  (Stage 1's names and order, Q7).
 - **The Python binding** — `kober.transforms` per Q7, binding the core tier
-  plus `bzip2` and `xz` from the standard library, with the bound honoured
+  plus `bzip2` and `xz` from the standard library, and `zstd` where the
+  interpreter has it (3.14+), with the bound honoured
   incrementally and a test that a crafted bomb stops at `limit` in bounded
-  memory, not after. `br` and `zstd` are well-known names this backend does
+  memory, not after. The spike bound all three core names this way
+  (`zlib.decompressobj(wbits).decompress(data, limit + 1)`, then refusing
+  output past `limit`). A shipped codec's failure is worded by kober, never
+  by `zlib`. `br` is a well-known name this backend does
   not bind, which is the first live test that a declined name fails cleanly
   rather than looking like a typo.
 
 The test cipher lives in `tests/`, not in the package.
 
+**Done, 2026-09-26.** In `kober.transforms`, beside the name table Stage 2
+brought forward, with these differences:
+
+- **A `Registry` class, with a default.** The plan named module functions,
+  `register(name, fn)` and `lookup(name)`. They exist, acting on
+  `transforms.DEFAULT`, and a program or a test can hold a registry of its own
+  rather than change the process's. Rebinding a name needs `replace=True`.
+- **`Registry.bind(spec)`** is where a missing binding fails, before any
+  input, with `UnboundTransformError` (a `SpecError`, as Q6 wanted). It names
+  every missing name and says which kind: a well-known one this backend does
+  not bind, with the interpreter's version, or a spec's own that nothing
+  registered. That is acceptance 8's distinction, live with `br`.
+- **`apply()` is in `kober.transforms`, not `ops.py`.** It is the one place a
+  transform runs, for both backends, so Stage 6's generated code calls it
+  here. It holds any output to `limit`, refuses a result that is not bytes,
+  and words every failure: a shipped codec's own message, and for a caller's
+  callable only its exception's class name. Q6 had passed a caller's
+  `TransformError` message through. It is reworded too, since a cipher's text
+  is not kober's to trust.
+- **The bound set moves with the interpreter**, as Stage 1 found: `zstd` is
+  bound on Python 3.14 and later, where `compression.zstd` exists. So the
+  plan's "`br` and `zstd` are names this backend does not bind" is now true
+  of `br` alone, on this machine's 3.14.
+- **Formats that allow several members read them all**: gzip, bzip2, xz and
+  zstd. The deflate formats refuse trailing bytes.
+- **A zstd frame without a checksum can decode corrupt data to different
+  bytes without noticing.** That is the format's, not kober's, and a sender
+  that cares sets the checksum. The tests do.
+- **zstd's errors derive from nothing more specific than `Exception`**, so
+  each codec declares what it raises for bad data; without that a corrupt
+  zstd body read as "raised ZstdError" instead of kober's wording.
+
+45 tests. The three that guard real risks were each watched failing against
+the implementation they exist to catch: a codec that inflates and then checks
+(the bomb test, measured with `tracemalloc` at a 1 MiB limit against 64 MiB of
+zeros), zstd's error left unmapped, and `apply` passing a caller's message on.
+Nothing decodes differently yet; the decoder uses the binding from Stage 4.
+
 ### Stage 4 — the interpreter
 
-The second cursor over the output, `space` on every node beneath it,
-`truncated` converted to `undecodable`, the position asserted unchanged, and
-`decode_bytes`/`Decoder` taking `params`. The seam test is run here and the
-result recorded.
+The second cursor over the output, `space` on every node beneath it, the
+position asserted unchanged, and `decode_bytes`/`Decoder` taking `params`.
+A failure of any kind (codec, `limit`, the inner decode, an unread tail)
+leaves the transform node `OK` with no output and its failure as the detail,
+as a malformed string is (§3.2), so the unit and field loops never see it. A
+short inner read is not reported as `truncated` anywhere. The seam test is run
+here and the result recorded.
+
+**Done, 2026-09-26.** In `decoder.py`, as decided, with these specifics:
+
+- **The seam test passes.** `_field`, `_repeat`, `_elements`, `_one` and
+  `_constrained` are unchanged. `_value`'s dispatch gained two branches.
+  `_unit` changed one line, handing each frame the document's parameters,
+  which is Q4's plumbing rather than the transform's. `_Read` gained nothing,
+  and the second cursor is `Cursor(output, 0)` with a fresh `_Read(origin=0)`,
+  which is the `(data, base, limit)` triple the pointer phase built.
+- **`Decoder(spec, params=…, transforms=…)`.** Parameters are checked against
+  their declared types before any input, raising `ParameterError` (a
+  `KoberError` and a `ValueError`, so the CLI reports it and a caller can
+  catch the idiomatic one; it never quotes a value). `transforms` is a
+  `Registry`, `DEFAULT` unless given, and `bind` runs in the constructor, so
+  an unbound name fails once, before any input.
+- **Every failure is contained** (*Decided* 1 and 2): the codec, `limit`, an
+  argument that cannot be evaluated, an output its `type` does not decode, and
+  an unread tail. The node is `OK` with `Node.failed` set, no value, no
+  children, and the failure as its detail. A short read inside an output is
+  never `truncated` anywhere in the tree.
+- **A typed output is a container of the output unit's fields** in its own
+  space. A scalar-typed one (`type: {string: …}`) is the value itself, citing
+  the input, since its only offsets would be the whole output.
+- **The citation** is the source and every field of this unit its `args`
+  read, first to last (*Decided* 3). A parameter holds no input bytes, and a
+  transform from one cites nothing, at the cursor.
+- **The emitter is guarded until Stage 5.** Field granularity does not walk
+  into a transform, so its source is written as any bytes field is and no
+  inner node reaches a file. `_reason_for` skips nodes in another space,
+  the spike's false `truncated`, fixed here because this stage is what
+  creates such nodes; its test was watched failing without the guard.
+
+20 decoder tests, over gzip and chunked deflate bodies, a caller's cipher
+with a key from a document parameter and a nonce from a field, a pointer
+inside an output, and every kind of contained failure. The pipeline moved 0 of
+64 outputs and `compiled_dns.py` is unchanged.
 
 ### Stage 5 — emission, the stage driver, and the CLI
 
-- `plan()` maps every emission under a transform to the `from` range; a
-  `type`-less transform emits its output as the payload with the declared
-  `content_type`.
+- `plan()` maps every emission under a transform to the transform's range
+  (the source plus its `args` fields); a `type`-less transform emits its
+  output as the payload with the declared `content_type`. A source whose
+  transform is present is not written as a record of its own. A failed
+  transform names its source's range `undecodable`. `_holes` and
+  `_reason_for` skip nodes in another space.
 - `params_digest` computed and written, via a `DecoderHandle`, from both
   drivers through the one place a decoder is declared.
 - `kober run --param NAME=VALUE` (with `hex:` and `file:` forms for bytes);
-  `kober try` likewise; `content_registry` built from a `Decoder`.
-- `_Writer` is unchanged, which is the claim to check: nothing a transform
-  does reaches the writer as anything but a record citing input bytes.
+  `kober try` likewise. `content_registry` already takes a `Decoder`, so it
+  gains the parameters with no change of signature.
+- A step reports a message that decoded whole with a failed transform as
+  its own verdict. Both drivers carry on after it, since the message's extent
+  is known, and it neither confirms nor declines. A stream that ends
+  unconfirmed this way is declined with *Decided* 1e's comment.
+- `_Writer` changes only in the comment it declines a stream with, which is
+  the claim to check: nothing a transform does reaches the writer as anything
+  but a record citing input bytes or a region naming them. Since `0.4.0` it
+  holds everything before confirmation, and an inner record is held and
+  released like any other.
+- `tools/pipeline.py` gains the Q9 inputs, with an exact shape count on the
+  lossless gzip stream and the lossy bound on the other, which holds since
+  Stage 1c (30 responses, all at their real offsets, no phantom), and the
+  start-line check Stage 1c added. Its diff against the Stage 1b baseline stays empty
+  for every transform-free output.
+
+**Done, 2026-09-26; `params_digest` written on 2026-09-27.**
+
+- **Emission** (`emit.py`): a transform's source is not written as a record
+  of its own when the transform is present. An output's records cite the
+  transform's range (source and argument fields); inside an output every
+  record cites the outermost transform's range and nothing becomes a region.
+  A failed transform names its source `undecodable`; `emit: none` on a
+  transform names its source `skipped`. A scalar output is one record
+  labelled by its type, and a type-less one by `content_type` (or
+  `prim:bytes`).
+- **The driver** (`stage.py`): a new verdict, `TRANSFORM_FAILED`, for a message
+  that decoded whole with a failed transform. The run goes on after it, after
+  a gap it counts as a boundary found, and it neither confirms nor declines.
+  A stream that ends unconfirmed after one is declined with *Decided* 1e's
+  comment. `_Writer` changed only in that comment and in noting the failure.
+- **The CLI**: `--param NAME=VALUE` on `run` and `try`, read as the declared
+  type; `bytes` is `hex:…` or `file:PATH` and never bare text. No message
+  quotes a value.
+- **The pipeline** gains `gzip_lossy` and `gzip_clean` from
+  `tools/gzip_http.py` and `tools/blob.yaml`. With today's `http.yaml`, which
+  does not inflate yet (that is Stage 8, after the compiler), they exercise
+  the driver on large compressed bodies: `gzip_clean` matches the reference
+  reader exactly (30, 119, 17), and `gzip_lossy` decodes 30 start lines, all
+  genuine, within its bound. No existing output moved. The lossy bound is now
+  a per-input message count rather than a special case for `http_gen`.
+- `content_registry` needed nothing: it already takes a `Decoder`, which holds
+  the parameters and the bound transforms.
+- **`params_digest` is computed and not yet written.** `zpf` 0.5.0's
+  `decode_stage` declares the stage's decoder itself from a name or
+  `(name, version)`, and only `add_decoder` takes a digest, so the plan's "via
+  a `DecoderHandle`" cannot be done through the public API. Adam chose to fix
+  it upstream: [python-zipline#77](https://github.com/adamkjonsson/python-zipline/issues/77)
+  asks for `decode_stage(…, params_digest=…)`, in a 0.5.1 that kober then pins
+  (`>=0.5.1,<0.6`). Meanwhile `Decoder.params_digest()` exists and is tested: a
+  SHA-256 over a canonical form of the spec model (dataclass by dataclass,
+  mappings as pairs so a `1` case and a `"1"` case differ, where it was read
+  from left out), the granularity, and every parameter's value. Writing it is
+  one argument in `stage.run` once #77 lands; the compiled driver's follows
+  in Stage 6.
+
+  **Written, 2026-09-27**, when python-zipline 0.5.1 released #77, and pinned
+  `>=0.5.1,<0.6`. Both drivers write it: `stage.run` from
+  `Decoder.params_digest()`, and `run_compiled` from the module's new
+  `SPEC_DIGEST`, its `EMIT` and the parameters, through the same
+  `runtime.params_digest`. Making them agree changed one thing. The digest
+  covered the decoder's default granularity, which a generated module never
+  sees; when the entry unit names its own, that default changes nothing
+  written. It now covers the granularity the entry resolves to. `blocks()` in
+  `tests/zpfcompare.py` compares each decoder's descriptor with its digest,
+  so every differential and the pipeline hold the two to one digest. A module
+  from before `SPEC_DIGEST` writes none rather than a wrong one. The pipeline
+  was unchanged against the Stage 6 baseline before `blocks()` learnt the
+  descriptor.
+- **`--load-transforms MODULE`**, added at Adam's request: the CLI could not run
+  a spec whose transform only a caller binds, a cipher. A path ending `.py` is
+  loaded from its file and anything else is imported, which is packeteer's
+  `--load-protocol` rule; it runs before the decoder is built, so what it
+  registers on the default registry is what `bind` finds. A module that
+  cannot load, or raises, is reported as a failure to load it.
+
+10 stage tests through the interpreter's driver (9 watched failing against
+Stage 4), 9 CLI tests.
 
 ### Stage 6 — the compiler
 
@@ -527,11 +1328,91 @@ Generated code calls the registry through [`ops.py`](../src/kober/ops.py), so
 the bound, the error conversion and the citation mapping are written once and
 shared. A generated module binds its transforms at import. `__spans__` carries
 inner-space offsets for inner objects. The differential is extended to every
-transform-bearing spec in every corpus, byte-identical files block for block.
+transform-bearing spec in every corpus, byte-identical files block for block
+under `tests/zpfcompare.py`'s `blocks()`, the one definition both the suite
+and the pipeline use. It compares region comments too, so the two backends
+must word a transform failure identically, and Q4's rule makes that wording
+kober's. `tests/compiled_dns.py` is regenerated and must diff empty: a spec
+with no transform compiles to the same source as before.
+
+**Done, 2026-09-26; the compiled digest followed on 2026-09-27 (Stage 5).**
+
+- **The shared code is in `kober.runtime`, not `ops.py`**: `ops.py` describes a
+  spec to a backend and runs nothing. `run_transform` runs a transform,
+  decodes its output and contains every failure in the interpreter's words;
+  `take_over` writes what the outcome says about the source; `concat` joins
+  and cites. Each transform is one call and adds **no branch** to the
+  generated function. That is not cosmetic: generated modules are linted with
+  the project's own configuration, and the first version put a test spec's
+  read function at 44 branches against a limit of 20. `http.yaml` meets the
+  same limit in Stage 8.
+- **The plan layer** gains `TransformPlan`, stamped on the output's
+  `ValueType` (`ValueType.transform`), and `ValueType.concat`. `Plan` gains the
+  names to bind, the document parameters and the spec's digest.
+- **A transform's `type` must be a unit in the compiler.** The output is
+  decoded by calling the unit's function over it, through an `Output` sink
+  that cites the input and is released only when the whole output decoded. A
+  scalar `type` has no function, so it is a `CompileError`, and the
+  interpreter decodes it. Wrapping it in a unit is the workaround, and no
+  example needs more.
+- **Take-over in the compiled module** is `Held.retract(role)`: a transform
+  unit is held like a guarded one, and its source's record is taken back
+  when the transform runs, which keeps record order the interpreter's.
+- **A failed transform is a value**: the field holds
+  `TransformFailed(detail)`, the message is returned, and the compiled step
+  reads it back (`first_failed`) as the `TRANSFORM_FAILED` verdict.
+- **Parameters**: a module whose spec has `params:` carries `PARAMS`, and its
+  `decode` and `decode_from` take `params=`, checked by the same
+  `document_params` as the interpreter's, so both refuse in the same words.
+  `run_compiled` and `decode_stream_compiled` take `params=`.
+- **Binding at import**: `TRANSFORMS = bind_transforms((…))` from
+  `kober.transforms.DEFAULT`, so an unbound name fails the import once.
+- **The compiled digest is deferred** with the interpreter's, until
+  python-zipline#77. `Spec.digest()` and `runtime.params_digest` exist for it.
+  (Written since: see Stage 5.)
+
+**Two bugs, both shared by the interpreter, found by the differential.**
+
+1. **A failed transform over a `concat` named cited bytes `undecodable`.**
+   Take-over names the source's range; a concat's range is its members' hull,
+   which at field granularity is cited by every member's own record and by
+   the size lines between them. It broke the promise that no byte is both
+   cited and undecoded. Nothing had exercised it, because no example has a
+   transform and the take-over measurement used a length-framed body. A first
+   fix named nothing, which left the failure implicit in the file. **Rule,
+   decided 2026-09-27: a concat's members are taken over.** On failure each
+   member's record is taken back, empty ones included, and each non-empty
+   member is named `undecodable` (`skipped` for `emit: none`); the size lines
+   keep their records. That says per message what a length-framed body says.
+   Where a switch may or may not have joined, the compiled module decides at
+   run time; a switch joining *different* members on different branches is
+   refused by the compiler at field granularity. This amends Stage 7's
+   invariant 4.
+2. **The two drivers wrote a message's blocks in different orders.** The
+   interpreter's step writes all of a message's records and then its regions,
+   because `plan` returns them apart; a generated module writes in decode
+   order. Nothing tested it until a region could fall in the middle of a
+   message. The compiled step now passes regions on after the records,
+   through `_RegionsLast`, and the files are identical.
+
+The inner short read's wording was also aligned: `<name> output does not
+decode: it ends before its type does`, in both backends.
+
+**Tests.** `tests/fuzzing.py` gains `TRANSFORM_SPEC`, a chunked or
+length-framed deflate body decoded as a unit, and a raw-deflate field kept as
+bytes, which is the first transform the interpreter's fuzz suite reaches. It
+joins the adversarial corpus of `test_compiled.py` in both framings.
+`test_stage_transforms.py` now writes every file with both drivers and
+requires them identical, the tunnel cipher with its key included.
+`test_compiled_transforms.py` covers the typed value, parameters and binding.
+The fixes for bug 1 were each watched failing (the emitter under
+`test_fuzz.py`, the generator under `test_compiled.py`), and bug 2 under
+`test_stage_transforms.py`. The pipeline is unchanged against the Stage 5
+baseline (`../kober-baselines/0.5.0-stage6`).
 
 ### Stage 7 — fuzz, and the new invariants
 
-Three invariants, each verified against a deliberately broken implementation
+Four invariants, each verified against a deliberately broken implementation
 before it is trusted:
 
 1. The position is unchanged across a transform — checked against a version
@@ -539,13 +1420,59 @@ before it is trusted:
 2. Inner coverage: every output byte is cited by an inner node or named by
    an inner non-`OK` node, never both — checked against a version that drops
    the inner tail.
-3. `limit` holds: no transform's output exceeds it, and exceeding it is
-   `undecodable` — checked against a version with the bound removed and a
-   bomb in the corpus.
+3. `limit` holds: no transform's output exceeds it, and exceeding it is a
+   failure — checked against a version with the bound removed and a bomb in
+   the corpus.
+4. A transform's source is spoken for exactly once: on success it is cited by
+   the output's records and by no record of its own, on failure it is one
+   `undecodable` region and cited by nothing — for a `concat` source, one
+   region per non-empty member, and no member's record (Stage 6). Checked against a version that
+   also writes the source's own record, and one that drops the region.
 
 Plus the existing set over the input space, unchanged, which is itself a
 claim: a transform must not weaken *any* of the four promises `test_fuzz.py`
-already makes.
+already makes. *A decode never raises* is the one most at risk (Q6), so the
+corpus includes a registered transform that raises something other than
+`TransformError`. `0.4.0` also added the suite's first stage-level fuzz,
+over confirmation. Streams whose messages carry transforms, with some failing,
+join it. It asserts *Decided* 1: a transform failure neither confirms nor
+declines, and a message after one is still decoded. Only a stream in which no
+message decoded whole without one is declined.
+
+**Done, 2026-09-27. It found no bug**; Stage 6's differential had found the
+two there were.
+
+- **The four invariants** are in `test_fuzz.py`, over `TRANSFORM_SPEC` and
+  its variants. Each has a companion test that runs it against a broken
+  implementation and asserts that it fails there: a `_transform` that reads a
+  byte; a cursor that reports an output's end early, so its tail is never
+  looked at; `apply` with no bound; and an emitter that writes the source as
+  well, or drops its region. Invariant 2 needs no "inner non-`OK`" clause
+  under *Decided* 2: an output its type did not read to the end, or did not
+  decode, fails the transform, so a successful one is read byte for byte.
+  Invariant 4 is as Stage 6 amended it for a `concat` source.
+- **Seeds a broken implementation would pass.** Mutated compressed data almost
+  always fails, and a failure is what a broken bound or a lax tail check
+  also produces, so the corpus gained `TRANSFORM_ADVERSE`: a bomb for each
+  output (200 bytes against 64, 100 against 16) and an output with two bytes
+  over. Both join the compiler's adversarial corpus.
+- **A caller's transform that misbehaves**, `fuzzing.hostile`: it raises
+  `KeyError` and `RecursionError`, raises `TransformError` with a secret,
+  returns a `str`, ignores its limit, or works, by its input's first byte.
+  Every behaviour is asserted reached, none escapes a decode, the secret never
+  reaches a tree, a record or a region, and both backends agree on all of it.
+- **The driver, over streams with transforms** (`TOYX`): runs and datagrams,
+  gaps, messages that decode, fail a transform, belong to another protocol or
+  are cut short, through both drivers. The expected outcome is derived from
+  the verdicts alone: the first whole message with its transform working
+  confirms; an `undecodable` one before that declines; a failed transform, or
+  a lost attempt after a gap, is neither. A confirmed stream writes every
+  whole message, a failed one without its output; a declined one writes no
+  record, and says a transform failed when one did. It was watched failing
+  against a writer where a failed transform confirms, and one where it
+  declines.
+
+`docs/dev/testing.md` gains *Transforms*. 52 tests.
 
 ### Stage 8 — examples, documentation, and what has to be restated
 
@@ -564,12 +1491,81 @@ already makes.
   It is what an author consults before using `br`, and what a second backend
   implements against — so it belongs beside the type reference rather than in
   a changelog entry.
-- `DESIGN.md`: §2.1 revision 10 (a cursor over bytes that are not input);
-  §3.2 gains the two constructs; §6 gains `params`; §11.5 records that the
-  deferred branch was taken and where the line sits now; a new §13 entry for
-  what the gzip corpus found.
-- `CHANGELOG.md` under `Unreleased`, then `0.4.0`: a minor bump for new
+- `DESIGN.md`: revision 12 (10 and 11 were taken by `0.3.0` and `0.4.0`).
+  §2.1 gains a cursor over bytes that are not input; §3.1's confirmation
+  section gains Q10's rule for transform failures; §3.2 gains the two
+  constructs; §6 gains `params`; §11.5 records that the deferred branch was
+  taken and where the line sits now, and the inner short read as the third
+  application of its `truncated` principle; a new §13 entry for what the gzip
+  corpus found.
+- `docs/format/concepts.md` *What a spec meets in someone else's stream*
+  says that a transform failure does not decline.
+- `CHANGELOG.md` under `Unreleased`, then `0.5.0`: a minor bump for new
   spec keys, and `Breaking:` only if `content_registry`'s signature changes.
+
+**Done, 2026-09-27.**
+
+- **`examples/http.yaml` inflates its content.** `body` is one switch on a new
+  `framing` select, `concat: chunks.data` or a counted read, and `content` a
+  switch on `encoding` over `deflate` and, by default, `gzip` (the condition
+  admits `gzip`, `x-gzip` and `deflate`, and only when there is a body, so a
+  `304` or a `HEAD` reply inflates nothing). `chunked` is computed from
+  `framing`, which reads two `Transfer-Encoding` headers as one list. `br` is
+  not decoded: declaring it would stop the spec from running where nothing
+  binds it. Message-granularity output is unchanged; at field granularity each
+  message gains `framing` and `encoding` records, a chunked one a joined
+  `body`, and an inflated body is replaced by its `content`.
+- **The generated module passed its branch limit**, at 28 against 20: the
+  message unit sat at exactly 20 before. Adam chose generator changes over
+  splitting the spec, which would have renamed every HTTP role. An absent
+  field is assigned before its condition; identical per-branch records are
+  written once; the span of a switch that may have joined is a conditional
+  expression; a size check, a text decode and a value-sized integer record are
+  runtime calls; and a switch of one transform under different names is one
+  call with the name looked up. It is at 19. Long nested conditions split
+  inside their brackets, and one value against several literals renders as a
+  membership test, which `ruff` asks for.
+- **Two bugs.** `message_tail_fields` did not see through a switch of
+  transforms, so #49's resume stopped working for length-framed bodies the
+  moment `content` was added; a switch whose every case reads nothing now
+  reads nothing. And an argument field marked `emit: none` was `skipped` under
+  the plaintext that cites it, found by writing the two-stage tunnel: the
+  output of a transform that succeeded now speaks for it, in both backends
+  (`Held.withdraw`, `take_over(spoken=…)`).
+- **The tunnel** is a test spec rather than an example, since it needs a
+  caller's cipher: `QUIET_TUNNEL` in `tests/test_stage_transforms.py`, whose
+  first stage writes one plaintext per datagram and whose second stage reads
+  them, conformant with full coverage, corrupting the first or the third.
+- **The pipeline** checks each `http.content` record against the SHA-256 of a
+  document that was compressed: 25 of 25 without loss, 21 with, every one
+  genuine. Every other HTTP output changed only as described above.
+- **Docs**: `concepts.md` gains *A second offset space* and the confirmation
+  rule; *cannot say* now names state between messages. The name table was
+  already reference documentation beside the types (Stage 5). `DESIGN.md`'s
+  revision 12 grew rather than a revision 13, since it is one release.
+  `decisions.md`, `architecture.md` (the seam test held: the field loop is
+  unchanged and the unit loop gained one line), `expressions.md` and
+  `document.md` are brought up to date. **packeteer 0.16.0 refuses the new
+  `http.yaml` at load**: it knows neither `transform` nor `concat`, and its
+  switch cases are integers. Filed as packeteer#170 and #171.
+
+### Acceptance, as it stands
+
+1. Holds: the pipeline's `gzip_clean` and `gzip_lossy`, both granularities,
+   both backends, conformant and coverage-clean.
+2. Holds: `test_a_tunnel_feeds_a_second_stage_one_plaintext_per_datagram`
+   (first and third corrupt) and `test_a_tunnel_with_the_wrong_key_is_declined_saying_so`.
+3. Holds, with one qualification. Files are identical block for block,
+   `params_digest` and comments included. `tests/compiled_dns.py` no longer
+   regenerates to an empty diff, because the generator's output changed on
+   purpose (fewer branches); DNS output is unchanged apart from its digest.
+4. Holds (Stage 7).
+5. Holds: see `architecture.md`.
+6. Holds (Stage 2).
+7. Holds: the name table in `types.md` states the tiers and each name's
+   reference, and every backend is to bind the core three.
+8. Holds (Stage 3): `br` fails before any input, saying this backend does not
+   bind it, and `check` without a target passes.
 
 ## What this phase does not do
 
@@ -587,7 +1583,7 @@ already makes.
 - **A second backend.** Q7 tiers the names so one is possible later and
   writes the capability set down; it does not build a target, and
   `--target` has exactly one value until one exists.
-- **A release.** `0.4.0` is a separate step and follows the release procedure
+- **A release.** `0.5.0` is a separate step and follows the release procedure
   in `CLAUDE.md`; this plan ends at *merged under `Unreleased`*.
 
 ## Acceptance
@@ -596,20 +1592,30 @@ already makes.
    and chunked — into the inner content, on generated captures with loss,
    conformance- and coverage-clean at both granularities; its gzip disclaimer
    is gone.
-2. A `type`-less transform produces a file a second kober stage reads, and the
-   chain's coverage accounting matches `vectors/tunnel/` in shape: whole-input
-   spans, `undecodable` on the corrupted datagram, no seam.
+2. A `type`-less transform produces a file a second kober stage reads, with
+   one plaintext record per datagram citing only bytes that datagram holds
+   (the whole datagram, when the header is the cipher's nonce and associated
+   data); a corrupted datagram's ciphertext named `undecodable`; the datagram
+   after it decoded; the chain conformant with full coverage. The same holds
+   when the corrupted datagram is the **first**. A wrong key, where every
+   datagram fails, declines the stream with *Decided* 1e's comment. The
+   vector's custom `decrypt-failed` reason and its Discontinuity are out of
+   scope (*Decided*, 3).
 3. The differential passes over every corpus with transform-bearing specs in
-   each, byte-identical files block for block, including `params_digest`.
-4. The three new fuzz invariants hold and were each seen to fail against the
+   each, byte-identical files block for block under `blocks()`, including
+   `params_digest` and region comments. `tests/compiled_dns.py` regenerates
+   with an empty diff, and `tools/pipeline.py`'s diff against the Stage 1b
+   baseline is empty for every transform-free output.
+4. The four new fuzz invariants hold and were each seen to fail against the
    broken implementation they target; the four existing ones are unchanged.
 5. The seam test passes: the diff to `decoder.py`'s field and unit loops is
    empty.
 6. `check` refuses an undeclared transform, an untyped or missing argument, a
    missing `limit`, and a `from` that is not an earlier bytes field — before
-   any data exists, with no registry loaded.
+   any data exists, with no registry loaded — and accepts a transform after a
+   `remaining`.
 7. **The core tier is stated as a conformance claim**: a backend binding
-   `deflate`, `zlib` and `gzip` can run any spec that stays inside it, and the
+   `deflate`, `deflate-raw` and `gzip` can run any spec that stays inside it, and the
    docs say which names are core, which are extended, and what each one's
    normative reference is.
 8. **An extended-tier name a backend declines fails statically and says so** —
@@ -619,3 +1625,10 @@ already makes.
 9. `DESIGN.md` and the format docs say what is true of both implementations
    afterwards, and `concepts.md` no longer lists transforms as something a
    spec cannot say.
+10. **#49 and #50 are fixed**: no stream in any pipeline input, lossy gzip
+    included, has more start lines than messages sent or a start line that
+    does not look like one, and the Stage 1b diff against the Stage 0
+    baseline moved only what #49 meant to move.
+11. **No secret reaches the file**: a `secret: true` value, and a secret in a
+    raising transform's own message, appear in no record, region comment or
+    diagnostic, including a declined stream's.

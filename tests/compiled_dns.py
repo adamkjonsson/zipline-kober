@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar
 
-from kober.runtime import Cursor, Sink, Stopped, TruncatedRead, Undecodable
+from kober.runtime import Cursor, Sink, Stopped, TruncatedRead, Undecodable, decode_text
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -25,6 +25,11 @@ VERSION = "1.0"
 #: one per leaf field, or none. The stage driver reads it to declare what
 #: the output's records assert about one another.
 EMIT = "field"
+
+#: A digest of the specification, which the stage driver combines with
+#: EMIT and the parameters into the output's ``params_digest``, the one
+#: the interpreter writes for the same configuration.
+SPEC_DIGEST = "ddad4b284b808a6f1e3da559fe660e809abc70c4ef9ae967a12fe9db2bacce91"
 
 #: How a text field's payload is labelled. Not ``prim:`` — that scheme
 #: has no text token — so the format's other fully specified one is used.
@@ -955,13 +960,7 @@ def _decode_label(
         _raw = _data[_at + 1:_at + 1 + _want]
         _at = _at + 1 + _want
         _b = _base + _at
-        try:
-            rest = _raw.decode("utf-8")
-        except UnicodeDecodeError:
-            # A malformed string is a fact about the input, not a
-            # failure of the decoder: §3.2. The bytes are accounted
-            # for either way, so the region stays decoded.
-            rest = _raw.decode("utf-8", errors="replace")
+        rest = decode_text(_raw, "utf-8")
     elif _selector == 3:
         rest, _at = _decode_compressed(
             _data,

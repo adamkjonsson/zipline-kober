@@ -22,6 +22,7 @@ import importlib.util
 import re
 import struct
 import sys
+import zlib
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
@@ -31,11 +32,16 @@ import zpf
 from fuzzing import (
     CONST_SPEC,
     DNS_RESPONSE,
+    HTTP_DEFLATED_CHUNKED,
+    HTTP_GZIPPED,
     SEEDS,
     SELECT_MESSAGE,
     SELECT_SPEC,
     STARVED_MESSAGE,
     STARVED_SPECS,
+    TRANSFORM_ADVERSE,
+    TRANSFORM_MESSAGES,
+    TRANSFORM_SPEC,
     cases,
     const_cases,
     framing_cases,
@@ -47,16 +53,19 @@ from fuzzing import (
 from zpf.blocks import UNDECODED_REASONS
 from zpfcompare import assert_conformant, blocks
 
+from kober import transforms
 from kober.cli import main
 from kober.decoder import Decoder
 from kober.emit import Emission, Unclaimed, plan, root_emit
-from kober.errors import CompileError, EvalError, TruncatedRead, Undecodable
+from kober.errors import CompileError, EvalError, Refused, TruncatedRead, Undecodable
+from kober.loader import from_dict
 from kober.node import Node, NodeStatus
 from kober.ops import Plan
-from kober.pygen import Names, render
-from kober.runtime import Cursor, span
+from kober.pygen import Names, render, render_spec
+from kober.runtime import Cursor, TransformFailed, span
 from kober.spec import Emit, Spec
 from kober.stage import run_compiled
+from kober.transforms import Registry
 
 if TYPE_CHECKING:
     from kober.ops import ObjectPlan
@@ -70,6 +79,7 @@ EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 REASONS = {
     TruncatedRead: NodeStatus.TRUNCATED.value,
     Undecodable: NodeStatus.UNDECODABLE.value,
+    Refused: NodeStatus.UNDECODABLE.value,
     EvalError: NodeStatus.UNDECODABLE.value,
     ZeroDivisionError: NodeStatus.UNDECODABLE.value,
 }
@@ -93,6 +103,9 @@ HTTP_MESSAGES = [
     b"HTTP/1.1 204 No Content\r\nHost: h\r\n\r\n",
     b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
     b"POST / HTTP/1.1\r\nCONTENT-LENGTH:2\r\n\r\nhi",
+    HTTP_GZIPPED,
+    HTTP_DEFLATED_CHUNKED,
+    HTTP_GZIPPED[:-4] + b"oops",
 ]
 
 
@@ -100,13 +113,20 @@ HTTP_MESSAGES = [
 _MODULES: dict[str, ModuleType] = {}
 
 
-def compiled(spec: Spec, emit: Emit = Emit.MESSAGE, *, check: bool = True) -> ModuleType:
+def compiled(
+    spec: Spec,
+    emit: Emit = Emit.MESSAGE,
+    *,
+    check: bool = True,
+    registry: Registry | None = None,
+) -> ModuleType:
     """Compile a spec and import the module, without going through a file.
 
     Registered in ``sys.modules`` because ``dataclasses`` looks a class's module
     up there while working out which annotations are ``ClassVar`` — which is
     also true of a generated module a consumer imports normally, so nothing is
-    being papered over.
+    being papered over. A module binds its transforms when it is imported, from
+    :data:`kober.transforms.DEFAULT`, so ``registry`` stands in for it then.
     """
     source = render(Plan.from_spec(spec, check=check), emit=emit)
     if source in _MODULES:
@@ -114,7 +134,13 @@ def compiled(spec: Spec, emit: Emit = Emit.MESSAGE, *, check: bool = True) -> Mo
     name = f"compiled_{spec.name}_{len(_MODULES)}"
     module = ModuleType(name)
     sys.modules[name] = module
-    exec(compile(source, f"<{name}>", "exec"), module.__dict__)  # noqa: S102
+    default = transforms.DEFAULT
+    if registry is not None:
+        transforms.DEFAULT = registry
+    try:
+        exec(compile(source, f"<{name}>", "exec"), module.__dict__)  # noqa: S102
+    finally:
+        transforms.DEFAULT = default
     _MODULES[source] = module
     return module
 
@@ -226,7 +252,13 @@ def merged(regions: list[Unclaimed]) -> list[Unclaimed]:
 
 
 def interpreted(
-    spec: Spec, data: bytes, emit: Emit, base: int = 0, *, check: bool = True
+    spec: Spec,
+    data: bytes,
+    emit: Emit,
+    base: int = 0,
+    *,
+    check: bool = True,
+    registry: Registry | None = None,
 ) -> tuple[list[Emission], list[Unclaimed]]:
     """Return what the interpreter would write for ``data``, tail included.
 
@@ -234,7 +266,7 @@ def interpreted(
     so the driver's part is done here — otherwise the two sides would be compared
     over different amounts of input.
     """
-    tree = Decoder(spec, check=check).decode_bytes(data, base=base)
+    tree = Decoder(spec, check=check, transforms=registry).decode_bytes(data, base=base)
     emissions, unclaimed = plan(spec, tree, data, emit=emit, base=base)
     end = base + len(data)
     if tree.off_end < end:
@@ -244,19 +276,33 @@ def interpreted(
 
 
 def emitted(
-    spec: Spec, data: bytes, emit: Emit, base: int = 0, *, check: bool = True
+    spec: Spec,
+    data: bytes,
+    emit: Emit,
+    base: int = 0,
+    *,
+    check: bool = True,
+    registry: Registry | None = None,
 ) -> tuple[list[Emission], list[Unclaimed]]:
     """Return what the generated module writes for ``data``."""
     sink = RecordingSink()
-    compiled(spec, emit, check=check).decode(data, base=base, sink=sink)
+    compiled(spec, emit, check=check, registry=registry).decode(data, base=base, sink=sink)
     sink.finish()
     return sink.records, sink.regions
 
 
-def writes(spec: Spec, data: bytes, emit: Emit, base: int = 0, *, check: bool = True) -> None:
+def writes(
+    spec: Spec,
+    data: bytes,
+    emit: Emit,
+    base: int = 0,
+    *,
+    check: bool = True,
+    registry: Registry | None = None,
+) -> None:
     """Require both implementations to write the same thing for ``data``."""
-    assert emitted(spec, data, emit, base, check=check) == interpreted(
-        spec, data, emit, base, check=check
+    assert emitted(spec, data, emit, base, check=check, registry=registry) == interpreted(
+        spec, data, emit, base, check=check, registry=registry
     )
 
 
@@ -295,9 +341,23 @@ def compare(spec: Spec, data: bytes, base: int = 0) -> None:
     same(plan, names, plan.entry, value, tree, "")
 
 
-def same(plan: Plan, names: Names, unit: str, value: object, node: Node, where: str) -> None:
-    """Require one decoded object and one tree node to say the same thing."""
-    assert span(value) == (node.off_start, node.off_end), f"{where or unit}: different extent"
+def same(
+    plan: Plan,
+    names: Names,
+    unit: str,
+    value: object,
+    node: Node,
+    where: str,
+    *,
+    extent: bool = True,
+) -> None:
+    """Require one decoded object and one tree node to say the same thing.
+
+    ``extent`` is false for a transform's output: the node cites the input,
+    and the object is measured in the output, so only its fields compare.
+    """
+    if extent:
+        assert span(value) == (node.off_start, node.off_end), f"{where or unit}: different extent"
     obj: ObjectPlan = plan.object(unit)
     for item in obj.fields:
         if item.name is None:
@@ -330,10 +390,16 @@ def nested(
     plan: Plan, names: Names, item: Any, value: object, node: Node, where: str
 ) -> None:
     """Compare one value, descending into it if it is a decoded object."""
+    if isinstance(value, TransformFailed):
+        assert node.failed, f"{where}: the interpreter's transform did not fail"
+        assert value.detail == node.detail, f"{where}: failed for different reasons"
+        return
+    assert not node.failed, f"{where}: the interpreter's transform failed: {node.detail}"
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         unit = node.unit
         assert unit is not None, f"{where}: the interpreter has no unit here"
-        same(plan, names, unit, value, node, where)
+        output = any(kind.transform is not None for kind in item.types)
+        same(plan, names, unit, value, node, where, extent=not output)
         return
     assert value == node.value, f"{where}: {value!r} against {node.value!r}"
 
@@ -795,6 +861,53 @@ def test_a_computed_field_cites_the_fields_it_read():
     assert computed.role == "t.octets"
     assert (computed.off_start, computed.off_end) == (0, 1)
     writes(spec, b"\x02\x00", Emit.FIELD)
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+def test_a_computed_field_reading_a_nested_unit_cites_the_field_it_read(emit: Emit):
+    """`h.v` is the evidence, not the empty position the computed field stands at.
+
+    Since the compiler's first version it cited its own position for any
+    dotted path, and the interpreter the field; no spec in the corpus read one.
+    """
+    spec = inline("""
+        name: nested
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: h, unit: hdr}
+              - {name: pad, bits: 8}
+              - {name: x, computed: "h.v + 1"}
+          hdr:
+            fields:
+              - {name: w, bits: 8}
+              - {name: v, bits: 8}
+    """)
+    data = bytes([1, 2, 3])
+    writes(spec, data, emit)
+    records, _ = interpreted(spec, data, Emit.FIELD)
+    assert {r.role: (r.off_start, r.off_end) for r in records}["nested.x"] == (1, 2)
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+@pytest.mark.parametrize("data", [bytes([2, 9]), bytes([1, 9])], ids=["absent", "present"])
+def test_an_expression_naming_an_absent_field_is_undecodable_in_both(data: bytes, emit: Emit):
+    """A generated module let a `TypeError` escape here: a decode must never raise."""
+    spec = inline("""
+        name: absent
+        version: "1"
+        entry: m
+        units:
+          m:
+            fields:
+              - {name: n, bits: 8}
+              - {name: a, bits: 8, condition: "n == 1"}
+              - {name: x, computed: "a + 1"}
+    """)
+    compare(spec, data)
+    writes(spec, data, emit)
 
 
 def test_a_computed_integer_is_sized_by_its_value():
@@ -1442,6 +1555,89 @@ AWKWARD["entry granularity"] = """
           - {name: c, type: {int: {bits: 16}}}
 """
 
+AWKWARD["guards"] = """
+    name: guards
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - {name: tag, type: {int: {bits: 8}}}
+          - {name: body, type: {unit: inner}}
+          - {name: tail, type: {int: {bits: 8}}}
+      inner:
+        confirm: "v == 7"
+        reject: "w == 0"
+        fields:
+          - {name: v, type: {int: {bits: 8}}}
+          - {name: w, type: {int: {bits: 8}}}
+"""
+
+AWKWARD["prefixes"] = """
+    name: prefixes
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - {name: line, type: {string: {delimiter: "\\r\\n"}}}
+          - {name: is_status, type: {computed: "startswith(line, 'HTTP/')"}}
+          - {name: is_request, type: {computed: "endswith(trim(line), 'HTTP/1.1')"}}
+          - name: rest
+            type: {bytes: {size: {remaining: true}}}
+            condition: "startswith(lower(line), 'http/') or endswith(line, '')"
+"""
+
+AWKWARD["transform"] = TRANSFORM_SPEC
+AWKWARD["transform framed by length"] = TRANSFORM_SPEC
+AWKWARD["transform bomb"] = TRANSFORM_SPEC
+
+#: Expressions naming a field that may hold nothing: one under a condition, and
+#: a transform's output, read by a dotted path and as bytes. Until this was in
+#: the corpus a generated module let a `TypeError` escape for the first and an
+#: `AttributeError` for the second, and cited its own position for both.
+AWKWARD["maybe missing"] = """
+    name: missing
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - {name: n, type: {int: {bits: 8}}}
+          - {name: a, type: {int: {bits: 8}}, condition: "n == 1"}
+          - {name: next, type: {computed: "a + 1"}}
+          - {name: size, type: {int: {bits: 8}}}
+          - {name: body, type: {bytes: {size: {expr: size}}}}
+          - {name: doc, transform: {from: body, with: deflate, limit: 64, type: {unit: d}}}
+          - {name: raw, transform: {from: body, with: deflate, limit: 64}}
+          - {name: v, type: {computed: "doc.v * 2"}}
+          - {name: same, type: {computed: "raw == body"}}
+      d:
+        fields:
+          - {name: v, type: {int: {bits: 8}}}
+"""
+AWKWARD["transform overlong"] = TRANSFORM_SPEC
+
+#: A concat with nothing transforming it: the joined bytes are a record of
+#: their own, citing the hull of the members.
+AWKWARD["concat"] = """
+    name: joined
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - name: parts
+            type: {unit: part}
+            until: "parts.size == 0"
+          - {name: all, concat: parts.data}
+          - {name: tail, type: {bytes: {size: {remaining: true}}}}
+      part:
+        fields:
+          - {name: size, type: {int: {bits: 8}}}
+          - {name: data, type: {bytes: {size: {expr: size}}}}
+"""
+
 AWKWARD_SEEDS: dict[str, bytes] = {
     "bitfields": bytes(range(1, 12)),
     "signed and wide": bytes(range(0x80, 0x90)),
@@ -1457,6 +1653,14 @@ AWKWARD_SEEDS: dict[str, bytes] = {
     "back-reference": bytes([0xAA, 0xBB, 0xCC, 0xDD, 1, 9, 9, 9]),
     "text arithmetic": b"1a\r\n" + b"x" * 26 + b"rest",
     "entry granularity": bytes([7, 0xA5, 0x12, 0x34]) + b"tail",
+    "guards": bytes([1, 7, 2, 3]),
+    "prefixes": b"HTTP/1.1 200 OK\r\nbody",
+    "transform": TRANSFORM_MESSAGES[0],
+    "transform framed by length": TRANSFORM_MESSAGES[1],
+    "transform bomb": TRANSFORM_ADVERSE[0],
+    "maybe missing": bytes([1, 9, len(zlib.compress(b"\x05"))]) + zlib.compress(b"\x05"),
+    "transform overlong": TRANSFORM_ADVERSE[1],
+    "concat": bytes([2]) + b"ab" + bytes([1]) + b"c" + bytes([0]) + b"tail",
 }
 
 
@@ -2115,3 +2319,103 @@ def test_a_constant_writes_the_same_file_on_adversarial_input(seed: int, emit: E
     spec = Spec.from_yaml(CONST_SPEC)
     for data in const_cases(seed):
         writes(spec, data, emit)
+
+
+# --- a failed guard writes no fields (#49) ----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("data", "why"),
+    [(bytes([1, 9, 2, 3]), "confirm"), (bytes([1, 7, 0, 3]), "reject")],
+    ids=["confirm", "reject"],
+)
+def test_a_unit_its_guard_refuses_writes_none_of_its_fields(data: bytes, why: str):
+    """A guess that did not hold up is an `undecodable` region (`DESIGN.md` §3.1).
+
+    Not a fabricated field tree. Both backends used to write `body.v` and
+    `body.w` at field granularity and then stop, with nothing in the file
+    saying the unit was refused. The field
+    read before the guarded unit is real and stays; the refused unit's bytes
+    and the rest of the run are `undecodable`.
+    """
+    spec = awkward("guards")
+    for records, regions in (
+        interpreted(spec, data, Emit.FIELD),
+        emitted(spec, data, Emit.FIELD),
+    ):
+        assert [record.role for record in records] == ["guards.tag"], why
+        assert [(r.off_start, r.off_end, r.reason) for r in regions] == [
+            (1, 4, "undecodable")
+        ], why
+    writes(spec, data, Emit.FIELD)
+
+
+def test_a_unit_whose_guard_holds_writes_its_fields():
+    spec = awkward("guards")
+    records, regions = emitted(spec, bytes([1, 7, 2, 3]), Emit.FIELD)
+    assert [record.role for record in records] == [
+        "guards.tag",
+        "guards.body.v",
+        "guards.body.w",
+        "guards.tail",
+    ]
+    assert regions == []
+    writes(spec, bytes([1, 7, 2, 3]), Emit.FIELD)
+
+
+def test_a_guarded_unit_cut_short_keeps_what_it_read():
+    """Only a guard's refusal drops the fields: a truncation never ran the guard."""
+    spec = awkward("guards")
+    records, _ = emitted(spec, bytes([1, 7]), Emit.FIELD)
+    assert [record.role for record in records] == ["guards.tag", "guards.body.v"]
+    writes(spec, bytes([1, 7]), Emit.FIELD)
+
+
+def test_a_condition_that_cannot_be_evaluated_is_not_a_refusal():
+    """The interpreter must tell a guard's refusal from a unit stopped any other way.
+
+    A condition dividing by zero also leaves a failed unit whose fields all
+    decoded. It is not a guard, so what was read is written, as before.
+    """
+    spec = inline("""
+    name: cond
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - {name: n, type: {int: {bits: 8}}}
+          - {name: x, type: {int: {bits: 8}}, condition: "10 / n == 1"}
+    """)
+    records, _ = interpreted(spec, bytes([0, 5]), Emit.FIELD)
+    assert [record.role for record in records] == ["cond.n"]
+    writes(spec, bytes([0, 5]), Emit.FIELD)
+
+
+def test_a_long_expression_is_wrapped_and_means_the_same():
+    """A generated module is linted like everything else here, long expressions included.
+
+    The compiler used to put an expression on one line however long it was, and
+    `http.yaml`'s test for `chunked` being the last transfer coding (#50) was
+    the first to pass the line limit. A long guard, condition and select value
+    are bound to a local over several lines instead, and mean the same thing.
+    """
+    names = [f"field_number_{index}" for index in range(6)]
+    long_or = " or ".join(f"{name} == 7" for name in names)
+    long_and = " and ".join(f"{name} != 9" for name in names)
+    fields: list[dict[str, object]] = [{"name": name, "bits": 8} for name in names]
+    fields.append({"name": "flag", "computed": long_or})
+    fields.append({"name": "tail", "bits": 8, "condition": long_or})
+    spec = from_dict(
+        {
+            "name": "long",
+            "version": "1",
+            "entry": "m",
+            "units": {"m": {"confirm": long_and, "fields": fields}},
+        }
+    )
+    source = render_spec(spec, emit=Emit.FIELD)
+    assert max(len(line) for line in source.splitlines()) <= 100
+    for data in (bytes([1, 2, 3, 4, 5, 7, 8]), bytes([1, 2, 3, 4, 5, 6, 8]), bytes([9] * 7)):
+        writes(spec, data, Emit.FIELD)
+        compare(spec, data)

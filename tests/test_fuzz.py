@@ -15,8 +15,12 @@ differ.
 
 from __future__ import annotations
 
+import itertools
 import random
 import sys
+import zlib
+from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -27,28 +31,40 @@ from fuzzing import (
     CONST_SPEC,
     FILL_SPEC,
     FILL_TRAILING,
+    HOSTILE_MESSAGES,
+    HOSTILE_SECRET,
+    HOSTILE_SPEC,
     SEEDS,
     SELECT_SPEC,
     STARVED_SPECS,
+    TRANSFORM_MESSAGES,
+    TRANSFORM_SPEC,
     cases,
     const_cases,
     fill_cases,
     framing_cases,
+    hostile,
+    hostile_cases,
     mutate,
     pointer_cases,
     select_cases,
     starved_cases,
+    transform_cases,
     variants,
 )
 from zpf.reassembly import Gap
 
-from kober import stage
+from kober import emit as emit_module
+from kober import stage, transforms
 from kober.cursor import Cursor
 from kober.decoder import Decoder
-from kober.emit import plan
+from kober.emit import Emission, Unclaimed, field_path, plan
+from kober.errors import TransformError
 from kober.node import Node, NodeStatus
 from kober.pygen import render_spec
-from kober.spec import Emit, Field, Select, Spec
+from kober.runtime import Held
+from kober.spec import Concat, Emit, Field, Select, Spec, Transform
+from kober.transforms import Registry
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
@@ -431,6 +447,379 @@ def test_a_select_uses_the_documented_vocabulary(seed: int):
             assert region.reason in allowed, f"{region.reason!r} on {data!r}"
 
 
+# --- transform ---------------------------------------------------------------
+#
+# A transform reads bytes that are already cited, and a failed one names them
+# instead of citing them, which is two ways a byte could end up both. A
+# concat's source spans its members and the framing between them, which made
+# a third, and it was the one that happened.
+
+
+def transform_spec() -> Spec:
+    return Spec.from_yaml(TRANSFORM_SPEC)
+
+
+def test_the_transform_seeds_decode_whole():
+    """The fuzz starts from a success, or it only ever reaches the failure path."""
+    decoder = Decoder(transform_spec())
+    for data in TRANSFORM_MESSAGES:
+        tree = decoder.decode_bytes(data)
+        assert tree.status is NodeStatus.OK, tree.render()
+        assert not any(node.failed for node in tree.walk()), tree.render()
+        assert tree.off_end == len(data)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_transforming_never_raises(seed: int):
+    decoder = Decoder(transform_spec())
+    for data in transform_cases(seed):
+        try:
+            tree = decoder.decode_bytes(data)
+        except Exception as exc:
+            exc.add_note(f"escaped a decode: transform seed={seed} on {data!r}")
+            raise
+        check_tree(tree, data)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+@pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD])
+def test_a_transform_never_makes_a_byte_both_cited_and_undecoded(seed: int, emit: Emit):
+    spec = transform_spec()
+    decoder = Decoder(spec)
+    allowed = {member.value for member in NodeStatus if member is not NodeStatus.OK}
+    for data in transform_cases(seed):
+        tree = decoder.decode_bytes(data)
+        emissions, unclaimed = plan(spec, tree, data, emit=emit)
+        cited: set[int] = set()
+        for record in emissions:
+            assert record.off_end <= len(data), f"a record past the input on {data!r}"
+            cited.update(range(record.off_start, record.off_end))
+        named: set[int] = set()
+        for region in unclaimed:
+            assert region.off_end <= len(data), f"a region past the input on {data!r}"
+            assert region.reason in allowed, f"{region.reason!r} on {data!r}"
+            named.update(range(region.off_start, region.off_end))
+        overlap = cited & named
+        assert not overlap, (
+            f"transform {emit.value}: {len(overlap)} byte(s) both cited and "
+            f"undecoded on {data!r}"
+        )
+
+
+# The transform phase's four invariants (its Stage 7). Each is checked over the
+# corpus, and then against an implementation broken in the one way it exists to
+# catch: a check that passes either way proves nothing.
+
+#: A limit no output in the corpus reaches: what a transform produces unbounded.
+_UNBOUNDED = 1 << 30
+
+
+def _sites(node: Node, names: list[str | None]) -> Iterator[tuple[Node, Node, list[str | None]]]:
+    """Yield every transform in the input's space: its parent, itself, its parent's path.
+
+    Paths are spelled as `kober.emit` spells roles: a repetition adds no segment
+    of its own, since its elements are named ``field[0]`` already.
+    """
+    for child in node.children:
+        if isinstance(child.resolved_type, Transform):
+            yield node, child, names
+        elif child.children and child.space is None:
+            path = names if child.is_repetition else [*names, child.name]
+            yield from _sites(child, path)
+
+
+def _output(parent: Node, node: Node) -> bytes | None:
+    """Return what a transform produces with no limit, or ``None`` if it fails anyway."""
+    kind = node.resolved_type
+    source = parent.find(kind.source)
+    if source is None or not isinstance(source.value, bytes):
+        return None
+    bound = Registry.standard().lookup(kind.name)
+    try:
+        return transforms.apply(kind.name, bound, source.value, limit=_UNBOUNDED)
+    except TransformError:
+        return None
+
+
+def _members(parent: Node, kind: Concat, names: list[str | None]) -> list[tuple[str, Node]]:
+    """Return a concat's members, each with the role its record would carry."""
+    repetition = parent.find(kind.repeated)
+    if repetition is None:
+        return []
+    return [
+        (field_path([*names, element.name, member.name]), member)
+        for element in repetition.children
+        if (member := element.find(kind.member)) is not None
+    ]
+
+
+# --- 1. the position is unchanged across a transform --------------------------
+
+
+def _position_moves(decoder: Decoder, cases: list[bytes]) -> list[tuple[int, int]]:
+    """Return every transform, over ``cases``, after which the position had moved."""
+    moved: list[tuple[int, int]] = []
+    original = Decoder._transform
+
+    def watched(self: Decoder, *args: Any) -> Node:
+        cursor = args[3]
+        before = cursor.tell()
+        node = original(self, *args)
+        if cursor.tell() != before:
+            moved.append((before, cursor.tell()))
+        return node
+
+    Decoder._transform = watched
+    try:
+        for data in cases:
+            decoder.decode_bytes(data)
+    finally:
+        Decoder._transform = original
+    return moved
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_transform_never_moves_the_read_position(seed: int):
+    """It reads bytes already decoded, never at the cursor."""
+    assert not _position_moves(Decoder(transform_spec()), transform_cases(seed))
+
+
+def test_the_position_check_catches_a_transform_that_consumes(monkeypatch: pytest.MonkeyPatch):
+    original = Decoder._transform
+
+    def greedy(self: Decoder, *args: Any) -> Node:
+        node = original(self, *args)
+        if args[3].remaining_bytes() > 0:
+            args[3].read_bytes(1)
+        return node
+
+    monkeypatch.setattr(Decoder, "_transform", greedy)
+    assert _position_moves(Decoder(transform_spec()), transform_cases(1))
+
+
+# --- 2. every output byte is read by its type ---------------------------------
+
+
+def _uncovered_outputs(decoder: Decoder, cases: list[bytes]) -> list[tuple[str, bytes]]:
+    """Return every successful output some of whose bytes no inner node read."""
+    found: list[tuple[str, bytes]] = []
+    for data in cases:
+        tree = decoder.decode_bytes(data)
+        for parent, node, _ in _sites(tree, []):
+            if node.failed or not node.children:
+                continue
+            output = _output(parent, node)
+            assert output is not None, f"{node.name} succeeded with no output on {data!r}"
+            read: set[int] = set()
+            for inner in node.walk():
+                if inner is not node and inner.is_leaf:
+                    read.update(range(inner.off_start, inner.off_end))
+            if read != set(range(len(output))):
+                found.append((node.name or "", data))
+    return found
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_every_byte_of_an_output_is_read_by_its_type(seed: int):
+    """Strict (*Decided* 2): output its type does not read is a failure, not a success."""
+    assert not _uncovered_outputs(Decoder(transform_spec()), transform_cases(seed))
+
+
+def test_the_coverage_check_catches_an_output_whose_tail_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A decoder that does not look past its type's end succeeds on the overlong seed."""
+    outputs: set[int] = set()
+    apply, at_end = transforms.apply, Cursor.at_end
+
+    def noted(*args: Any, **kwargs: Any) -> bytes:
+        output = apply(*args, **kwargs)
+        outputs.add(id(output))
+        return output
+
+    def lenient(self: Cursor) -> bool:
+        return id(self._data) in outputs or at_end(self)
+
+    monkeypatch.setattr(transforms, "apply", noted)
+    monkeypatch.setattr(Cursor, "at_end", lenient)
+    assert _uncovered_outputs(Decoder(transform_spec()), transform_cases(1))
+
+
+# --- 3. the limit holds --------------------------------------------------------
+
+
+def _limits_passed(decoder: Decoder, cases: list[bytes]) -> list[tuple[str, bytes]]:
+    """Return every transform whose output passed its limit and was not a failure saying so."""
+    found: list[tuple[str, bytes]] = []
+    for data in cases:
+        tree = decoder.decode_bytes(data)
+        for parent, node, _ in _sites(tree, []):
+            output = _output(parent, node)
+            if output is None or len(output) <= node.resolved_type.limit:
+                continue
+            if not node.failed or "passes its limit" not in (node.detail or ""):
+                found.append((node.name or "", data))
+    return found
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_no_output_passes_its_limit(seed: int):
+    """Passing it is a failure, which the bomb in the corpus reaches."""
+    assert not _limits_passed(Decoder(transform_spec()), transform_cases(seed))
+
+
+def test_the_limit_check_catches_a_transform_with_no_bound(monkeypatch: pytest.MonkeyPatch):
+    apply = transforms.apply
+
+    def unbounded(*args: Any, limit: int, **kwargs: Any) -> bytes:
+        return apply(*args, limit=_UNBOUNDED, **kwargs)
+
+    monkeypatch.setattr(transforms, "apply", unbounded)
+    assert _limits_passed(Decoder(transform_spec()), transform_cases(1))
+
+
+# --- 4. a transform's source is spoken for exactly once ------------------------
+
+
+def _spoken_twice(spec: Spec, cases: list[bytes]) -> list[str]:
+    """Return every way a source was spoken for other than exactly once, at field granularity.
+
+    On success the output's records cite it, and no record of its own does;
+    on failure it is ``undecodable`` and cited by nothing. A concat source's
+    bytes are its members': on failure each non-empty member is named and
+    none keeps its record.
+    """
+    decoder = Decoder(spec)
+    found: list[str] = []
+    for data in cases:
+        tree = decoder.decode_bytes(data)
+        records, regions = plan(spec, tree, data, emit=Emit.FIELD)
+        roles = {record.role for record in records}
+        for parent, node, names in _sites(tree, [spec.name]):
+            kind = node.resolved_type
+            source = parent.find(kind.source)
+            if source is None:
+                continue
+            where = f"{node.name} on {data!r}"
+            if field_path([*names, source.name]) in roles:
+                found.append(f"the source kept its record: {where}")
+            members = []
+            if isinstance(source.resolved_type, Concat):
+                members = _members(parent, source.resolved_type, names)
+                spans = [(m.off_start, m.off_end) for _, m in members if m.width]
+            else:
+                spans = [(source.off_start, source.off_end)] if source.width else []
+            for start, end in spans:
+                named = [r for r in regions if r.off_start < end and start < r.off_end]
+                citing = [r for r in records if r.off_start < end and start < r.off_end]
+                if node.failed:
+                    if named != [Unclaimed(start, end, NodeStatus.UNDECODABLE.value)]:
+                        found.append(f"not named undecodable once: {where}")
+                    if citing:
+                        found.append(f"a failed source is cited: {where}")
+                    continue
+                if named:
+                    found.append(f"a decoded source is named: {where}")
+                output = field_path([*names, node.name])
+                if not any(
+                    (r.role == output or r.role.startswith(output + "."))
+                    and r.off_start <= start
+                    and end <= r.off_end
+                    for r in citing
+                ):
+                    found.append(f"no output record cites the source: {where}")
+            if node.failed and any(role in roles for role, _ in members):
+                found.append(f"a member kept its record: {where}")
+    return found
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_transforms_source_is_spoken_for_exactly_once(seed: int):
+    """*Decided* 1a: the outcome speaks for the source, success or failure."""
+    assert _spoken_twice(transform_spec(), transform_cases(seed)) == []
+
+
+def test_the_source_check_catches_a_source_written_as_well(monkeypatch: pytest.MonkeyPatch):
+    original = emit_module._transform
+
+    def also(
+        spec: Spec, parent: Node, node: Node, path: list[str | None], *rest: Any
+    ) -> None:
+        original(spec, parent, node, path, *rest)
+        source = parent.find(node.resolved_type.source)
+        if source is not None and isinstance(source.value, bytes):
+            role = field_path([*path[:-1], source.name])
+            rest[1].append(
+                Emission(source.value, "prim:bytes", source.off_start, source.off_end, role)
+            )
+
+    monkeypatch.setattr(emit_module, "_transform", also)
+    assert _spoken_twice(transform_spec(), transform_cases(1))
+
+
+def test_the_source_check_catches_a_failure_that_names_nothing(monkeypatch: pytest.MonkeyPatch):
+    original = emit_module._transform
+
+    def silent(*args: Any) -> None:
+        unclaimed = args[6]
+        before = len(unclaimed)
+        original(*args)
+        del unclaimed[before:]
+
+    monkeypatch.setattr(emit_module, "_transform", silent)
+    assert _spoken_twice(transform_spec(), transform_cases(1))
+
+
+# --- a caller's transform that misbehaves ---------------------------------------
+
+
+def hostile_decoder() -> Decoder:
+    registry = Registry.standard()
+    registry.register("hostile", hostile)
+    return Decoder(Spec.from_yaml(HOSTILE_SPEC), transforms=registry)
+
+
+def test_every_way_a_callable_misbehaves_is_reached():
+    """The corpus reaches each behaviour, and the working ones decode."""
+    decoder = hostile_decoder()
+    details = set()
+    for data in HOSTILE_MESSAGES:
+        tree = decoder.decode_bytes(data)
+        assert tree.status is NodeStatus.OK, tree.render()
+        out = tree.find("out")
+        details.add(out.detail if out.failed else "decoded")
+    assert details == {
+        "hostile: the transform raised KeyError",
+        "hostile: the transform rejected its input",
+        "hostile: the transform returned str, not bytes",
+        "hostile: output passes its limit of 8 bytes",
+        "hostile: the transform raised RecursionError",
+        "decoded",
+        "hostile output does not decode: it ends before its type does",
+        "hostile output has 2 byte(s) its type does not read",
+    }
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+@pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD])
+def test_a_misbehaving_transform_never_escapes_and_never_speaks(seed: int, emit: Emit):
+    """What a caller's callable raises is contained, and its words never reach the file."""
+    decoder = hostile_decoder()
+    for data in hostile_cases(seed):
+        try:
+            tree = decoder.decode_bytes(data)
+        except Exception as exc:
+            exc.add_note(f"escaped a decode: hostile seed={seed} on {data!r}")
+            raise
+        check_tree(tree, data)
+        assert HOSTILE_SECRET not in tree.render(), data
+        records, regions = plan(decoder.spec, tree, data, emit=emit)
+        cited = {at for r in records for at in range(r.off_start, r.off_end)}
+        named = {at for r in regions for at in range(r.off_start, r.off_end)}
+        assert not cited & named, f"both cited and undecoded on {data!r}"
+        assert all(HOSTILE_SECRET.encode() not in r.payload for r in records), data
+
+
 # --- fill --------------------------------------------------------------------
 #
 # A `fill` is the one size whose extent is decided by fields it has not read —
@@ -583,7 +972,7 @@ def test_the_framing_seeds_reach_every_arm():
     exactly as `SEEDS["http.yaml"]` did.
     """
     decoder = Decoder(http_spec())
-    arms = {"chunks": 0, "body": 0, "neither": 0}
+    arms = {"chunks": 0, "body": 0, "neither": 0, "inflated": 0, "not inflated": 0}
     for data in framing_cases(1):
         tree = decoder.decode_bytes(data)
         if tree.status is not NodeStatus.OK:
@@ -594,6 +983,9 @@ def test_the_framing_seeds_reach_every_arm():
             arms["body"] += 1
         else:
             arms["neither"] += 1
+        content = tree.find("content")
+        if content is not None:
+            arms["not inflated" if content.failed else "inflated"] += 1
     assert all(count > 0 for count in arms.values()), arms
 
 
@@ -786,7 +1178,7 @@ class _Recording:
         self.calls.append(("undecoded", off_start, off_end, reason, comment))
 
 
-def _toy_stream(rng: random.Random) -> _Stream:
+def _toy_stream(rng: random.Random, messages: tuple[bytes, ...] = TOY_MESSAGES) -> _Stream:
     """Build one random stream: runs or datagrams of good, foreign and short messages."""
     oriented = rng.random() < 0.5
     items: list[object] = []
@@ -797,7 +1189,7 @@ def _toy_stream(rng: random.Random) -> _Stream:
             items.append(Gap(offset, offset + width))
             offset += width
             continue
-        parts = [rng.choice(TOY_MESSAGES) for _ in range(rng.randint(1, 3) if oriented else 1)]
+        parts = [rng.choice(messages) for _ in range(rng.randint(1, 3) if oriented else 1)]
         data = b"".join(parts)
         if rng.random() < 0.2:
             data = mutate(data, rng) or b"\x00"
@@ -810,29 +1202,47 @@ def _toy_stream(rng: random.Random) -> _Stream:
 
 
 def _reference(step: Any, writer: Any, stream: _Stream, verdicts: list[str]) -> None:
-    """0.3.0's driver loop: try every run and every datagram, whatever came before."""
+    """0.3.0's driver loop: try every run and every datagram, whatever came before.
+
+    With #49's rule for a run after a gap, whose start nothing said: its first
+    message is written only if it decodes whole, and if it does not, the run
+    is one ``undecodable`` region with no record from the attempt. That attempt
+    is recorded as ``lost``, which neither confirms nor declines. The toy spec
+    has no field whose cut-off read knows where the message ends, so #49's
+    other rule, resuming at a known end, never applies here.
+    """
     ok, undecodable, skipped = "ok", NodeStatus.UNDECODABLE.value, NodeStatus.SKIPPED.value
 
-    def run_of(data: bytes, base: int) -> None:
+    def run_of(data: bytes, base: int, *, after_gap: bool) -> None:
         cursor = Cursor(data, base)
         end = base + len(data)
         while not cursor.at_end():
             before = cursor.tell()
-            verdict = step(cursor, writer, data, base)
+            held = Held(writer) if after_gap else None
+            verdict = step(cursor, held or writer, data, base)
+            if verdict is None and cursor.tell() == before:
+                verdict = stage._Verdict(undecodable, "a message consumed no input")
+            if held is not None:
+                after_gap = False
+                if verdict is not None:
+                    verdicts.append("lost")
+                    writer.note(base, end, undecodable, stage.LOST_COMMENT)
+                    return
+                held.release()
             verdicts.append(ok if verdict is None else verdict.reason)
             if verdict is not None:
                 writer.undecoded(stage._stopped_at(cursor, base), end, verdict.reason)
                 return
-            if cursor.tell() == before:
-                writer.undecoded(stage._stopped_at(cursor, base), end, undecodable)
-                return
 
+    after_gap = False
     for item in stream.items:
         if isinstance(item, Gap):
             writer.undecoded(item.off_start, item.off_end, stage.GAP_REASON)
+            after_gap = True
         elif stream.is_stream_oriented:
             writer.ts = item.ts
-            run_of(item.data, item.off_start)
+            run_of(item.data, item.off_start, after_gap=after_gap)
+            after_gap = False
         else:
             writer.ts = item.ts
             cursor = Cursor(item.data, item.off_start)
@@ -844,8 +1254,15 @@ def _reference(step: Any, writer: Any, stream: _Stream, verdicts: list[str]) -> 
 
 
 def _declines(verdicts: list[str]) -> bool:
-    """Whether a stream with these verdicts, in order, is one #32 declines."""
+    """Whether a stream with these verdicts, in order, is one #32 declines.
+
+    A ``lost`` attempt, the first after a gap (#49), neither confirms nor
+    declines, but it was an attempt: a stream of nothing else is declined at
+    its end.
+    """
     for verdict in verdicts:
+        if verdict == "lost":
+            continue
         if verdict == "ok":
             return False
         if verdict == NodeStatus.UNDECODABLE.value:
@@ -903,3 +1320,294 @@ def test_a_stream_is_declined_exactly_when_it_should_be_and_otherwise_unchanged(
         assert sum(r[2] - r[1] for r in regions) == extent, f"bytes unnamed in {stream!r}"
     assert declined and confirmed, "the batch did not reach both outcomes"
 
+
+
+# --- confirmation, with transforms that fail (*Decided* 1) ------------------------
+#
+# A message whose transform failed decoded whole: the run goes on after it,
+# and it neither confirms the stream nor declines it. Only a stream in which no
+# message decoded whole without one is declined, saying so if one had.
+
+TOYX = """
+name: toyx
+version: "1"
+entry: m
+input: either
+units:
+  m:
+    fields:
+      - {name: magic, type: {int: {bits: 8}}, const: 0x42}
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: body, type: {bytes: {size: {expr: n}}}}
+      - name: out
+        transform: {from: body, with: deflate-raw, limit: 16}
+      - {name: after, type: {int: {bits: 8}}}
+"""
+_TOYX_RAW = zlib.compress(b"hi")[2:-4]
+#: A message that decodes, one whose transform fails (``ff`` is a reserved
+#: block type), one of another protocol, and one cut short.
+TOYX_MESSAGES = (
+    bytes([0x42, len(_TOYX_RAW), *_TOYX_RAW, 0x7E]),
+    bytes([0x42, 2, 0xFF, 0xFF, 0x7E]),
+    bytes([0, 2, 1, 2, 0x7E]),
+    bytes([0x42, 5, 1]),
+)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_failed_transform_neither_confirms_nor_declines(seed: int):
+    """*Decided* 1, over every shape of stream the driver meets, both drivers.
+
+    A stream confirms at its first message that decoded whole with every
+    transform working, and is declined at an ``undecodable`` message before
+    that, or at its end if none came. A failed transform counts as neither, and
+    the message after one is decoded. Once confirmed, every message that
+    decoded whole is written, a failed one with its body named.
+    """
+    spec = Spec.from_yaml(TOYX)
+    module = ModuleType(f"toyx_fuzz_{seed}")
+    sys.modules[module.__name__] = module
+    exec(render_spec(spec, emit=Emit.FIELD), module.__dict__)
+    steps = [stage._interpreted(Decoder(spec, emit=Emit.FIELD)), stage._compiled(module)]
+    verdicts: list[tuple[bool, stage._Verdict | None]] = []
+
+    def watched(cursor: Cursor, sink: Any, data: bytes, base: int) -> stage._Verdict | None:
+        verdict = steps[0](cursor, sink, data, base)
+        verdicts.append((isinstance(sink, Held), verdict))
+        return verdict
+
+    rng = random.Random(seed)
+    seen = Counter()
+    for _ in range(300):
+        stream = _toy_stream(rng, TOYX_MESSAGES)
+        verdicts.clear()
+        outputs = []
+        for step in (watched, steps[1]):
+            sink = _Recording()
+            stage._drive(step, stage._Writer(sink, stream, "toyx"), stream)
+            outputs.append(sink.calls)
+        assert outputs[0] == outputs[1], f"the drivers disagree on {stream!r}"
+        written = outputs[0]
+        expected = _confirmation(verdicts)
+        seen[expected] += 1
+        records = [dict(c[2]).get("role") for c in written if c[0] == "record"]
+        regions = [c for c in written if c[0] == "undecoded"]
+        failed = sum(1 for _, v in verdicts if v and v.reason == stage.TRANSFORM_FAILED)
+        if expected == "confirmed":
+            whole = sum(
+                1 for _, v in verdicts if v is None or v.reason == stage.TRANSFORM_FAILED
+            )
+            assert records.count("toyx.after") == whole, f"a whole message unwritten: {stream!r}"
+            assert records.count("toyx.out") == whole - failed, stream
+            assert "toyx.body" not in records, f"a source written as well: {stream!r}"
+            continue
+        assert records == [], f"a record from a declined stream: {stream!r}"
+        comments = {r[4] for r in regions if r[3] != "gap"}
+        assert all(c and c.startswith("not toyx: ") for c in comments), stream
+        if expected == "declined at its end" and failed:
+            assert all("had a transform fail" in c for c in comments), stream
+    assert seen["confirmed"] and seen["declined at its end"] and seen["declined"], seen
+
+
+def _confirmation(verdicts: list[tuple[bool, stage._Verdict | None]]) -> str:
+    """Say what a stream with these verdicts, in order, must be.
+
+    A held attempt (the first after a gap) that did not decode whole is lost,
+    and like a failed transform it neither confirms nor declines.
+    """
+    for held, verdict in verdicts:
+        if verdict is None:
+            return "confirmed"
+        if verdict.reason == stage.TRANSFORM_FAILED:
+            continue
+        if held:
+            continue
+        if verdict.reason == NodeStatus.UNDECODABLE.value:
+            return "declined"
+    return "declined at its end" if verdicts else "confirmed"
+
+
+# --- after a gap: resume where a cut message ends (#49) ----------------------
+
+FRAMED = """
+name: framed
+version: "1"
+entry: message
+units:
+  message:
+    fields:
+      - {name: magic, type: {int: {bits: 8}}, const: 0x42}
+      - {name: length, type: {int: {bits: 8}}}
+      - {name: body, type: {bytes: {size: {expr: "length"}}}}
+"""
+#: Body bytes never equal the magic, so an attempt from inside a body cannot
+#: pass for a message start: every phantom this could write is a bug.
+_BODY_BYTES = bytes(b for b in range(256) if b != 0x42)
+
+
+def _framed_stream(
+    rng: random.Random, alphabet: bytes = _BODY_BYTES
+) -> tuple[_Stream, list[tuple[int, int]]]:
+    """Build framed messages with gaps cut at random, and where each message is.
+
+    ``alphabet`` is what bodies are made of. Small values make an attempt from
+    inside a body read a small length, and so decode whole.
+    """
+    data = bytearray()
+    messages: list[tuple[int, int]] = []
+    for _ in range(rng.randint(2, 8)):
+        body = bytes(rng.choice(alphabet) for _ in range(rng.randint(0, 12)))
+        messages.append((len(data), len(data) + 2 + len(body)))
+        data += bytes([0x42, len(body)]) + body
+    cuts = sorted(rng.sample(range(1, len(data)), min(len(data) - 1, 2 * rng.randint(1, 3))))
+    items: list[object] = []
+    at = 0
+    for index in range(0, len(cuts) - 1, 2):
+        start, end = cuts[index], cuts[index + 1]
+        items.append(_Chunk(bytes(data[at:start]), at, 1000 + index))
+        items.append(Gap(start, end))
+        at = end
+    items.append(_Chunk(bytes(data[at:]), at, 9999))
+    return _Stream(is_stream_oriented=True, items=items), messages
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_run_after_a_gap_resumes_where_a_cut_message_ends(seed: int):
+    """#49's promise with a known end, over gaps cut anywhere in a stream.
+
+    Both drivers write the same thing; no message start is ever cited anywhere
+    but at a real message start; and where a gap cut a body whose length was
+    already read and ended before that message did, every message that arrived
+    whole in the next run is decoded, with the bytes before the first of them
+    ``skipped`` as the rest of the cut message.
+    """
+    spec = Spec.from_yaml(FRAMED)
+    module = ModuleType(f"framed_fuzz_{seed}")
+    sys.modules[module.__name__] = module
+    exec(render_spec(spec, emit=Emit.FIELD), module.__dict__)
+    steps = (stage._interpreted(Decoder(spec, emit=Emit.FIELD)), stage._compiled(module))
+    rng = random.Random(seed)
+    resumed = 0
+    for _ in range(200):
+        stream, messages = _framed_stream(rng)
+        outputs = []
+        for step in steps:
+            sink = _Recording()
+            stage._drive(step, stage._Writer(sink, stream, "framed"), stream)
+            outputs.append(sink.calls)
+        assert outputs[0] == outputs[1], f"the drivers disagree on {stream!r}"
+        written = outputs[0]
+        cites = [dict(call[2]) for call in written if call[0] == "record"]
+        magics = {c["cites"][0] for c in cites if c["role"] == "framed.magic"}
+        heads = {start for start, _ in messages}
+        assert magics <= heads, f"a message start cited inside a message: {stream!r}"
+
+        # Follow what the driver can know: the first run starts at a message;
+        # a later one does when the run before it did and ended inside a body
+        # whose length it had read, and the gap ended before that message did.
+        # A run lying wholly inside that body passes the knowledge on.
+        declined = any(
+            call[0] == "undecoded" and str(call[4]).startswith("not framed")
+            for call in written
+        )
+        runs = [item for item in stream.items if isinstance(item, _Chunk)]
+        known, open_end = True, None
+        for before, after in itertools.pairwise(runs):
+            cut_at = before.off_start + len(before.data)
+            if open_end is None or open_end <= before.off_start:
+                cut = (
+                    next(
+                        (
+                            m
+                            for m in messages
+                            if before.off_start <= m[0] and m[0] + 2 <= cut_at < m[1]
+                        ),
+                        None,
+                    )
+                    if known
+                    else None
+                )
+                open_end = None if cut is None else cut[1]
+            known = open_end is not None and after.off_start <= open_end
+            if not known:
+                open_end = None
+                continue
+            resumed += 1
+            end = after.off_start + len(after.data)
+            whole = [m for m in messages if open_end <= m[0] and m[1] <= end]
+            assert {m[0] for m in whole} <= magics, f"a whole message lost: {stream!r}"
+            if not declined and after.off_start < open_end:
+                stop = min(open_end, end)
+                expected = ("undecoded", after.off_start, stop, "skipped", stage.CUT_COMMENT)
+                assert expected in written, f"the rest of a cut message unnamed: {stream!r}"
+            if open_end <= end:
+                open_end = None
+    assert resumed, "the batch never cut a body with its length known"
+
+
+FRAMED_GUARDED = """
+name: guarded
+version: "1"
+entry: message
+units:
+  message:
+    confirm: "magic == 0x42"
+    fields:
+      - {name: magic, type: {int: {bits: 8}}}
+      - {name: length, type: {int: {bits: 8}}}
+      - {name: body, type: {bytes: {size: {expr: "length"}}}}
+"""
+
+
+@pytest.mark.parametrize("emit", [Emit.FIELD, Emit.MESSAGE], ids=lambda e: e.value)
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_a_refused_attempt_after_a_gap_is_retried_where_it_stopped(seed: int, emit: Emit):
+    """#49 amended with #50: after a gap, a refused attempt is skipped, not the run.
+
+    The magic is checked by a `confirm` here rather than a `const`, so an
+    attempt from inside a body decodes whole and is then refused. The driver
+    tries again where it stopped. Both drivers write the same thing, no record
+    ever starts a message anywhere but at a real message start, and the batch
+    must actually have retried and landed on a real message.
+
+    Bodies are small values, so an attempt from inside one reads a small
+    length and decodes whole to be refused; random bytes would mostly run out
+    of input instead, which loses the rest of the run and never retries.
+    """
+    spec = Spec.from_yaml(FRAMED_GUARDED)
+    module = ModuleType(f"guarded_fuzz_{seed}_{emit.value}")
+    sys.modules[module.__name__] = module
+    exec(render_spec(spec, emit=emit), module.__dict__)
+    steps = (stage._interpreted(Decoder(spec, emit=emit)), stage._compiled(module))
+    rng = random.Random(seed)
+    retried = 0
+    for _ in range(200):
+        stream, messages = _framed_stream(rng, bytes(range(1, 12)))
+        outputs = []
+        for step in steps:
+            sink = _Recording()
+            stage._drive(step, stage._Writer(sink, stream, "guarded"), stream)
+            outputs.append(sink.calls)
+        assert outputs[0] == outputs[1], f"the drivers disagree on {stream!r}"
+        written = outputs[0]
+        heads = {start for start, _ in messages}
+        for call in written:
+            if call[0] != "record":
+                continue
+            fields = dict(call[2])
+            if fields.get("role") in (None, "guarded.magic"):
+                assert fields["cites"][0] in heads, f"a start inside a message: {stream!r}"
+        # A retry that worked leaves a lost region ending at a real message
+        # inside its run; one that ends where the run does was never retried.
+        ends = {
+            item.off_start + len(item.data) for item in stream.items if isinstance(item, _Chunk)
+        }
+        retried += sum(
+            1
+            for call in written
+            if call[0] == "undecoded"
+            and call[4] == stage.LOST_COMMENT
+            and call[2] in heads
+            and call[2] not in ends
+        )
+    assert retried, "the batch never retried after a refusal"

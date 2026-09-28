@@ -21,18 +21,29 @@ tail rather than guessing at a reason per byte.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING
 
-from kober.check import Starved, fill_widths, require_valid, starved_fields
+from kober import transforms as transforms_module
+from kober.check import (
+    Starved,
+    fill_widths,
+    message_tail_fields,
+    require_valid,
+    starved_fields,
+)
 from kober.cursor import Cursor
-from kober.errors import EvalError, TruncatedRead
-from kober.expr import ExprValue, evaluate
+from kober.emit import root_emit
+from kober.errors import EvalError, TransformError, TruncatedRead
+from kober.expr import ExprValue, evaluate, references
 from kober.node import Node, NodeStatus
+from kober.runtime import document_params, params_digest
 from kober.spec import (
     BytesType,
     Computed,
+    Concat,
     Count,
     Emit,
     Fill,
@@ -46,6 +57,7 @@ from kober.spec import (
     Switch,
     Terminated,
     ToEnd,
+    Transform,
     UnitRef,
     Until,
 )
@@ -57,6 +69,7 @@ if TYPE_CHECKING:
 
     from kober.expr import Expr
     from kober.spec import Field, FieldType, Repeat, SizeSpec, Spec, Unit
+    from kober.transforms import Registry
 
 #: How deep unit references may nest before the decode is abandoned. A
 #: recursive spec over crafted input would otherwise exhaust the interpreter
@@ -121,6 +134,15 @@ def _starved(node: Node, starved: Starved) -> Node:
     return replace(node, status=NodeStatus.UNDECODABLE, detail=starved.detail)
 
 
+def _in_space(node: Node, space: str) -> Node:
+    """Mark a subtree as measured in a transform's output rather than the input."""
+    return replace(
+        node,
+        space=space,
+        children=tuple(_in_space(child, space) for child in node.children),
+    )
+
+
 def _indexed(name: str | None, elements: list[Node]) -> list[Node]:
     """Name a repetition's elements ``field[0]``, ``field[1]``, and so on.
 
@@ -167,6 +189,14 @@ class _Frame:
     #: reason :attr:`fill` is: a repetition's elements are decoded below the
     #: loop that knows which field they belong to.
     starved: Starved | None = None
+    #: Whether the field being decoded is one after which nothing in the
+    #: message reads a byte (:func:`kober.check.message_tail_fields`), so a
+    #: fixed-size or counted read of it that runs out knows where the message
+    #: ends. Set per field for the reason :attr:`fill` is.
+    tail: bool = False
+    #: The document's parameters (:attr:`kober.spec.Spec.params`), as supplied
+    #: to the decoder: in scope in every unit, after its own names.
+    document: Mapping[str, ExprValue] = dataclass_field(default_factory=dict)
 
     def root(self) -> _Frame:
         """Return the outermost frame."""
@@ -214,19 +244,35 @@ class _Environment:
         if head in frame.params and not rest:
             return frame.params[head]
         node = frame.named.get(head)
+        if node is None and head in frame.document and not rest:
+            return frame.document[head]
         if node is None:
             msg = f"{'.'.join(path)}: {head!r} has not been decoded"
             raise EvalError(msg)
+        _usable(node, path)
         for part in rest:
             child = node.find(part)
             if child is None:
                 msg = f"{'.'.join(path)}: {part!r} is not a field of {node.name!r}"
                 raise EvalError(msg)
             node = child
+            _usable(node, path)
         if node.value is None:
             msg = f"{'.'.join(path)}: {node.name!r} has no scalar value"
             raise EvalError(msg)
         return node.value
+
+
+def _usable(node: Node, path: tuple[str, ...]) -> None:
+    """Refuse a reference through a transform that failed, saying so.
+
+    Its node holds nothing, and "not a field of" would blame the spec for what
+    the input did. :func:`kober.runtime.present` says the same for a generated
+    module.
+    """
+    if node.failed:
+        msg = f"{'.'.join(path)}: {node.name!r} failed: {node.detail}"
+        raise EvalError(msg)
 
 
 class Decoder:
@@ -242,8 +288,18 @@ class Decoder:
             :func:`kober.check.check` proves, so skipping it means promising
             those by hand.
 
+        params: Values for the document's ``params:``, by name: every one it
+            declares, of the type it declares. A key, above all.
+        transforms: Where the spec's transforms are bound. The default is
+            :data:`kober.transforms.DEFAULT`, which holds what the standard
+            library can run and whatever the program registered.
+
     Raises:
         SpecError: If ``check`` is set and the spec has errors.
+        UnboundTransformError: If a transform the spec uses is bound to
+            nothing in ``transforms``.
+        ParameterError: If a parameter is missing, not one the spec
+            declares, or not of its declared type.
 
     Example:
         >>> decoder = Decoder(spec)
@@ -252,11 +308,31 @@ class Decoder:
 
     """
 
-    def __init__(self, spec: Spec, *, emit: Emit = Emit.MESSAGE, check: bool = True) -> None:
+    def __init__(
+        self,
+        spec: Spec,
+        *,
+        emit: Emit = Emit.MESSAGE,
+        check: bool = True,
+        params: Mapping[str, ExprValue] | None = None,
+        transforms: Registry | None = None,
+    ) -> None:
         if check:
             require_valid(spec)
         self.spec = spec
         self.emit = emit
+        #: The document's parameters, as supplied: every one the spec declares,
+        #: of the type it declares, checked here so that a run nothing could
+        #: reproduce never starts.
+        self._params = document_params(
+            spec.name,
+            {param.name: param.type.value for param in spec.params},
+            params or {},
+        )
+        #: What each transform the spec uses is bound to, bound here so that a
+        #: transform this process cannot run fails once, before any input,
+        #: rather than making every message ``undecodable``.
+        self._transforms = (transforms or transforms_module.DEFAULT).bind(spec)
         #: What each ``fill`` field resolves to, by ``(unit, field index)``.
         #: Precomputed rather than asked per decode, and kept here rather than
         #: taken off a check result: a decoder may run with ``check=False``, so
@@ -268,6 +344,34 @@ class Decoder:
         #: by ``(unit, field index)`` — precomputed for the reason
         #: :attr:`_fills` is. Empty for every spec that passes ``check``.
         self._starved = starved_fields(spec)
+        #: The fields whose cut-off read tells where the message ends, for the
+        #: driver to resume at after a gap (#49). Precomputed like the others.
+        self._tails = message_tail_fields(spec)
+
+    def params_digest(self) -> str:
+        """Return a digest of everything that decides what this decoder writes.
+
+        The spec, the granularity, and every parameter's value: what the
+        format's Decoder Descriptor calls ``params_digest``, so a file can say
+        which configuration produced it, and a run with a different key reads
+        as a different configuration. A secret value goes into the hash and
+        nowhere else. It is a hash, so a key too short to be one could be
+        guessed from it by someone holding the spec; a real key cannot.
+
+        Computed over a canonical form of the spec model rather than its
+        source, so a spec read from YAML and the same spec built in memory
+        agree, and where it was read from does not count. The granularity is
+        the one the entry unit resolves to, not the decoder's default: when the
+        entry names its own, the default changes nothing written, and a
+        generated module knows only the resolved one.
+
+        Returns:
+            ``sha256:`` and the hex digest.
+
+        """
+        return params_digest(
+            self.spec.digest(), root_emit(self.spec, self.emit).value, self._params
+        )
 
     def decode_bytes(self, data: bytes, *, base: int = 0) -> Node:
         """Decode one buffer as a single instance of the entry unit.
@@ -391,16 +495,18 @@ class Decoder:
                 status=NodeStatus.UNDECODABLE,
                 detail=detail,
             )
-        frame = _Frame(unit=unit, parent=parent)
+        frame = _Frame(unit=unit, parent=parent, document=self._params)
         for param, value in zip(unit.params, args, strict=False):
             frame.params[param.name] = value
 
         children: list[Node] = []
         status, detail = NodeStatus.OK, None
+        refused = False
         try:
             for index, item in enumerate(unit.fields):
                 frame.fill = self._fills.get((unit.name, index))
                 frame.starved = self._starved.get((unit.name, index))
+                frame.tail = (unit.name, index) in self._tails
                 empty = cursor.at_end()
                 child = self._field(item, frame, cursor, read)
                 if child is None:
@@ -419,6 +525,7 @@ class Decoder:
                         child.detail or f"field {item.name!r} could not be decoded",
                     )
             status, detail = self._guards(unit, frame)
+            refused = status is not NodeStatus.OK
         except _Stop as stop:
             status, detail = stop.status, stop.detail
 
@@ -431,6 +538,7 @@ class Decoder:
             status=status,
             children=tuple(children),
             detail=detail,
+            refused=refused,
         )
 
     def _guards(self, unit: Unit, frame: _Frame) -> tuple[NodeStatus, str | None]:
@@ -571,6 +679,7 @@ class Decoder:
                 detail=str(exc),
                 spec_field=item,
                 resolved_type=kind,
+                reach=exc.reach,
             )
         except EvalError as exc:
             start, end = cursor.span(mark)
@@ -646,6 +755,10 @@ class Decoder:
             return self._pointer(item, kind, frame, cursor, read, env)
         if isinstance(kind, Select):
             return self._select(item, kind, frame, cursor, mark)
+        if isinstance(kind, Concat):
+            return self._concat(item, kind, frame, cursor, mark)
+        if isinstance(kind, Transform):
+            return self._transform(item, kind, frame, cursor, read, mark)
         if isinstance(kind, IntType):
             value = cursor.read_int(kind.bits, signed=kind.signed, endian=kind.endian)
             start, end = cursor.span(mark)
@@ -731,6 +844,158 @@ class Decoder:
             )
         return node
 
+    def _concat(
+        self, item: Field, kind: Concat, frame: _Frame, cursor: Cursor, mark: int
+    ) -> Node:
+        """Join one field of every element of a repetition; cite their hull.
+
+        Reads nothing where it stands. The hull runs from the first non-empty
+        member's first byte to the last one's last: an empty member cites
+        nothing, which keeps the terminating chunk's size line out of it (the
+        transform plan's Stage 1). With no member at all it cites nothing, at
+        the cursor, as a ``select`` default does.
+        """
+        container = frame.named.get(kind.repeated)
+        if container is None or not container.is_repetition:
+            msg = f"concat: {kind.repeated!r} is not a decoded repetition"
+            raise EvalError(msg)
+        pieces: list[bytes] = []
+        spans: list[tuple[int, int]] = []
+        for element in container.children:
+            member = element.find(kind.member)
+            if member is None:
+                continue
+            if not isinstance(member.value, bytes):
+                msg = f"concat: {kind.repeated}.{kind.member} is not bytes"
+                raise EvalError(msg)
+            pieces.append(member.value)
+            if member.width:
+                spans.append((member.off_start, member.off_end))
+        if spans:
+            start, end = spans[0][0], spans[-1][1]
+        else:
+            start, end = cursor.span(mark)
+        return self._leaf(item, kind, b"".join(pieces), start, end)
+
+    def _transform(
+        self,
+        item: Field,
+        kind: Transform,
+        frame: _Frame,
+        cursor: Cursor,
+        read: _Read,
+        mark: int,
+    ) -> Node:
+        """Transform bytes already decoded, and decode the output in its own space.
+
+        Reads nothing where it stands, so the position is the same after as
+        before, and the decoder's unit and field loops never see anything but
+        a field. The node cites its **source and every field its ``args``
+        read**, first to last: for a cipher whose nonce and associated data are
+        the header, that is the whole datagram (the plan's *Decided* 3).
+
+        **A transform that fails does not fail its message** (*Decided* 1).
+        Whatever went wrong, the codec, the ``limit``, an argument that could
+        not be evaluated, an output its ``type`` does not decode or does not
+        read to its end, the node is ``OK`` with no value and no children,
+        :attr:`~kober.node.Node.failed` set, and the failure as its detail. The
+        message decodes whole, so the driver goes on after it; the emitter
+        names the source's bytes ``undecodable``.
+
+        With a ``type``, the output is decoded on a second cursor from its first
+        byte, and every node decoded there carries the transform's name as its
+        :attr:`~kober.node.Node.space`: its offsets are the output's.
+        """
+        env = _Environment(frame)
+        start, end = self._transform_citation(kind, frame, cursor, mark)
+        try:
+            data = env.lookup((kind.source,))
+            if not isinstance(data, bytes):
+                msg = f"transform: {kind.source!r} is not bytes"
+                raise EvalError(msg)
+            args = {name: evaluate(expr, env) for name, expr in kind.args.items()}
+            output = transforms_module.apply(
+                kind.name, self._transforms[kind.name], data, limit=kind.limit, args=args
+            )
+        except (EvalError, TransformError) as exc:
+            return self._transform_failed(item, kind, start, end, str(exc))
+        if kind.type is None:
+            return self._leaf(item, kind, output, start, end)
+
+        second = Cursor(output, 0)
+        inner = self._one(item, kind.type, frame, second, _Read(origin=0, depth=read.depth + 1))
+        if inner.status is not NodeStatus.OK:
+            # Truncation is said in words of its own: where it happened inside the
+            # output means little to a reader, and the compiled module does not know.
+            why = inner.detail
+            if inner.status is NodeStatus.TRUNCATED:
+                why = "it ends before its type does"
+            return self._transform_failed(
+                item, kind, start, end, f"{kind.name} output does not decode: {why}"
+            )
+        if not second.at_end():
+            unread = second.remaining_bytes()
+            detail = f"{kind.name} output has {unread} byte(s) its type does not read"
+            return self._transform_failed(item, kind, start, end, detail)
+        inner = _in_space(inner, item.name or kind.name)
+        if inner.children or inner.unit is not None:
+            # A unit: its fields are the transform's, measured in the output.
+            return Node(
+                name=item.name,
+                off_start=start,
+                off_end=end,
+                children=inner.children,
+                unit=inner.unit,
+                spec_field=item,
+                resolved_type=kind,
+            )
+        # A single value: the output has no structure below it, so the node is
+        # the value itself, citing the input like any leaf.
+        return Node(
+            name=item.name,
+            value=inner.value,
+            off_start=start,
+            off_end=end,
+            detail=inner.detail,
+            spec_field=item,
+            resolved_type=kind,
+        )
+
+    def _transform_citation(
+        self, kind: Transform, frame: _Frame, cursor: Cursor, mark: int
+    ) -> tuple[int, int]:
+        """Return what a transform cites: its source and its arguments' fields, first to last.
+
+        Only fields of this unit count, as for a ``computed``: a document or
+        unit parameter holds no input bytes, and ``root`` or ``parent`` reach
+        outside what this node can see. With nothing to cite, it cites nothing,
+        at the cursor.
+        """
+        spans: list[tuple[int, int]] = []
+        read = [ref.path[0] for expr in kind.args.values() for ref in references(expr)]
+        names = [kind.source, *read]
+        for name in names:
+            node = frame.named.get(name)
+            if node is not None and node.width:
+                spans.append((node.off_start, node.off_end))
+        if not spans:
+            return cursor.span(mark)
+        return min(start for start, _ in spans), max(end for _, end in spans)
+
+    def _transform_failed(
+        self, item: Field, kind: Transform, start: int, end: int, detail: str
+    ) -> Node:
+        """Build the node for a transform that produced nothing usable (*Decided* 1)."""
+        return Node(
+            name=item.name,
+            off_start=start,
+            off_end=end,
+            detail=detail,
+            spec_field=item,
+            resolved_type=kind,
+            failed=True,
+        )
+
     def _unreadable(self, item: Field, kind: FieldType, cursor: Cursor, detail: str) -> Node:
         """Build the node for a pointer that cannot be followed.
 
@@ -795,17 +1060,35 @@ class Decoder:
     def _read_sized(self, size: SizeSpec, cursor: Cursor, env: _Environment) -> bytes:
         """Read the bytes a size spec describes."""
         if isinstance(size, Fixed):
-            return cursor.read_bytes(size.count)
+            return self._read_counted(size.count, cursor, env)
         if isinstance(size, FromExpr):
             count = self._int(size.expr, env, "size")
             if count < 0:
                 raise _Stop(NodeStatus.UNDECODABLE, f"negative size {count}")
-            return cursor.read_bytes(count)
+            return self._read_counted(count, cursor, env)
         if isinstance(size, Remaining):
             return cursor.read_remaining()
         if isinstance(size, Fill):
             return self._read_fill(cursor, env)
         return self._read_terminated(size, cursor)
+
+    def _read_counted(self, count: int, cursor: Cursor, env: _Environment) -> bytes:
+        """Read ``count`` bytes, saying where the message ends if they run out.
+
+        Only for a field after which nothing in the message reads
+        (:attr:`_Frame.tail`): then the read that ran out was the message's
+        last, and its length was decided before a byte of it was read, so the
+        message ends exactly where this read would have. The stage driver
+        resumes there after a gap rather than reading the rest of a body as a
+        new message (#49).
+        """
+        start = cursor.byte_offset()
+        try:
+            return cursor.read_bytes(count)
+        except TruncatedRead as exc:
+            if env.frame.tail:
+                raise TruncatedRead(str(exc), reach=start + count) from exc
+            raise
 
     def _read_fill(self, cursor: Cursor, env: _Environment) -> bytes:
         """Read everything left except what the fields after this one claim.
@@ -984,6 +1267,7 @@ class Decoder:
             detail=node.detail,
             spec_field=item,
             resolved_type=kind,
+            refused=node.refused,
         )
 
     # --- expression helpers ------------------------------------------------

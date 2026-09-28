@@ -9,7 +9,9 @@ the tests stand alone.
 
 from __future__ import annotations
 
+import gzip
 import struct
+import zlib
 from pathlib import Path
 
 import pytest
@@ -189,7 +191,7 @@ def test_http_frames_a_chunked_body():
     chunks = tree.find("chunks").children
     assert [chunk.find("length").value for chunk in chunks] == [0x1A, 0]
     assert chunks[0].find("data").value == b"x" * 0x1A
-    assert tree.find("body") is None
+    assert tree.find("body").value == b"x" * 0x1A, "the body is the chunks' data, joined"
 
 
 def test_http_frames_a_body_by_its_content_length():
@@ -239,7 +241,7 @@ def test_http_lets_chunked_win_over_a_content_length():
     )
     tree = Decoder(spec).decode_bytes(message)
     assert tree.status is NodeStatus.OK
-    assert tree.find("body") is None, "the length framed the body"
+    assert tree.find("body").value == b"abcd", "the length framed the body"
     assert [c.find("length").value for c in tree.find("chunks").children] == [4, 0]
     assert tree.off_end == len(message)
 
@@ -345,3 +347,168 @@ def test_http_decodes_several_messages_from_one_run():
         len(HTTP_REQUEST) + len(second),
         len(run),
     ]
+
+
+# --- the start line, and chunked as the last coding (#50) --------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [b"chunked", b"gzip, chunked", b"gzip,chunked", b" Gzip,  Chunked ", b"x-custom, chunked"],
+)
+def test_http_reads_chunked_when_it_is_the_last_coding(value: bytes):
+    """RFC 7230 §3.3.1: `chunked` is the final coding, and may follow others.
+
+    `gzip, chunked` used to read as unframed, because saying *ends with* needed
+    a function the language did not have (#50).
+    """
+    spec = load("http.yaml")
+    message = (
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: " + value + b"\r\n\r\n"
+        b"4\r\nabcd\r\n0\r\n\r\n"
+    )
+    tree = Decoder(spec).decode_bytes(message)
+    assert tree.status is NodeStatus.OK
+    assert tree.find("chunked").value is True, value
+    assert tree.off_end == len(message), value
+
+
+@pytest.mark.parametrize("value", [b"xchunked", b"chunked, gzip", b"gzip"])
+def test_http_does_not_read_chunked_when_it_is_not_the_last_coding(value: bytes):
+    """A coding that merely ends in the same letters, or chunked not last, is not chunked."""
+    spec = load("http.yaml")
+    message = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: " + value + b"\r\n\r\n"
+    tree = Decoder(spec).decode_bytes(message)
+    assert tree.find("chunked").value is False, value
+
+
+@pytest.mark.parametrize(
+    "line",
+    [b"HTTP/1.1 200 OK", b"HTTP/1.0 404 Not Found", b"GET / HTTP/1.1", b"POST /x?y HTTP/1.0"],
+)
+def test_http_believes_a_start_line_that_looks_like_one(line: bytes):
+    tree = Decoder(load("http.yaml")).decode_bytes(line + b"\r\n\r\n")
+    assert tree.status is NodeStatus.OK, line
+
+
+@pytest.mark.parametrize(
+    "line",
+    [b"19", b"", b'"v": 0.29}, {"id": 27}', b"\x13*FIC HTTP/1.1 200 OK x", b"GET / HTTP/2"],
+)
+def test_http_refuses_a_start_line_that_does_not_look_like_one(line: bytes):
+    """What a run after a gap starts with: a chunk size, a blank line, a body's tail.
+
+    Each decodes whole as a message with no headers, so without the `confirm`
+    it was believed and written (#49's remaining phantoms). HTTP/2 has no text
+    start line to recognise, and is refused with them.
+    """
+    tree = Decoder(load("http.yaml")).decode_bytes(line + b"\r\n\r\n")
+    assert tree.status is NodeStatus.UNDECODABLE, line
+    assert tree.detail == "unit 'message' did not confirm"
+
+
+# --- the content a Content-Encoding compressed (the transform phase) ------------------
+
+
+def encoded(coding: bytes, body: bytes, *, chunked: bool = False) -> bytes:
+    """Frame an HTTP response carrying ``body`` under ``coding``, by length or in chunks."""
+    head = b"HTTP/1.1 200 OK\r\nContent-Encoding: " + coding + b"\r\n"
+    if not chunked:
+        return head + b"Content-Length: %d\r\n\r\n" % len(body) + body
+    half = len(body) // 2
+    parts = b"".join(b"%x\r\n" % len(p) + p + b"\r\n" for p in (body[:half], body[half:]))
+    return head + b"Transfer-Encoding: chunked\r\n\r\n" + parts + b"0\r\n\r\n"
+
+
+HTML = b"<html><body>hello, inflated world</body></html>"
+
+
+@pytest.mark.parametrize("chunked", [False, True], ids=["length", "chunked"])
+@pytest.mark.parametrize(
+    ("coding", "body"),
+    [
+        (b"gzip", gzip.compress(HTML, mtime=0)),
+        (b"x-gzip", gzip.compress(HTML, mtime=0)),
+        (b" Gzip", gzip.compress(HTML, mtime=0)),
+        (b"deflate", zlib.compress(HTML)),
+    ],
+    ids=["gzip", "x-gzip", "spaced-and-cased", "deflate"],
+)
+def test_http_inflates_the_content_however_the_body_was_framed(
+    coding: bytes, body: bytes, chunked: bool
+):
+    """HTTP's `deflate` is zlib (RFC 1950), which is the transform `deflate` too."""
+    message = encoded(coding, body, chunked=chunked)
+    tree = Decoder(load("http.yaml")).decode_bytes(message)
+    assert tree.status is NodeStatus.OK, tree.render()
+    assert tree.off_end == len(message)
+    assert tree.find("body").value == body
+    content = tree.find("content")
+    assert not content.failed, content.detail
+    assert content.value == HTML
+
+
+def test_http_content_speaks_for_the_body_at_field_granularity():
+    """The body's record is taken over; the content's cites the body's bytes."""
+    spec = load("http.yaml")
+    body = gzip.compress(HTML, mtime=0)
+    message = encoded(b"gzip", body)
+    records, regions = plan(spec, Decoder(spec).decode_bytes(message), message, emit=Emit.FIELD)
+    roles = {record.role: record for record in records}
+    assert "http.body" not in roles
+    assert roles["http.content"].payload == HTML
+    start = len(message) - len(body)
+    assert (roles["http.content"].off_start, roles["http.content"].off_end) == (start, len(message))
+    assert regions == []
+
+
+@pytest.mark.parametrize("chunked", [False, True], ids=["length", "chunked"])
+def test_http_names_a_body_that_does_not_inflate_and_goes_on(chunked: bool):
+    """*Decided* 1: the message decodes whole, the body's bytes are `undecodable`."""
+    spec = load("http.yaml")
+    message = encoded(b"gzip", b"this is not gzip data", chunked=chunked)
+    tree = Decoder(spec).decode_bytes(message)
+    assert tree.status is NodeStatus.OK
+    assert tree.off_end == len(message)
+    assert tree.find("content").detail == "gzip: not valid compressed data"
+    records, regions = plan(spec, tree, message, emit=Emit.FIELD)
+    assert all(region.reason == "undecodable" for region in regions)
+    assert sum(r.off_end - r.off_start for r in regions) == len(b"this is not gzip data")
+    assert not any(r.role.endswith(".data") or r.role == "http.body" for r in records)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        b"HTTP/1.1 304 Not Modified\r\nContent-Encoding: gzip\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 0\r\n\r\n",
+    ],
+    ids=["no-body", "empty-body"],
+)
+def test_http_inflates_nothing_where_there_is_no_body(message: bytes):
+    """A `304` or a `HEAD` reply states the coding of a body it does not send."""
+    tree = Decoder(load("http.yaml")).decode_bytes(message)
+    assert tree.status is NodeStatus.OK
+    assert tree.find("content") is None
+
+
+@pytest.mark.parametrize("coding", [b"br", b"zstd", b"gzip, br", b"identity"])
+def test_http_leaves_a_coding_it_does_not_decode_as_it_arrived(coding: bytes):
+    """`br` is extended and unbound here; a list of codings is not one coding."""
+    message = encoded(coding, b"opaque bytes")
+    tree = Decoder(load("http.yaml")).decode_bytes(message)
+    assert tree.status is NodeStatus.OK
+    assert tree.find("content") is None
+    assert tree.find("body").value == b"opaque bytes"
+
+
+def test_http_reads_two_transfer_encoding_headers_as_one_list():
+    """RFC 7230 §3.3.1: `gzip` then `chunked` is `gzip, chunked`, so the body is chunked."""
+    message = (
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n"
+        b"4\r\nabcd\r\n0\r\n\r\n"
+    )
+    tree = Decoder(load("http.yaml")).decode_bytes(message)
+    assert tree.status is NodeStatus.OK
+    assert tree.find("framing").value == "chunked"
+    assert tree.find("body").value == b"abcd"

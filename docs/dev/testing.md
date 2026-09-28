@@ -18,12 +18,16 @@ itself came from the second kind, and none of them needed a clever test.
 | `test_spec.py` | The model's local invariants: integer widths, blank names, duplicate fields, normalization to tuples and read-only mappings. |
 | `test_loader.py` | The YAML/JSON schema: strictness, path-carrying errors, the tagged-mapping forms, and YAML's implicit-typing traps. |
 | `test_check.py` | Whole-spec validation: scoping, ordering, `parent`/`root` resolution, argument matching, recursion, and the rule that `remaining` and `fill` are measured against the message. |
+| `test_check_transforms.py` | What `check` says about `transform`, `concat`, `transforms:` and `params:`, from the spec alone and with no registry. |
+| `test_transforms.py` | The Python binding: each name this backend binds, on good input, bad input and a bomb; a caller's transform; and what binding says when nothing supplies one. |
 | `test_cursor.py` | The bit-level cursor: MSB-first reads, sub-byte spans rounding outward, alignment refusal, truncation. |
 | `test_node.py` | The tree: walking, statuses, rendering. |
 | `test_decoder.py` | The engine: every field type, size, and repeat, plus guards, truncation, and the bounded loops. |
+| `test_decoder_transforms.py` | The engine on a transform: its output's own offset space, a failure that leaves its message whole, parameters, a caller's cipher, and the digest. |
 | `test_emit.py` | What the emitter *decides*, with no file involved: granularity resolution, `prim:` widening, field paths, coverage arithmetic. |
 | `test_emit_conformance.py` | What `zpf` *accepts*: real files written through a decode stage and put past `ConformanceChecker` and `check_coverage`. |
 | `test_stage.py` | The driver: gaps, seams, shape dispatch, chaining, timestamps, `content_registry`, and what the output declares — a unit sequence at field granularity, the input's adjacency carried forward otherwise. |
+| `test_stage_transforms.py` | What a stage writes for a transform, through both drivers: take-over, a failure that neither confirms nor declines, the digest, and a tunnel feeding a second stage. |
 | `test_cli.py` | All five verbs, driving `main()` directly. |
 | `test_examples.py` | The shipped `examples/` specs — they must check clean, carry documentation, and still decode. |
 | `test_packeteer.py` | packeteer's shipped specs, vendored under `tests/packeteer/` at a stated version: they load, decode, and have every key kober has no meaning for declined by name. |
@@ -31,9 +35,13 @@ itself came from the second kind, and none of them needed a clever test.
 | `test_pygen.py` | The Python backend: names and the refusals, expression rendering, and that its output passes `ruff` and is the module checked into `tests/compiled_dns.py`. |
 | `test_compiled_dns.py` | That checked-in module from a consumer's side: typed fields, byte ranges, enum labels. |
 | `test_compiled.py` | **The differential**, and the fuzzing of it. See below. |
+| `test_compiled_transforms.py` | What only a generated module has for a transform: the `TransformFailed` it leaves, `params=`, binding at import, and a misbehaving callable. |
 | `test_fuzz.py` | **The interpreter's invariants**, over adversarial input. See below. |
+| `test_docs.py` | That these pages keep up: every schema key, kind and builtin documented, and every public name re-exported from `kober`. |
 | `fuzzing.py` | Not a test: the mutators, shared so both implementations are fuzzed with the same inputs. |
 | `zpfcompare.py` | Not a test: what "conformant" and "the same file, block for block" mean, shared by the suite and by `tools/pipeline.py` so the two cannot come to mean different things. |
+| `cipher.py` | Not a test: a deliberately trivial cipher, since the standard library has none and a real one is always a caller's. |
+| `compiled_dns.py` | Not a test: the compiler's output for `examples/dns.yaml`, checked in and compared character for character. |
 
 ## Two implementations, and the test that compares them
 
@@ -43,14 +51,19 @@ confidently wrong, so the strongest test here is that **they agree**:
 
 - the same values and the same byte ranges, field by field, unit by unit;
 - the same records and the same undecoded regions, in the same order;
-- the same **file**, block for block, when both are driven over a capture;
+- the same **file**, block for block, when both are driven over a capture,
+  the decoder descriptor's `params_digest` included;
 - and where a decode fails, the same offset with the same reason.
 
-That comparison is `test_compiled.py`, and it earns its cost. Four bugs have
-come out of it so far, every one of them in the *interpreter* or in code both
+That comparison is `test_compiled.py`, and it earns its cost. Four bugs came
+out of it before 0.5.0, every one of them in the *interpreter* or in code both
 share: two places a partial decode was thrown away, a `switch` case that wrote
 no record, and a computed value too wide for `prim:` raising out of the emitter.
-None had a failing test before, and none would have been found by reading.
+0.5.0's transforms added more: a failed transform over a `concat` naming bytes
+its members' records cite, the two drivers writing a message's blocks in
+different orders, and a computed field reading a nested unit's field citing
+different bytes in each. None had a failing test before, and none would have
+been found by reading.
 
 **A construct the shipped examples do not use gets a spec in that file's
 awkward corpus**, not only an example — bitfields that do not divide a byte, a
@@ -82,6 +95,39 @@ get there the transport layers are gone.
 **Both implementations are fuzzed with the same inputs**, from `fuzzing.py`.
 That is not tidiness: the differential can only compare results over inputs that
 match, and the mutations that break one are the ones worth showing the other.
+
+### Transforms
+
+A transform adds four promises of its own, and `test_fuzz.py` holds the
+interpreter to each over adversarial input:
+
+- the read position is the same after a transform as before it;
+- every byte of an output that decoded was read by its type, since output
+  its type does not read is a failure;
+- no output passes its `limit`, and one that would have is a failure saying so;
+- a transform's source is spoken for exactly once. On success the output's
+  records cite it and no record of its own does. On failure it is named
+  `undecodable` and cited by nothing; a `concat` source's members are named
+  one by one, and none keeps its record.
+
+**Each is also run against an implementation broken in the one way it exists
+to catch** — a transform that consumes a byte, a decoder that stops looking at
+its type's end, a codec with no bound, an emitter that writes the source as
+well or drops its region — and the test asserts that the check fails there.
+Those are tests in the suite rather than a one-off revert, so a check that
+stops catching anything fails the build.
+
+Most mutations of compressed data fail the transform, so the corpus holds
+seeds that every correct decode fails and a broken one would not: a
+decompression bomb for each output, and an output with bytes left over.
+`fuzzing.hostile` is a caller's transform that misbehaves in every way a
+callable can, chosen by its input's first byte, and
+`test_every_way_a_callable_misbehaves_is_reached` asserts that the corpus
+still reaches each one. What it raises must never escape, and its messages,
+which carry a secret, must never reach the file. Streams whose messages carry
+transforms, some failing, fuzz the driver as well: a failure neither confirms
+the stream nor declines it, and the message after one is still decoded. The
+compiled module is held to the same corpus by the differential.
 
 ### A seed is only worth the code it reaches
 
@@ -127,7 +173,7 @@ It is one command, and **run it before a release, or after touching
 
 It needs two sibling checkouts with their own venvs, neither a dependency of
 this project — `../packeteer` and `../python-zipline-wire`, or wherever
-`--packeteer` and `--wire` say. It builds eight inputs:
+`--packeteer` and `--wire` say. It builds ten inputs:
 
 | Input | What it is for |
 | --- | --- |
@@ -135,18 +181,21 @@ this project — `../packeteer` and `../python-zipline-wire`, or wherever
 | `dns_gen` | A generated, lossy DNS stream whose response is compressed — `raw:` bytes from `tools/dns-messages.json`, since a built message carries no pointer (see *Generated DNS* below). |
 | `http_gen` | Generated chunked HTTP with trailers at `--mss 200` on a 5% lossy link: chunk boundaries across segment boundaries, and losses mid-body. |
 | `http_clean` | The same traffic with no loss, so its shape can be checked exactly. |
+| `gzip_lossy` | 30 HTTP responses, gzip, deflate and plain, length-framed and chunked, from `tools/gzip_http.py`, cut into 200-byte segments on a 5% lossy link. Its bodies are large, so a gap lands inside one routinely (#49). packeteer's HTTP payload cannot carry them, so they go through `tools/blob.yaml`, a one-field protocol of the project's own. |
+| `gzip_clean` | The same traffic with no loss, checked exactly against the reference reader. |
 | `packet_loss`, `tcp_lossy_ts`, `tcp_reorder_ts` | Real captures kept for their loss and reordering. They are not DNS or HTTP; they are driver structure. |
 | `http_stream_1` | A real HTTP capture, 2000 messages, lossless. |
 
 Each is converted with `zpfwire convert` and run through **both** example specs
 — a spec meeting a stream in another protocol is a case the driver has to
 handle too — by the interpreter and by a module compiled fresh from the spec, at
-both granularities: 64 files. For each, it checks:
+both granularities: 80 files. For each, it checks:
 
 - **Conformance and coverage**: `zpf.ConformanceChecker` and
   `zpf.check_coverage`.
 - **The pair**: the interpreter's and the compiled module's files identical
-  block for block, participant adjacency and region comments included, as
+  block for block, the decoder's `params_digest`, participant adjacency and
+  region comments included, as
   `tests/zpfcompare.py` defines it — the same definition the differential
   tests use.
 - **The shape**, at field granularity over an input in the spec's own protocol.
@@ -156,7 +205,13 @@ both granularities: 64 files. For each, it checks:
   RFC 7230 framing in the script counts from the same bytes; over a lossy one,
   there must be no more start lines than messages sent, since the bug this
   shape exists to catch is a message that stops early and leaves its tail to
-  be read as more messages.
+  be read as more messages. And over every input, every start line must look
+  like one, by a pattern the script holds rather than the spec's own
+  `confirm`: a count cannot see a phantom when a gap also took a real start
+  line, which is how two sat in the generated stream from 0.4.0 until #50.
+- **The inflated content**, over the two compressed-body inputs: every
+  `http.content` record must be byte for byte a document `tools/gzip_http.py`
+  compressed, and over the lossless one every compressed body must be there.
 
 It prints one line per check and exits non-zero if any failed, keeping the work
 directory. `--work DIR` keeps it anyway, and `--baseline DIR` compares every

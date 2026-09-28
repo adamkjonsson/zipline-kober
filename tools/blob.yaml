@@ -1,0 +1,11 @@
+name: blob
+version: "1.0"
+input: datagram
+entry: message
+over: tcp
+ports: [9480]
+doc: Opaque application bytes, so a script can say exactly what is on the wire.
+units:
+  message:
+    fields:
+      - {name: data, bytes: {size: {remaining: true}}}

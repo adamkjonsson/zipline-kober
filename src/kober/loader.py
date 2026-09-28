@@ -86,6 +86,7 @@ from kober.source import Location, SourceMap
 from kober.spec import (
     BytesType,
     Computed,
+    Concat,
     Count,
     Emit,
     Endian,
@@ -106,6 +107,8 @@ from kober.spec import (
     Switch,
     Terminated,
     ToEnd,
+    Transform,
+    TransformDecl,
     Unit,
     UnitRef,
     Until,
@@ -127,7 +130,10 @@ SUFFIXES: Mapping[str, str] = {
 }
 
 _SPEC_KEYS = frozenset(
-    {"name", "version", "entry", "units", "enums", "input", "endian", "doc"}
+    {
+        "name", "version", "entry", "units", "enums", "input", "endian", "doc",
+        "transforms", "params",
+    }
 )
 _UNIT_KEYS = frozenset({"fields", "params", "confirm", "reject", "emit", "endian", "doc"})
 _FIELD_KEYS = frozenset({"name", "type", "condition", "repeat", "emit", "const", "doc"})
@@ -139,6 +145,15 @@ _BYTES_KEYS = frozenset({"size"}) | _TERMINATED_KEYS
 _STRING_KEYS = _BYTES_KEYS | {"encoding"}
 _SWITCH_KEYS = frozenset({"dispatch", "cases", "default"})
 _POINTER_KEYS = frozenset({"at", "type"})
+#: Every key of a ``transform``. ``from``, ``with`` and ``limit`` are required;
+#: ``from`` and ``with`` are Python keywords, so the model spells them
+#: ``source`` and ``name``.
+_TRANSFORM_KEYS = frozenset({"from", "with", "limit", "args", "type", "content_type"})
+_TRANSFORM_REQUIRED = ("from", "with", "limit")
+#: Every key of a transform's declaration under ``transforms:``.
+_TRANSFORM_DECL_KEYS = frozenset({"params", "doc"})
+#: Every key of a document parameter written out.
+_DOC_PARAM_KEYS = frozenset({"type", "secret", "doc"})
 _PARAM_KEYS = frozenset({"name", "type"})
 _ENUM_KEYS = frozenset({"members", "doc"})
 
@@ -614,6 +629,8 @@ def _spec(document: Mapping[str, Any], at: _At) -> Spec:
         if "input" not in mapping
         else _member(InputShape, mapping["input"], at.child("input"))
     )
+    transforms = _transform_decls(mapping.get("transforms", {}), at.child("transforms"), owner)
+    doc_params = _doc_params(mapping.get("params", {}), at.child("params"), owner)
     return Spec(
         name=_require_str(mapping["name"], at.child("name")),
         version=_require_str(mapping["version"], at.child("version")),
@@ -623,6 +640,8 @@ def _spec(document: Mapping[str, Any], at: _At) -> Spec:
         input=shape,
         doc=_optional_str(mapping, "doc", at),
         sources=SourceMap(source=at.loc.source, lines=dict(at.lines)),
+        transforms=transforms,
+        params=doc_params,
         foreign=tuple(at.found),
     )
 
@@ -958,7 +977,10 @@ def _declared_repeat(mapping: Mapping[str, Any], at: _At) -> Repeat | None:
 # --- types, sizes, repeats -------------------------------------------------
 
 _TYPE_KINDS = frozenset(
-    {"int", "bytes", "string", "unit", "switch", "computed", "pointer", "select"}
+    {
+        "int", "bytes", "string", "unit", "switch", "computed", "pointer", "select",
+        "concat", "transform",
+    }
 )
 #: Every key that may *name* a type, whether lifted into a field or used as the
 #: tag under ``type:``. ``bits`` is an alias for the ``int`` kind rather than a
@@ -1022,6 +1044,10 @@ def _field_type(document: object, at: _At) -> FieldType:
         return _pointer(value, site)
     if tag == "select":
         return _select(value, site)
+    if tag == "concat":
+        return _concat(value, site)
+    if tag == "transform":
+        return _transform(value, site)
     return Computed(expr=_expr(value, site))
 
 
@@ -1167,6 +1193,134 @@ def _select(document: object, at: _At) -> Select:
         default=_expr(mapping["default"], at.child("default")),
         alias=_optional_str(mapping, "as", at),
     )
+
+
+def _concat(document: object, at: _At) -> Concat:
+    """Build a concat from ``repeated.member``.
+
+    One dotted name, of exactly two parts: the repeated field, and the field of
+    each element to join. A deeper path would be a list inside a list, which
+    the construct does not mean.
+
+    Args:
+        document: The value under the ``concat`` tag.
+        at: Where in the document this is.
+
+    Returns:
+        The concat.
+
+    Raises:
+        SpecError: If it is not a two-part dotted name.
+
+    """
+    text = _require_str(document, at)
+    repeated, dot, member = text.partition(".")
+    if not dot or not repeated or not member or "." in member:
+        msg = (
+            f"concat names a repeated field and the field of each element to join, "
+            f"as 'chunks.data'; got {text!r}"
+        )
+        raise SpecError(msg, at.loc)
+    return Concat(repeated=repeated, member=member)
+
+
+def _transform(document: object, at: _At) -> Transform:
+    """Build a transform: which bytes, which transform, and what comes out.
+
+    ``from``, ``with`` and ``limit`` are required, and the error names every
+    one that is missing. ``args`` maps a declared parameter to an expression.
+
+    Args:
+        document: The mapping under the ``transform`` tag.
+        at: Where in the document this is.
+
+    Returns:
+        The transform.
+
+    Raises:
+        SpecError: If a key is missing, unknown, or the wrong shape.
+
+    """
+    at = at.within(document)
+    mapping = _require_mapping(document, at)
+    _reject_unknown(mapping, _TRANSFORM_KEYS, at)
+    missing = [key for key in _TRANSFORM_REQUIRED if key not in mapping]
+    if missing:
+        listed = ", ".join(repr(key) for key in missing)
+        msg = f"missing required key(s) {listed}"
+        raise SpecError(msg, at.loc)
+    args_doc = _require_mapping(mapping.get("args", {}), at.child("args"))
+    try:
+        return Transform(
+            source=_require_str(mapping["from"], at.child("from")),
+            name=_require_str(mapping["with"], at.child("with")),
+            limit=_require_int(mapping["limit"], at.child("limit")),
+            args={
+                _require_str(name, at.child("args")): _expr(value, at.child("args").child(name))
+                for name, value in args_doc.items()
+            },
+            type=_field_type(mapping["type"], at.child("type")) if "type" in mapping else None,
+            content_type=_optional_str(mapping, "content_type", at),
+        )
+    except SpecError as exc:
+        # The model's own checks (a limit that is not positive) know no
+        # position; this is where the transform is.
+        if exc.loc is not None:
+            raise
+        raise SpecError(exc.message, at.loc) from exc
+
+
+def _transform_decls(document: object, at: _At, owner: str) -> dict[str, TransformDecl]:
+    """Build the ``transforms:`` block: each name a spec uses and its parameters.
+
+    A declaration with nothing to say is written ``{}`` or left empty, which is
+    how a spec says it uses an extended-tier name.
+    """
+    mapping = _require_mapping(document, at)
+    decls: dict[str, TransformDecl] = {}
+    for name, value in mapping.items():
+        site = at.child(name)
+        body = _require_mapping({} if value is None else value, site)
+        _reject_unknown(body, _TRANSFORM_DECL_KEYS, site)
+        params_doc = _require_mapping(body.get("params", {}), site.child("params"))
+        site.record(f"{owner}.transforms.{name}")
+        decls[name] = TransformDecl(
+            name=name,
+            params={
+                param: _member(ExprType, kind, site.child("params").child(param))
+                for param, kind in params_doc.items()
+            },
+        )
+    return decls
+
+
+def _doc_params(document: object, at: _At, owner: str) -> list[Param]:
+    """Build the ``params:`` block: values supplied when a decode is set up.
+
+    Keyed by name, unlike a unit's list, because they are supplied by name
+    rather than bound in order. ``key: bytes`` is the short form, and
+    ``key: {type: bytes, secret: true}`` the long one.
+    """
+    mapping = _require_mapping(document, at)
+    params: list[Param] = []
+    for name, value in mapping.items():
+        site = at.child(name)
+        site.record(f"{owner}.params.{name}")
+        if isinstance(value, str):
+            params.append(Param(name=name, type=_member(ExprType, value, site)))
+            continue
+        body = _require_mapping(value, site)
+        _reject_unknown(body, _DOC_PARAM_KEYS, site)
+        if "type" not in body:
+            msg = "missing required key 'type'"
+            raise SpecError(msg, site.loc)
+        secret = body.get("secret", False)
+        if not isinstance(secret, bool):
+            msg = f"'secret' is true or false, got {secret!r}"
+            raise SpecError(msg, site.child("secret").loc)
+        kind = _member(ExprType, body["type"], site.child("type"))
+        params.append(Param(name=name, type=kind, secret=secret))
+    return params
 
 
 def _pointer(document: object, at: _At) -> Pointer:

@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 from kober.expr import references
 from kober.node import NodeStatus
 from kober.runtime import TEXT_CONTENT_TYPE, normalize_int, prim_int, prim_token
-from kober.spec import Computed, Emit, IntType, Select
+from kober.spec import Computed, Concat, Emit, IntType, Select, Transform
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -113,6 +113,9 @@ UNDECLARED_WIDTH = (Computed, Select)
 def _int_bits(node: Node) -> tuple[int, bool]:
     """Return the declared width and signedness behind an integer node."""
     kind = node.resolved_type
+    if isinstance(kind, Transform):
+        # A transform whose output is one integer: its width is the type's.
+        kind = kind.type
     if isinstance(kind, IntType):
         return kind.bits, kind.signed
     # No declared width; `kober.runtime.prim_int` sizes it by its magnitude,
@@ -219,7 +222,9 @@ def plan(
         # granularity the root resolved to, not the decoder's: the entry is a
         # unit, and a unit's setting is the default inside it, here as at every
         # container `_walk` meets below.
-        _walk(spec, tree, [spec.name], granularity, emissions, unclaimed)
+        if not tree.refused:
+            # A refused entry unit writes nothing; `_holes` names its bytes.
+            _walk(spec, tree, [spec.name], granularity, emissions, unclaimed)
     elif tree.width:
         unclaimed.append(Unclaimed(tree.off_start, tree.off_end, NodeStatus.SKIPPED.value))
 
@@ -251,7 +256,10 @@ def _reason_for(tree: Node, start: int, end: int) -> str:
     reason = NodeStatus.SKIPPED.value
     best = None
     for node in tree.walk():
-        if node.status is NodeStatus.OK:
+        if node.status is NodeStatus.OK or node.space is not None:
+            # A node in a transform's output is measured there, and its offsets
+            # mean nothing against the input's: taking one for a failure over
+            # these bytes wrote a false `truncated` in the plan's Stage 1.
             continue
         if node.off_start <= start and end <= max(node.off_end, node.off_start):
             width = node.off_end - node.off_start
@@ -303,33 +311,162 @@ def _walk(
     default: Emit,
     emissions: list[Emission],
     unclaimed: list[Unclaimed],
+    cite: tuple[int, int] | None = None,
 ) -> None:
-    """Walk a tree at field granularity, emitting one record per leaf."""
+    """Walk a tree at field granularity, emitting one record per leaf.
+
+    ``cite`` is set inside a transform's output: every record there cites it,
+    the transform's source and argument fields in the input, since the output
+    has no offsets a file can name. For the same reason nothing inside an
+    output becomes a region.
+    """
+    # A field a transform reads is written through the transform (the transform
+    # plan's *Decided* 1a): its output's records cite those bytes, or a failure
+    # names them. Only when the transform is present; a condition that leaves
+    # it out leaves the source written as any field.
+    taken = {
+        child.resolved_type.source
+        for child in node.children
+        if isinstance(child.resolved_type, Transform)
+    }
     for child in node.children:
         # A repetition contributes no path segment of its own: its elements are
         # already named `field[0]`, `field[1]`, so counting the container too
         # would spell every repeat twice — `questions.questions[0]`.
         path = names if child.is_repetition else [*names, child.name]
+        if child.name in taken:
+            continue
         granularity = resolve_emit(child, spec, default)
+        if isinstance(child.resolved_type, Transform):
+            _transform(spec, node, child, path, granularity, emissions, unclaimed, cite)
+            continue
+        if child.refused:
+            # Its guard refused it: what its fields read was a guess that did
+            # not hold up, so none of it is written (`DESIGN.md` §3.1).
+            if child.width and cite is None:
+                unclaimed.append(
+                    Unclaimed(child.off_start, child.off_end, NodeStatus.UNDECODABLE.value)
+                )
+            continue
         if not child.is_leaf:
             # A container's setting becomes the default *inside* it rather
             # than a verdict on it, so a field that names its own granularity
             # still wins over the unit holding it — field, then unit, then
             # whatever encloses that, then the decoder.
-            _walk(spec, child, path, granularity, emissions, unclaimed)
+            _walk(spec, child, path, granularity, emissions, unclaimed, cite)
             continue
         if granularity is Emit.NONE:
             # Decoded for control flow only. The bytes were deliberately
             # passed over, which is exactly what `skipped` means — and §2
             # wants it said rather than left to auto-fill.
-            if child.width:
+            if child.width and cite is None:
                 unclaimed.append(
                     Unclaimed(child.off_start, child.off_end, NodeStatus.SKIPPED.value)
                 )
             continue
         emission = _leaf(child, path, node)
         if emission is not None:
-            emissions.append(emission)
+            emissions.append(_citing(emission, cite))
+
+
+def _citing(emission: Emission, cite: tuple[int, int] | None) -> Emission:
+    """Return a record citing ``cite`` instead of its own range, inside an output."""
+    if cite is None:
+        return emission
+    return Emission(emission.payload, emission.content_type, *cite, emission.role)
+
+
+def _transform(
+    spec: Spec,
+    parent: Node,
+    node: Node,
+    path: list[str | None],
+    granularity: Emit,
+    emissions: list[Emission],
+    unclaimed: list[Unclaimed],
+    cite: tuple[int, int] | None,
+) -> None:
+    """Write what a transform's outcome says about its source (*Decided* 1).
+
+    On success its output's records cite the transform's range, its source and
+    argument fields. On failure its **source's** bytes are one ``undecodable``
+    region: the argument fields keep their own records. With ``emit: none``,
+    the source is ``skipped``. Inside another output none of the regions can be
+    named, and every record cites the outermost transform's range.
+
+    A ``concat`` source has no bytes of its own, only its members', and its
+    hull also covers the framing between them. So the members are what is
+    taken over: on failure each member's record is taken back and each
+    non-empty member named, and the framing keeps its records.
+
+    An argument field marked ``emit: none`` is ``skipped`` where it stands,
+    and the output of a transform that succeeded cites it (*Decided* 3): so
+    the output speaks for it, and its region is taken back. Otherwise its
+    bytes would be both cited and undecoded.
+    """
+    kind = node.resolved_type
+    source = parent.find(kind.source) if isinstance(kind, Transform) else None
+    if granularity is Emit.NONE or node.failed:
+        reason = NodeStatus.SKIPPED if granularity is Emit.NONE else NodeStatus.UNDECODABLE
+        if source is None:
+            return
+        if isinstance(source.resolved_type, Concat):
+            members = (source.resolved_type, path[:-1], reason)
+            _take_over_members(parent, *members, emissions, unclaimed, cite)
+        elif source.width > 0 and cite is None:
+            unclaimed.append(Unclaimed(source.off_start, source.off_end, reason.value))
+        return
+    if isinstance(kind, Transform):
+        spoken = {
+            (argument.off_start, argument.off_end, NodeStatus.SKIPPED.value)
+            for expr in kind.args.values()
+            for ref in references(expr)
+            if (argument := parent.find(ref.path[0])) is not None
+        }
+        unclaimed[:] = [
+            region
+            for region in unclaimed
+            if (region.off_start, region.off_end, region.reason) not in spoken
+        ]
+    outer = cite if cite is not None else (node.off_start, node.off_end)
+    if node.children:
+        _walk(spec, node, path, granularity, emissions, unclaimed, outer)
+        return
+    emission = _leaf(node, path, parent)
+    if emission is None:
+        return
+    if isinstance(kind, Transform) and kind.type is None:
+        emission = Emission(
+            emission.payload, kind.content_type or "prim:bytes", 0, 0, emission.role
+        )
+    emissions.append(_citing(emission, outer))
+
+
+def _take_over_members(
+    parent: Node,
+    kind: Concat,
+    names: list[str | None],
+    reason: NodeStatus,
+    emissions: list[Emission],
+    unclaimed: list[Unclaimed],
+    cite: tuple[int, int] | None,
+) -> None:
+    """Take back each record a ``concat``'s members wrote, and name their bytes."""
+    repetition = parent.find(kind.repeated)
+    if repetition is None:
+        return
+    members = [
+        (element, member)
+        for element in repetition.children
+        if (member := element.find(kind.member)) is not None
+    ]
+    roles = {field_path([*names, element.name, member.name]) for element, member in members}
+    emissions[:] = [emission for emission in emissions if emission.role not in roles]
+    if cite is not None:
+        return
+    for _, member in members:
+        if member.width > 0:
+            unclaimed.append(Unclaimed(member.off_start, member.off_end, reason.value))
 
 
 def _leaf(node: Node, path: list[str | None], parent: Node) -> Emission | None:
@@ -397,6 +534,10 @@ def _lookup(path: Sequence[str], parent: Node) -> Node | None:
         if node is None:
             return None
         node = node.find(part)
+        if node is not None and isinstance(node.resolved_type, Transform):
+            # Past here the offsets are the output's and name no input byte:
+            # the transform's own range is what the value was computed from.
+            return node
     return node
 
 

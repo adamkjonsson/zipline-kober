@@ -7,7 +7,8 @@ these pages describe what an author actually types.
 - [What a spec describes](concepts.md) — start here. What a unit *is*, what
   becomes of one in the decoded tree, in a generated decoder and in the output
   file, and what a spec deliberately cannot say.
-- [The document](document.md) — the top level, units, fields, enums, emission
+- [The document](document.md) — the top level, units, fields, enums, the
+  transforms a spec declares and the parameters it takes, emission
   granularity, two YAML traps that have already caught this project, and the
   relationship to packeteer's dialect of this format.
 - [Types, sizes, and repeats](types.md) — every field type and what each does
@@ -33,7 +34,7 @@ ignored, because a misspelled key that loads and does nothing is a decoder
 silently doing the wrong thing. Errors carry the file, the line, and the path:
 
 ```
-dns.yaml:27: spec.units.message.fields[0].type: unknown kind 'enum'; expected one of: bytes, computed, int, pointer, select, string, switch, unit
+dns.yaml:27: spec.units.message.fields[0].type: unknown kind 'enum'; expected one of: bits, bytes, computed, concat, int, pointer, select, string, switch, transform, unit
 ```
 
 A spec read from JSON, or built as a mapping in memory, has no line to report —

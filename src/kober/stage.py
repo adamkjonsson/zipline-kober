@@ -67,11 +67,12 @@ from kober.cursor import Cursor
 from kober.emit import plan, root_emit
 from kober.errors import EvalError, SpecError, TruncatedRead, Undecodable
 from kober.node import NodeStatus
+from kober.runtime import Held, document_params, first_failed, params_digest
 from kober.spec import Emit, InputShape
 
 if TYPE_CHECKING:
     import os
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from datetime import datetime
 
     from kober.decoder import Decoder
@@ -90,6 +91,23 @@ GAP_REASON = NodeStatus.GAP.value
 #: (``DESIGN.md`` §5).
 SEAM_REASON = "stream-gap"
 
+#: The comment on the bytes after a gap that finish a message the gap cut,
+#: when that message's end was known (#49). They are ``skipped``: what they are
+#: is known, and they are passed over on purpose.
+CUT_COMMENT = "rest of a message cut by a gap"
+
+#: The comment on a run after a gap whose first message did not decode whole,
+#: when where the gap left off was not known (#49). ``undecodable``: an attempt
+#: was made there, and it could not be told from the middle of a message.
+LOST_COMMENT = "no message boundary found after a gap"
+
+#: The verdict for a message that decoded whole except for a transform that
+#: failed (the transform plan's *Decided* 1). Its framing held, so the run goes
+#: on after it; but a transform is often a protocol's only real check of
+#: identity, a tag that verifies, so it neither confirms the stream nor
+#: declines it.
+TRANSFORM_FAILED = "transform-failed"
+
 
 @dataclass(frozen=True)
 class _Verdict:
@@ -100,11 +118,17 @@ class _Verdict:
         detail: What went wrong, as the decoder said it. Quoted in the comment
             of a stream it declines, so both implementations must say it the
             same way — the differential holds them to that.
+        reach: For a truncation, where the message would have ended, when
+            that is known (:class:`~kober.errors.TruncatedRead`); else ``None``.
+        refused: Whether a unit's ``confirm`` or ``reject`` refused the
+            message, which decoded far enough for it to run.
 
     """
 
     reason: str
     detail: str
+    reach: int | None = None
+    refused: bool = False
 
 
 def _seam_for(reason: str) -> zpf.Seam | None:
@@ -185,7 +209,13 @@ def decode_stream(decoder: Decoder, stage: zpf.DecodeStage, stream: object) -> N
     _drive(_interpreted(decoder), _Writer(stage, stream, decoder.spec.name), stream)
 
 
-def decode_stream_compiled(module: object, stage: zpf.DecodeStage, stream: object) -> None:
+def decode_stream_compiled(
+    module: object,
+    stage: zpf.DecodeStage,
+    stream: object,
+    *,
+    params: Mapping[str, object] | None = None,
+) -> None:
     """Decode one input stream into ``stage`` with a generated module.
 
     The same driver as :func:`decode_stream`, because everything it does —
@@ -197,9 +227,14 @@ def decode_stream_compiled(module: object, stage: zpf.DecodeStage, stream: objec
         module: A module produced by :func:`kober.pygen.render`.
         stage: The open decode stage to write into.
         stream: One of ``stage.streams()``.
+        params: The document's parameters, for a module whose spec declares
+            ``params:`` — every one in its ``PARAMS``.
+
+    Raises:
+        ParameterError: If ``params`` does not match what the module declares.
 
     """
-    _drive(_compiled(module), _Writer(stage, stream, module.NAME), stream)
+    _drive(_compiled(module, params), _Writer(stage, stream, module.NAME), stream)
 
 
 def _check_shape(shape: InputShape, name: str, stream: object) -> None:
@@ -290,6 +325,14 @@ class _Writer:
         self.confirmed = False
         #: The comment every region of a declined stream carries, once it is.
         self.declined: str | None = None
+        #: Whether a run after a gap had its first message dropped for failing
+        #: other than by running out (#49). Such an attempt neither confirms nor
+        #: declines, so a stream that ends unconfirmed may have had one, and
+        #: then its comment must not say every attempt ran out.
+        self.lost = False
+        #: The first failed transform's detail while unconfirmed: a stream that
+        #: ends unconfirmed after one is declined saying so.
+        self.transform_failure: str | None = None
         #: While unconfirmed: each run as ``(start, end, writes)``, and each gap
         #: as ``(start, end, None)``, in stream order.
         self._held: list[tuple[int, int, list[tuple[object, ...]] | None]] = []
@@ -344,13 +387,32 @@ class _Writer:
             self._undecoded(off_start, off_end, reason, None if writes is None else comment)
         self._held.clear()
 
+    def transform_failed(self, detail: str) -> None:
+        """Note a message that decoded whole except for a transform that failed."""
+        if not self.confirmed and self.transform_failure is None:
+            self.transform_failure = detail
+
     def finish(self) -> None:
         """End the stream: decline it if nothing ever decoded, then write what is left."""
         if not self.confirmed and self.declined is None:
             if any(writes is not None for _, _, writes in self._held):
-                self.decline(
-                    f"not {self.name}: no message decoded; every attempt ran out of input"
+                if self.transform_failure is not None:
+                    # Every message that decoded had a transform fail. With a
+                    # wrong key that is every message, and nothing here can tell
+                    # a wrong key from a wrong protocol, so the comment says
+                    # what was seen (*Decided* 1e).
+                    self.decline(
+                        f"not {self.name}: every message that decoded had a transform "
+                        f"fail; the first: {self.transform_failure}"
+                    )
+                    self.flush()
+                    return
+                how = (
+                    "ran out of input or found no message boundary after a gap"
+                    if self.lost
+                    else "ran out of input"
                 )
+                self.decline(f"not {self.name}: no message decoded; every attempt {how}")
             else:
                 # Nothing was tried — the stream is gaps, or nothing at all.
                 self.confirm()
@@ -376,10 +438,14 @@ class _Writer:
 
     def undecoded(self, off_start: int, off_end: int, reason: str) -> None:
         """Mark ``[off_start, off_end)`` as not decoded, and say why."""
+        self.note(off_start, off_end, reason, None)
+
+    def note(self, off_start: int, off_end: int, reason: str, comment: str | None) -> None:
+        """Mark ``[off_start, off_end)`` as not decoded, with a comment saying why."""
         if self.confirmed:
-            self._undecoded(off_start, off_end, reason)
+            self._undecoded(off_start, off_end, reason, comment)
         else:
-            self._held[-1][2].append(("undecoded", off_start, off_end, reason))
+            self._held[-1][2].append(("undecoded", off_start, off_end, reason, comment))
 
     # --- the file -------------------------------------------------------------
 
@@ -453,29 +519,89 @@ def _interpreted(decoder: Decoder) -> _Step:
         for region in unclaimed:
             sink.undecoded(region.off_start, region.off_end, region.reason)
         if tree.status is NodeStatus.OK:
+            failed = next((node for node in tree.walk() if node.failed), None)
+            if failed is not None:
+                return _Verdict(TRANSFORM_FAILED, failed.detail or "a transform failed")
             return None
-        return _Verdict(tree.status.value, tree.detail or tree.status.value)
+        reach = next((node.reach for node in tree.walk() if node.reach is not None), None)
+        refused = any(node.refused for node in tree.walk())
+        return _Verdict(tree.status.value, tree.detail or tree.status.value, reach, refused)
 
     return step
 
 
-def _compiled(module: object) -> _Step:
+def _compiled(module: object, params: Mapping[str, object] | None = None) -> _Step:
     """Return the step that decodes one message with a generated module.
 
     The module writes its own records as it reads them, so there is nothing to
-    hand on here — only the failure to name, which it reports by raising.
+    hand on here — only the failure to name, which it reports by raising, and a
+    transform that failed, which it reports as a
+    :class:`~kober.runtime.TransformFailed` in the message it returns.
     """
+    # Checked once, here, rather than at the first message; a module whose spec
+    # declares none has no PARAMS, and refuses any in the interpreter's words.
+    document_params(module.NAME, getattr(module, "PARAMS", {}), params or {})
+    keywords: dict[str, object] = {}
+    if hasattr(module, "PARAMS"):
+        keywords["params"] = params or {}
 
     def step(cursor: Cursor, sink: Sink, data: bytes, base: int) -> _Verdict | None:
+        ordered = _RegionsLast(sink)
         try:
-            module.decode_from(cursor, sink)
+            return _verdict(module.decode_from(cursor, ordered, **keywords))
         except TruncatedRead as exc:
-            return _Verdict(NodeStatus.TRUNCATED.value, str(exc))
-        except (EvalError, Undecodable, ZeroDivisionError) as exc:
+            return _Verdict(NodeStatus.TRUNCATED.value, str(exc), exc.reach)
+        except Undecodable as exc:
+            return _Verdict(NodeStatus.UNDECODABLE.value, str(exc), refused=exc.refused)
+        except (EvalError, ZeroDivisionError) as exc:
             return _Verdict(NodeStatus.UNDECODABLE.value, str(exc))
-        return None
+        finally:
+            ordered.release()
 
     return step
+
+
+def _verdict(message: object) -> _Verdict | None:
+    """Return what a message a generated module returned says about the stream."""
+    failed = first_failed(message)
+    if failed is not None:
+        return _Verdict(TRANSFORM_FAILED, failed)
+    return None
+
+
+class _RegionsLast:
+    """Pass a message's records on as they come, and its regions after them.
+
+    The order the interpreter's step writes in, since ``plan`` returns the two
+    apart. A generated module writes in decode order instead, and the two
+    files must be the same block for block: a failed transform's source,
+    named in the middle of its message, is where they first differed.
+    """
+
+    def __init__(self, sink: Sink) -> None:
+        self._sink = sink
+        self._regions: list[tuple[int, int, str]] = []
+
+    def record(
+        self,
+        payload: bytes,
+        content_type: str,
+        off_start: int,
+        off_end: int,
+        role: str | None,
+    ) -> None:
+        """Write a record now."""
+        self._sink.record(payload, content_type, off_start, off_end, role)
+
+    def undecoded(self, off_start: int, off_end: int, reason: str) -> None:
+        """Keep a region until the message ends."""
+        self._regions.append((off_start, off_end, reason))
+
+    def release(self) -> None:
+        """Write the regions kept. Call once, when the message ends."""
+        for region in self._regions:
+            self._sink.undecoded(*region)
+        self._regions.clear()
 
 
 def _drive(step: _Step, writer: _Writer, stream: object) -> None:
@@ -488,38 +614,99 @@ def _drive(step: _Step, writer: _Writer, stream: object) -> None:
 
 
 def _drive_stream(step: _Step, writer: _Writer, stream: object) -> None:
-    """Decode a byte-oriented stream, run by run, marking the holes between."""
+    """Decode a byte-oriented stream, run by run, marking the holes between.
+
+    A run after a gap starts wherever the gap left off, which is usually inside
+    a message (#49). Where the message the gap cut said where it would end, the
+    run resumes there, and the bytes before it are ``skipped`` as the rest of
+    that message. Where nothing said, the run's first message is a guess, and
+    :func:`_decode_run` holds it until it has decoded whole.
+    """
+    resume: int | None = None
+    after_gap = False
     for chunk in stream.chunks():
         if isinstance(chunk, Gap):
             writer.gap(chunk.off_start, chunk.off_end)
+            after_gap = True
             continue
+        start, end = chunk.off_start, chunk.off_start + len(chunk.data)
         if writer.declined is not None:
-            writer.skip(chunk.off_start, chunk.off_start + len(chunk.data))
+            writer.skip(start, end)
             continue
         writer.ts = chunk.ts
-        writer.begin(chunk.off_start, chunk.off_start + len(chunk.data))
-        _decode_run(step, writer, chunk.data, chunk.off_start)
+        writer.begin(start, end)
+        at, known = start, not after_gap
+        if after_gap and resume is not None and resume >= start:
+            at, known = min(resume, end), True
+            writer.note(start, at, NodeStatus.SKIPPED.value, CUT_COMMENT)
+        after_gap = False
+        if resume is not None and resume > end:
+            # The message the gap cut runs past this run too: all of it is the
+            # rest of that message, and the next run may still finish it.
+            continue
+        resume = _decode_run(step, writer, chunk.data, chunk.off_start, at=at, known=known)
 
 
-def _decode_run(step: _Step, writer: _Writer, data: bytes, base: int) -> None:
-    """Decode as many messages as fit in one contiguous run."""
+def _decode_run(
+    step: _Step, writer: _Writer, data: bytes, base: int, *, at: int, known: bool
+) -> int | None:
+    """Decode as many messages as fit in one contiguous run, from ``at``.
+
+    ``known`` says whether ``at`` is where a message starts. When it is not (a
+    run after a gap that nothing said the end of), the first message is written
+    through a :class:`~kober.runtime.Held` sink and released only if it decodes
+    whole. If it does not, what it wrote is dropped: a partial tree read from
+    the middle of a body would be a fabrication. If a guard refused it, it was
+    read far enough for the guard to run, so the next attempt starts where it
+    stopped, still held; otherwise the rest of the run is ``undecodable``.
+    Either way the failure never declines the stream, since it says nothing
+    about the protocol.
+
+    Returns:
+        Where the message the run ended inside would have ended, when the run
+        ended by cutting it off and its end was known; else ``None``.
+
+    """
     cursor = Cursor(data, base)
+    cursor.seek_to(at)
     end = base + len(data)
     while not cursor.at_end():
         before = cursor.tell()
-        verdict = step(cursor, writer, data, base)
+        held = None if known else Held(writer)
+        verdict = step(cursor, held or writer, data, base)
         if verdict is None and cursor.tell() == before:
             # A message that consumes nothing would loop forever. It cannot be
             # decoded and neither can what follows it.
             verdict = _Verdict(NodeStatus.UNDECODABLE.value, "a message consumed no input")
+        whole = verdict is None or verdict.reason == TRANSFORM_FAILED
+        if held is not None:
+            if not whole and verdict is not None:
+                attempt = base + (before >> 3)
+                stopped = _stopped_at(cursor, base)
+                if verdict.refused and attempt < stopped < end:
+                    # Its guard refused it, so it was read far enough for the
+                    # guard to run, and where it stopped is known: try again
+                    # there, still held. Linear, one message per retry.
+                    writer.note(attempt, stopped, NodeStatus.UNDECODABLE.value, LOST_COMMENT)
+                    writer.lost = True
+                    continue
+                writer.note(attempt, end, NodeStatus.UNDECODABLE.value, LOST_COMMENT)
+                writer.lost = writer.lost or verdict.reason != NodeStatus.TRUNCATED.value
+                return None
+            held.release()
+            known = True
+        if verdict is not None and verdict.reason == TRANSFORM_FAILED:
+            writer.transform_failed(verdict.detail)
+            continue
         if verdict is not None:
             # The decode stopped here and said why; the rest of the run is the
             # tail a message deliberately leaves to whoever owns the run.
             stopped = _stopped_at(cursor, base)
             writer.undecoded(stopped, end, verdict.reason)
             writer.failed(verdict, stopped)
-            return
+            return verdict.reach if verdict.reason == NodeStatus.TRUNCATED.value else None
         writer.confirm()
+    return None
 
 
 def _drive_datagrams(step: _Step, writer: _Writer, stream: object) -> None:
@@ -541,13 +728,16 @@ def _drive_datagrams(step: _Step, writer: _Writer, stream: object) -> None:
         # following message cannot use it, so it is accounted for here. A
         # truncated datagram is a hole, so the *next* datagram's records do not
         # join these — across datagrams just as within a stream.
+        whole = verdict is None or verdict.reason == TRANSFORM_FAILED
         writer.undecoded(
             stopped,
             datagram.off_end,
-            NodeStatus.SKIPPED.value if verdict is None else verdict.reason,
+            NodeStatus.SKIPPED.value if whole or verdict is None else verdict.reason,
         )
         if verdict is None:
             writer.confirm()
+        elif verdict.reason == TRANSFORM_FAILED:
+            writer.transform_failed(verdict.detail)
         else:
             writer.failed(verdict, stopped)
 
@@ -577,6 +767,8 @@ def run(
     not passed: field granularity writes a unit sequence, message granularity
     carries the input's adjacency forward (``_adjacency``). A caller-
     supplied value would be a way to state something false about the file.
+    The decoder's :meth:`~kober.decoder.Decoder.params_digest` says which
+    configuration wrote it.
 
     Args:
         decoder: The decoder to drive.
@@ -595,6 +787,7 @@ def run(
         produced_at=produced_at,
         comment=comment,
         adjacency=_adjacency(root_emit(decoder.spec, decoder.emit)),
+        params_digest=decoder.params_digest(),
     ) as stage:
         for stream in stage.streams():
             decode_stream(decoder, stage, stream)
@@ -608,6 +801,7 @@ def run_compiled(
     produced_by: str,
     produced_at: int | datetime,
     comment: str | None = None,
+    params: Mapping[str, object] | None = None,
 ) -> None:
     """Decode one file into another with a generated module.
 
@@ -622,6 +816,10 @@ def run_compiled(
     prevent, and a module compiled against an older `zpf` was never tested
     against this one anyway.
 
+    The output carries the same ``params_digest`` the interpreter's would, from
+    the module's ``SPEC_DIGEST``, its granularity and ``params``. A module from
+    before ``SPEC_DIGEST`` existed writes none rather than a wrong one.
+
     Args:
         module: A module produced by :func:`kober.pygen.render` — anything with
             ``NAME``, ``VERSION``, ``EMIT`` and ``decode_from``.
@@ -630,8 +828,11 @@ def run_compiled(
         produced_by: What to record as the producer.
         produced_at: When, as ticks or a datetime.
         comment: Free-text note for the output's File Header.
+        params: The document's parameters, for a module whose spec declares
+            ``params:`` — every one in its ``PARAMS``.
 
     Raises:
+        ParameterError: If ``params`` does not match what the module declares.
         TypeError: If the module has no ``EMIT`` — it was generated by a kober
             before 0.3.0 and must be compiled again.
 
@@ -649,6 +850,8 @@ def run_compiled(
             "cannot be declared. Compile the spec again with `kober compile`."
         )
         raise TypeError(msg)
+    checked = document_params(module.NAME, getattr(module, "PARAMS", {}), params or {})
+    spec_digest = getattr(module, "SPEC_DIGEST", None)
     with zpf.decode_stage(
         source,
         sink,
@@ -657,9 +860,10 @@ def run_compiled(
         produced_at=produced_at,
         comment=comment,
         adjacency=_adjacency(Emit(emit)),
+        params_digest=None if spec_digest is None else params_digest(spec_digest, emit, checked),
     ) as stage:
         for stream in stage.streams():
-            decode_stream_compiled(module, stage, stream)
+            decode_stream_compiled(module, stage, stream, params=params)
 
 
 def content_registry(decoder: Decoder) -> zpf.ContentRegistry:

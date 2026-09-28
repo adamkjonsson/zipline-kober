@@ -73,11 +73,11 @@ is what the two misses had in common.
 | --- | --- |
 | `spec.py` | The frozen dataclass, and **the `FieldType` union** — easy to add the first and forget the second. |
 | `loader.py` | `_TYPE_KINDS` (and `_TYPE_KEYS`, which is what a field's *lifted* kind key is checked against), a builder, and the branch in `_field_type` that dispatches to it. A size kind wants `_SIZE_KINDS` and a branch in `_size`; a repeat kind wants `_REPEAT_KINDS` and one in `_repeat`. |
-| `check.py` | A branch in `_Checker._check_type` to validate it, and one in `_Scope._type_of` so a *later field can reference it*. The second is the one that gets missed: without it the construct works and nothing may name its value. |
+| `check.py` | A branch in `_Checker._check_type` to validate it, and one in `_Scope._type_of` so a *later field can reference it*. The second is the one that gets missed: without it the construct works and nothing may name its value. A construct that reads nothing where it stands also belongs in `_READS_NOTHING`, or #49's message tail stops seeing through it and a run after a gap stops resuming; `_reads_input` answers the terminal rule from the other side, by listing what does read. |
 | `decoder.py` | A branch in `Decoder._value`. The chain ends by naming what it does not implement, so a missing branch is an `undecodable` region rather than a traceback — do not restore a silent fall-through. |
 | `emit.py` | Only if the value is **not read from the bytes it cites**: what it cites (`_leaf`) and, for an integer with no declared width, `UNDECLARED_WIDTH`. |
 | `ops.py` | A branch in `_value`, and then **four walks**, each of which has bitten someone: `_kind_exprs` (its expressions — miss it and `parent`/`root` threading silently breaks), `_referenced` (units it can reach), `_kind_consumes` (whether it advances the position), `_types` (flattening a switch). |
-| `pygen.py` | Rendering in `_Function.read`, citation in `_Function.record`, and the annotation helpers. Or an explicit refusal — a `CompileError` naming the shape is a fine answer and better than generating something subtly different. |
+| `pygen.py` | Rendering in `_Function.read`, citation in `_Function.record`, and the annotation helpers; and `Binding._maybe_missing` if its field can hold nothing, so an expression naming it refuses rather than raising. Or an explicit refusal — a `CompileError` naming the shape is a fine answer and better than generating something subtly different. |
 | `cli.py` | A branch in `_render_type` — or `_render_size` / `_render_repeat` for those. **This is the one that has been missed twice.** |
 
 And outside the source:

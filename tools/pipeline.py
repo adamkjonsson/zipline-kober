@@ -28,7 +28,9 @@ It prints one line per check and exits non-zero if any failed.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
+import json
 import re
 import shutil
 import subprocess
@@ -62,6 +64,11 @@ SPECS = ("dns", "http")
 #: Requests in the generated HTTP stream, so the shape check knows how many start
 #: lines there can be: one request and one response each.
 HTTP_REQUESTS = 30
+
+#: What an HTTP/1.x start line looks like: a status line, or a request line
+#: ending in the version. Written here, not taken from the spec, so a spec that
+#: stops recognising its own start lines is caught rather than trusted.
+HTTP_START_LINE = re.compile(rb"^(HTTP/1\.[01] \d{3}( .*)?|[!-~]+ \S+ HTTP/1\.[01])$")
 
 #: Real captures from ``python-zipline-wire``. Only ``http_stream_1`` is one of
 #: the example protocols; the other three are there for their loss and
@@ -136,12 +143,21 @@ class Input:
         protocol: The example spec whose shape it carries, or ``None`` for a
             capture that is there for its stream structure alone.
         make: Writes the capture to the given path, from the given tools.
+        messages: How many messages the capture was generated with, in the
+            protocol's own direction and the other together, when that is
+            known: over a lossy stream, no more start lines than this may be
+            decoded.
+        inflates: Whether its bodies are `tools/gzip_http.py`'s compressed
+            documents: each ``http.content`` record must be one of them, and a
+            lossless capture must hold every one.
 
     """
 
     name: str
     protocol: str | None
     make: Callable[[Tools, Path], None]
+    messages: int | None = None
+    inflates: bool = False
 
 
 def _fuzzed_dns(tools: Tools, out: Path) -> None:
@@ -193,6 +209,41 @@ def _clean_http(tools: Tools, out: Path) -> None:
     _generated_http(tools, out, lossy=False)
 
 
+#: Responses in each generated stream of compressed bodies (`tools/gzip_http.py`).
+GZIP_RESPONSES = 30
+
+
+def _gzip_http(tools: Tools, out: Path, *, lossy: bool = True) -> None:
+    """Write HTTP responses with gzip and deflate bodies, over small segments.
+
+    The bodies are what the transform phase inflates, and they are large, so a
+    gap lands inside one routinely, which is where #49 lived. packeteer's own
+    HTTP payload cannot carry them, so they go through `tools/blob.yaml`.
+    """
+    stream, _ = gzip_http.build(GZIP_RESPONSES, seed=7)
+    pieces = gzip_http.messages(stream)
+    messages = out.with_suffix(".messages.json")
+    messages.write_text(json.dumps(pieces))
+    module = out.parent / "blob_protocol.py"
+    if not module.exists():
+        tools.packeteer_cmd(
+            "protocol", "compile", str(ROOT / "tools" / "blob.yaml"), "-o", str(module)
+        )
+    loss = ["--packet-loss", "0.05"] if lossy else []
+    tools.packeteer_cmd(
+        "--load-protocol", str(module), "stream", "--payload", "blob", "--protocol", "tcp",
+        "--server-port", str(gzip_http.PORT), "--protocol-messages", str(messages),
+        "--packets", str(len(pieces)),
+        "--client-ip", "10.0.0.2", "--server-ip", "10.0.0.1",
+        *loss, "--seed", "7", "--pcap", str(out),
+    )
+
+
+def _gzip_http_clean(tools: Tools, out: Path) -> None:
+    """Write the compressed-body stream with no loss at all."""
+    _gzip_http(tools, out, lossy=False)
+
+
 def _capture(name: str) -> Callable[[Tools, Path], None]:
     """Return a maker that copies one of the real captures."""
 
@@ -206,8 +257,10 @@ def _capture(name: str) -> Callable[[Tools, Path], None]:
 INPUTS = (
     Input("dns_fuzz", "dns", _fuzzed_dns),
     Input("dns_gen", "dns", _generated_dns),
-    Input("http_gen", "http", _generated_http),
+    Input("http_gen", "http", _generated_http, messages=2 * HTTP_REQUESTS),
     Input("http_clean", "http", _clean_http),
+    Input("gzip_lossy", "http", _gzip_http, messages=GZIP_RESPONSES, inflates=True),
+    Input("gzip_clean", "http", _gzip_http_clean, inflates=True),
     *(
         Input(name, "http" if name.startswith("http") else None, _capture(name))
         for name in CAPTURES
@@ -236,6 +289,8 @@ def _load(path: Path, name: str) -> ModuleType:
 
 #: The one definition of "block for block", shared with the suite.
 _COMPARE = _load(ROOT / "tests" / "zpfcompare.py", "zpfcompare")
+#: The builder of the compressed-body streams, loaded as `zpfcompare` is.
+gzip_http = _load(ROOT / "tools" / "gzip_http.py", "gzip_http")
 
 
 @dataclass
@@ -303,6 +358,16 @@ def _roles(path: Path) -> Counter[str]:
             if isinstance(block, Record) and block.role:
                 roles[re.sub(r"\[\d+\]", "[]", block.role)] += 1
     return roles
+
+
+def _start_lines(path: Path) -> list[bytes]:
+    """Return every start line a field-granularity HTTP file wrote, in order."""
+    with zpf.open(path) as handle:
+        return [
+            bytes(block.payload)
+            for block in handle.blocks()
+            if isinstance(block, Record) and block.role == "http.start_line"
+        ]
 
 
 def _pointers(path: Path) -> tuple[int, int]:
@@ -416,10 +481,44 @@ def _shape(report: Report, source: Input, path: Path, transport: Path, what: str
             # that stopped early and left its tail to be read as further
             # messages — how both HTTP bugs of that kind showed. Loss can only
             # make there be fewer.
-            limit = 2 * HTTP_REQUESTS if source.name == "http_gen" else None
+            limit = source.messages
             ok = found[0] > 0 and (limit is None or found[0] <= limit)
             detail += f" (lossy: at most {limit} start lines)" if limit else " (lossy)"
+        # A count can hide a phantom when a gap also took a real start line, and
+        # `http_gen` had two that way from 0.4.0 until #50: so every start line
+        # must also look like one.
+        phantoms = [line for line in _start_lines(path) if not HTTP_START_LINE.match(line)]
+        if phantoms:
+            ok = False
+            detail += f"; {len(phantoms)} not a start line, e.g. {phantoms[0][:30]!r}"
         report.line(ok, f"{what} shape", detail)
+        if source.inflates:
+            _inflated(report, source, path, transport, what)
+
+
+def _inflated(report: Report, source: Input, path: Path, transport: Path, what: str) -> None:
+    """Check that every inflated body is a document that was sent, and how many were.
+
+    A digest is the whole claim: an `http.content` record that is not byte for
+    byte a document the generator compressed is a body inflated wrong. Without
+    loss every compressed body must be inflated; with loss, at least one, since
+    a body a gap cut is never read.
+    """
+    digests = []
+    with zpf.open(path) as handle:
+        for block in handle.blocks():
+            if isinstance(block, Record) and block.role == "http.content":
+                digests.append(hashlib.sha256(bytes(block.payload)).hexdigest())
+    _, responses = gzip_http.build(GZIP_RESPONSES, seed=7)
+    sent = {response.digest for response in responses if response.coding != "identity"}
+    compressed = sum(1 for response in responses if response.coding != "identity")
+    foreign = [digest for digest in digests if digest not in sent]
+    lossless = _reference_http(transport) is not None
+    ok = not foreign and (len(digests) == compressed if lossless else bool(digests))
+    detail = f"{len(digests)} bodies inflated, of {compressed} sent compressed"
+    if foreign:
+        detail += f"; {len(foreign)} not a document that was sent"
+    report.line(ok, f"{what} inflated", detail)
 
 
 def _compile(spec: Spec, name: str, emit: Emit, work: Path) -> ModuleType:

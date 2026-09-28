@@ -2,7 +2,7 @@
 
 Expressions appear wherever a spec needs a value it cannot know in advance: a
 size, a repeat count, a condition, a switch's dispatch, a unit argument, a
-guard.
+guard, a select's predicate and projection, a transform's arguments.
 
 ```yaml
 size: {expr: "header.length * 4"}
@@ -16,8 +16,9 @@ exists**.
 
 ## The language
 
-Arithmetic, comparison, boolean operators, references, and literals. No calls,
-no loops, no indexing, no conditional expressions.
+Arithmetic, comparison, boolean operators, references, literals, and the
+closed table of [functions](#functions) below. No other calls, no loops, no
+indexing, no conditional expressions.
 
 | | |
 | --- | --- |
@@ -30,8 +31,9 @@ no loops, no indexing, no conditional expressions.
 Precedence and associativity are Python's, because the parser is Python's —
 `ast.parse` in expression mode, with a whitelist of node types. That is why "no
 calls, no loops" holds by construction: a construct is refused because it is
-absent from the whitelist, and refused **by name** (`a function call is not
-allowed in an expression`) rather than by an AST class.
+absent from the whitelist, and refused **by name** (`'foo' is not one of the
+expression language's functions; there are only endswith(), lower(),
+startswith(), to_int(), trim()`) rather than by an AST class.
 
 ### Four types, and no coercion
 
@@ -73,8 +75,15 @@ Follows Kaitai. A bare name is shorthand for `this`.
 | `parent.` | The unit that referenced this one |
 | `root.` | The entry unit |
 
-Unit parameters are in scope by name. A dotted path descends into a nested
-unit: `header.length` reads the `length` field of the `header` field's unit.
+Unit parameters are in scope by name, and so are the document's
+[`params`](document.md#params), in every unit. A dotted path descends into a
+nested unit: `header.length` reads the `length` field of the `header` field's
+unit.
+
+A [`transform`](types.md#transform)'s field is its output: bytes, or the unit
+its `type` names, into which a dotted path descends as into any other. A
+value read that way cites the transform's range, since the output's offsets
+name no input byte.
 
 ### A field may only reference fields declared before it
 
@@ -108,7 +117,7 @@ back.
 
 ## Functions
 
-The language has exactly three, and they are the whole of what it can call:
+The language has exactly five, and they are the whole of what it can call:
 
 | Call | Result | Meaning |
 | --- | --- | --- |
@@ -116,17 +125,24 @@ The language has exactly three, and they are the whole of what it can call:
 | `to_int(s, base)` | int | The same, in `base` — 2 to 36. |
 | `lower(s)` | str | Lower-case text, for a case-insensitive comparison. |
 | `trim(s)` | str | Text without leading or trailing whitespace. |
+| `startswith(s, prefix)` | bool | Whether `s` begins with `prefix`, case and all. |
+| `endswith(s, suffix)` | bool | Whether `s` ends with `suffix`, case and all. |
 
 ```yaml
 size: {expr: "to_int(length_header)"}          # Content-Length: 1234
 size: {expr: "to_int(chunk_size, 16)"}         # a chunked-encoding chunk header
 condition: "trim(lower(transfer_encoding)) == 'chunked'"
+confirm: "startswith(start_line, 'HTTP/') or endswith(start_line, ' HTTP/1.1')"
 ```
 
 They exist because real HTTP framing needs them and nothing else did: a
 `Content-Length` is a decimal string, a chunk size is a hexadecimal one, and
 whether chunked framing applies depends on matching a header value whose case
-varies and which carries whatever whitespace followed the colon. Those needs
+varies and which carries whatever whitespace followed the colon. A prefix and
+a suffix say what a start line looks like, which is how a spec refuses a guess
+after a gap, and that `chunked` is the *last* transfer coding in a list such
+as `gzip, chunked`. Both compare exactly; for a case-insensitive test, lower
+the text first. Those needs
 are the table, and it is meant to stay that size.
 
 **`to_int` is stricter than most languages' equivalent.** Surrounding
@@ -161,18 +177,21 @@ no method on a value, no import. It has no substring, no search, and no loop.
 
 **A byte transform is not a candidate for the table.** Decompression and
 decryption map bytes to bytes and feed a sub-decode with its own offset space,
-where a function here maps one value to another. They need an extension point
-of their own — see `DESIGN.md` §11 — and adding one as a third row would cost
-`check` its static answer, since a spec's validity would then depend on what a
-caller had registered.
+where a function here maps one value to another. They have a field type of
+their own, [`transform`](types.md#transform), whose names a registry binds
+when a decoder is built. As a row here they would have cost `check` its
+static answer, since a spec's validity would then depend on what a caller had
+registered.
 
 ## Decode-time failure
 
-Two things a total, side-effect-free language still cannot rule out
-statically, both of which make the affected region `undecodable` rather than
-raising:
+What a total, side-effect-free language still cannot rule out statically, each
+of which makes the affected region `undecodable` rather than raising:
 
 - **Division or modulo by zero**, where the divisor came off the wire.
 - **A shift count that is negative or absurd.** `1 << n` with `n` from the wire
   is a memory-exhaustion vector, so counts above
   {data}`kober.expr.MAX_SHIFT` are refused rather than computed.
+- **Text that is not a number**, handed to `to_int`.
+- **A field that holds nothing**: one its `condition` left absent (`'a' has not
+  been decoded`), or a transform that failed (`'doc' failed:` and why).

@@ -218,9 +218,11 @@ class Builtin:
 #: bounded operation on a value that has already been decoded.
 #:
 #: The signatures here are exactly what real HTTP asked for (§13.2) — a decimal
-#: string, a hexadecimal string, a case-insensitive match, and the surrounding
-#: whitespace an HTTP field value is allowed to carry — and the table is meant
-#: to stay that small. A *transform* (decompression, decryption) is not a
+#: string, a hexadecimal string, a case-insensitive match, the surrounding
+#: whitespace an HTTP field value is allowed to carry, and (#50) a prefix and a
+#: suffix: what a start line looks like, which is how a spec refuses a guess
+#: after a gap, and ``chunked`` being the *last* transfer coding — and the table
+#: is meant to stay that small. A *transform* (decompression, decryption) is not a
 #: candidate for it: a builtin maps a value to a value, where a transform maps
 #: bytes to bytes and feeds a sub-decode, and it needs an extension point of its
 #: own rather than another row here.
@@ -243,6 +245,18 @@ BUILTINS: Mapping[str, Builtin] = MappingProxyType(
             required=1,
             returns=ExprType.STR,
             doc="Text without leading or trailing whitespace.",
+        ),
+        "startswith": Builtin(
+            params=(ExprType.STR, ExprType.STR),
+            required=2,
+            returns=ExprType.BOOL,
+            doc="Whether text begins with a prefix, case and all.",
+        ),
+        "endswith": Builtin(
+            params=(ExprType.STR, ExprType.STR),
+            required=2,
+            returns=ExprType.BOOL,
+            doc="Whether text ends with a suffix, case and all.",
         ),
     }
 )
@@ -727,6 +741,10 @@ def _eval_call(expr: Call, env: Environment) -> ExprValue:
         return _as_str(values[0], "lower()").lower()
     if expr.name == "trim":
         return _as_str(values[0], "trim()").strip()
+    if expr.name == "startswith":
+        return _as_str(values[0], "startswith()").startswith(_as_str(values[1], "startswith()"))
+    if expr.name == "endswith":
+        return _as_str(values[0], "endswith()").endswith(_as_str(values[1], "endswith()"))
     base = 10 if len(values) == 1 else _as_int(values[1], "to_int()")
     return to_int(_as_str(values[0], "to_int()"), base)
 

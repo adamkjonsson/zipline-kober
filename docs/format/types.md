@@ -299,6 +299,167 @@ value that is not a number, say — makes the field `undecodable`, exactly as an
 unevaluable size does. It is not quietly treated as "no match", because that
 would report the author's default as though it were read from the input.
 
+### `concat`
+
+```yaml
+- name: chunks
+  unit: chunk
+  until: "chunks.length == 0"
+- name: joined
+  concat: chunks.data
+```
+
+The bytes of one field of every element of a repetition, joined in order: what
+a chunked HTTP body carries, as one value. `concat` names the repeated field
+and the field of each element, as `repeated.member`. The repeated field is
+declared earlier in the same unit, its elements are units, and the member is a
+single bytes field.
+
+It reads nothing and moves no position; the repetition has already read every
+byte. At field granularity it cites the **hull** of what it joined, from the
+first non-empty member's first byte to the last one's last. The size lines and
+line endings between the pieces are cited twice, once by their own fields and
+once here, which the format allows. An empty member, such as the last chunk's
+data, cites nothing.
+
+Its value is bytes, so a later field can reference it, and a `transform` can
+read it. That is the point of it being a field: a `switch` with a `concat`
+case and a `bytes` case gives one field that holds a body however it was
+framed.
+
+A `concat` cannot repeat.
+
+### `transform`
+
+```yaml
+- name: content
+  transform:
+    from: body
+    with: gzip
+    limit: 16777216
+    type: {unit: document}
+```
+
+Bytes already decoded, after a named transform, and optionally what they
+are.
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `from` | **yes** | An earlier field that is bytes on every branch (`bytes`, a `concat`, a `transform` with no `type`, or a `switch` of those), or a `bytes` parameter. |
+| `with` | **yes** | The transform. A core name, or one declared under the document's [`transforms`](document.md#transforms). |
+| `limit` | **yes** | The most bytes the output may have. |
+| `args` | no | The transform's parameters, as expressions, by name. Exactly those the declaration lists. |
+| `type` | no | What the output is. Decoded in the output's own offset space. |
+| `content_type` | no | The record label for an output kept as bytes: `prim:…`, `mime:type/subtype` or `dec:…`. Only without `type`. |
+
+It reads nothing where it stands. Like `select`, it reads a field already
+decoded, never the position, so a transform may follow a field that reads to
+the end of the message. `limit` is required because a transform with no bound
+is not total: a kilobyte of gzip inflates to a gigabyte.
+
+With a `type`, the output is decoded as that type, from its first byte. What
+the file says about it is always about **input** bytes, since the output has
+no offset space a file can name: every record read from the output cites the
+transform's source. Without a `type`, the output is the field's value, as
+bytes, and its record is labelled `content_type`.
+
+`args` are typed against the transform's declaration by `check`, before any
+data exists and with nothing registered: a spec is valid or not the same way
+in every process. A key, which a spec cannot hold, is a
+[document parameter](document.md#params).
+
+A `transform` cannot repeat, and its source may not be `emit: none`: the
+transform's outcome is what speaks for the source's bytes.
+
+A transform may be a `switch` case, which is how a content coding chooses one:
+
+```yaml
+- name: content
+  condition: "encoding == 'gzip' or encoding == 'deflate'"
+  switch:
+    dispatch: encoding
+    cases:
+      deflate: {transform: {from: body, with: deflate, limit: 16777216}}
+    default: {transform: {from: body, with: gzip, limit: 16777216}}
+```
+
+**A transform that fails does not fail its message.** Bad compressed data, an
+output past `limit`, an argument that cannot be evaluated, an output its `type`
+does not decode or does not read to its end: the message still decodes whole,
+and the transform's source is what is named `undecodable`. Its node in the
+tree says `failed`, with why. A short read inside an output is never
+`truncated`, since the input it came from arrived whole.
+
+At field granularity every record read from an output cites the transform's
+source and argument fields, and the source is not written as a record of its
+own: the output speaks for it. A transform that failed names its source's bytes
+`undecodable`, and one marked `emit: none` names them `skipped`. A source that
+is a `concat` has no bytes of its own, only its members', and its range also
+covers the framing between them, such as a chunked body's size lines. So its
+members are what the transform takes over: when it fails, each member's record
+is taken back and each non-empty member is named `undecodable`, while the size
+lines keep their records. An argument field marked `emit: none` is spoken for
+by an output that succeeded, which cites it, so it names nothing then, and is
+`skipped` when the transform fails. That is how a tunnel's header, a nonce
+say, stays out of a first stage's output while the plaintext cites it: one
+record per datagram, for a second stage to read. At message granularity the
+message record holds the input as it arrived, so a failed transform is not
+visible in the file there, only in the tree.
+
+A message whose transform failed decoded whole, so the stream goes on after
+it. It neither confirms the stream nor declines it: a transform is often a
+protocol's only real check of identity, a tag that verifies, and a failure is
+evidence of neither. A stream in which every message that decoded had a
+transform fail is declined at its end, saying so.
+
+`kober compile` compiles both, and the module writes the same file as the
+interpreter. It decodes a transform's output only when its `type` is a unit,
+by calling that unit's function over the output. Any other `type` is refused
+with a `CompileError`; wrap it in a unit, or decode with the interpreter. So
+is a source whose `switch` joins different members on different branches, at
+field granularity, since the module could not say whose bytes failed. A
+generated module binds its transforms when it is imported, from the registry
+`kober.transforms.register` fills, so a program registers a cipher before
+importing the module. A failed transform leaves a
+`kober.runtime.TransformFailed` in its field, saying why in the interpreter's
+words.
+
+#### Transform names
+
+A name means a specification, not a library, so it means the same thing to
+every implementation. Names in the **core** tier are bound by every backend
+and may be used without declaring them. A spec using an **extended** name
+declares it under `transforms`, which is how it says it is not portable; a
+backend may decline one.
+
+| Name | Tier | Defined by | What it is | Bound by kober |
+| --- | --- | --- | --- | --- |
+| `gzip` | core | RFC 1952 | The gzip file format. | yes |
+| `deflate` | core | RFC 1950 | The zlib format: DEFLATE with a header and a checksum. | yes |
+| `deflate-raw` | core | RFC 1951 | DEFLATE with no header. | yes |
+| `br` | extended | RFC 7932 | Brotli. | no: the standard library has no Brotli |
+| `zstd` | extended | RFC 8878 | Zstandard. | on Python 3.14 and later |
+| `bzip2` | extended | bzip2 1.0.6 file format | bzip2. | yes |
+| `xz` | extended | The .xz File Format 1.2.1 | xz, LZMA2 in a container. | yes |
+
+`deflate` is the zlib format, as it is in HTTP's `Content-Encoding` and in the
+browser's `DecompressionStream`; raw DEFLATE is `deflate-raw`. So a header's
+value can be used as it stands.
+
+Any other name is the spec's own, a cipher say, declared with its parameters.
+
+**What a name is bound to is the program's business, not the spec's.** kober
+binds what the Python standard library can run, and a program adds the rest
+with {func}`kober.transforms.register`, or a {class}`kober.transforms.Registry`
+of its own, or from the command line in a module `--load-transforms` runs: a
+cipher, which the standard library has none of, or `br` from a Brotli package.
+A transform is a callable taking the source's bytes, `limit`, and the spec's
+`args` by name, and returning at most `limit` bytes. What it
+raises makes the source `undecodable`, and its message is never written out: a
+cipher's error text can hold a key. A name a spec uses that nothing binds is
+refused before any input is read, saying whether it is a well-known name this
+backend does not bind or a name of the spec's own that nothing registered.
+
 ## `const`
 
 A value the decoded field must equal — the ordinary way a decoder refuses
@@ -389,8 +550,8 @@ trailing field to fail on an empty cursor.
 rejected. An integer contributes its `bits`; a `bytes` or `string` sized `fixed`
 contributes its length; a nested unit contributes the sum of its own fields; a
 `switch` counts only when every case *and* a present `default` agree on a width.
-A `computed`, `select` or `pointer` reads nothing where it stands and so claims
-none of the trailer.
+A `computed`, `select`, `pointer`, `concat` or `transform` reads nothing where
+it stands and so claims none of the trailer.
 
 Refused, because each would make the boundary a guess: a trailing field with a
 `condition`, a repeat whose count the spec does not fix, a trailing size that is
@@ -435,8 +596,9 @@ the message through 'data', but 'trailer' is decoded after it and would have
 no bytes left
 ```
 
-A field that reads nothing where it stands — a `computed`, `select` or
-`pointer` — may follow, since nothing starves it. A `remaining` inside a
+A field that reads nothing where it stands — a `computed`, `select`,
+`pointer`, `concat` or `transform`, or a `switch` whose every case is one of
+those — may follow, since nothing starves it. A `remaining` inside a
 `pointer`'s target counts for nothing either: the target is read on its own
 cursor at another offset. A `remaining` under a `repeat` is refused outright,
 as a repeating `fill` is. The rule is the same under `input: stream`, and the

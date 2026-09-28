@@ -1,17 +1,17 @@
 # kober — design
 
 **Status:** implemented, exercised against real captures, and released as
-`0.x` — `v0.1.0` to `v0.3.0`, and now `0.4.0`, each pinning one `zpf` minor.
-The spec model, expression language, checker, decode engine, emitter, stage
-driver, all five CLI verbs, the **compiler** (§14), and the `Pointer` construct
-(§3.2) exist, in both implementations. What is *not* built is marked as such:
+`0.x` — `v0.1.0` to `v0.5.0`, each pinning one `zpf` minor. The spec model, expression language, checker, decode engine,
+emitter, stage driver, all five CLI verbs, the **compiler** (§14), the
+`Pointer` construct (§3.2), and byte transforms (§3.2, revision 12) exist, in
+both implementations. What is *not* built is marked as such:
 everything in §11 that is still a question.
 
 **Sections marked [verified] were executed, not reasoned about** — against
 `zpf` by [`pressure_test.py`](pressure_test.py), and since revision 6 against
 real captures too.
 
-Revision 11. Revision 1 was written blind and got the layer wrong — it invented
+Revision 12. Revision 1 was written blind and got the layer wrong — it invented
 reassembly, gaps, and provenance that `zpf` already provides. Revision 2 fixed
 that against the source. Revision 3 added the results of an executable pressure
 test (§10) and treated this project as what it is: **a load test of `zpf`, where
@@ -123,6 +123,27 @@ its second application: a field starved under `check=False`. And the entry
 unit's `emit` now wins over the decoder's in both implementations, as the
 chain in §4 always said.
 
+Revision 12, for `0.5.0`, begins with what a gap leaves behind (#49). §3.1
+gains *After a gap*: a run after a gap resumes where the message the gap cut
+ends, when that is known, and otherwise believes its first message only once
+it has decoded whole. A lossy capture with large bodies had shown every gap
+landing inside a body and the rest of that body read as a new message, which
+swallowed the real one behind it. The same work found that §3.1's promise
+about guards held for the file at message granularity only: at field
+granularity a unit its `confirm` refused was written field by field. Both
+implementations now hold a guarded unit's records until its guard has held.
+The expression language gains `startswith` and `endswith` (#50), so the HTTP
+spec can say what its start line looks like, and a refused attempt after a gap
+is retried where it stopped rather than losing its run.
+
+The rest of revision 12 is **byte transforms** (#46): decompression, and
+decryption with a caller's cipher. §3.2 gains `Transform` and `Concat`, and
+§2.1 a cursor over bytes that are not input. §3.1 gains the rule for a
+transform that fails: it neither confirms nor declines. §6 gains document
+parameters, a key say, and the registry that binds a transform's name. §11.5
+records that its deferred branch was taken and where the line sits now, and
+§13.6 what the compressed-body corpus found.
+
 Claims below marked **[verified]** were executed, not reasoned about: against
 `zpf` 0.16 by the script in §10, and against real captures as recorded in §13.
 
@@ -182,6 +203,12 @@ when this doesn't match":
   stream is **declined**: no record for any of it, what was tried
   `undecodable` and the rest `skipped`, every region commented `not <spec>: …`
   (§3.1, *A stream is confirmed before it is believed*)
+- the bytes after a gap that finish a message the gap cut, when its end is
+  known → `reason="skipped"`, commented `rest of a message cut by a gap`; an
+  attempt after a gap that does not decode whole, when it is not →
+  `reason="undecodable"`, commented `no message boundary found after a gap`,
+  retried where it stopped if a guard refused it and otherwise to the end of
+  the run (§3.1, *After a gap*)
 
 **What the guarantee is not: leaves do not tile the input.** Until `Pointer`
 (§3.2) existed, every leaf covered a distinct range and the leaves together
@@ -351,6 +378,20 @@ unchanged, and each check is verified against the consuming version. This is
 the general lesson of §2.1 arriving again: what makes a rule defensible is the
 check, and a check has to be aimed at the rule rather than near it.
 
+#### A cursor over bytes that are not input — revision 12
+
+`Transform` (§3.2) decodes its `type` on a cursor over its **output**: bytes
+that exist nowhere in the input, at offsets of their own. That is the first
+cursor over something the spec did not read, and the rule still holds, for
+the reason `Pointer`'s second cursor did: the spec names *which* bytes, as a
+field already decoded, and never a position. A transform reads nothing where
+it stands; the enclosing position is the same after it as before, and that is
+fuzzed against an implementation that consumes a byte. What runs is a
+callable bound to a name, but it is given bytes and returns bytes: it never
+sees a cursor, so it cannot move one. **Strict**: an output its `type` does not
+read to the end fails the transform, so a successful one is read byte for
+byte, which is the output's own coverage guarantee.
+
 ## 3. Spec model
 
 Frozen dataclasses, `from __future__ import annotations` throughout.
@@ -418,7 +459,12 @@ class Field:
 `confirm`/`reject` survive from revision 1 and matter more here than they did
 in Spicy, because rejecting cleanly is how a wrong protocol guess becomes an
 honest `undecodable` region instead of a fabricated field tree — and, on a
-stream's first message, how a whole stream is declined (below).
+stream's first message, how a whole stream is declined (below). The fields a
+refused unit read stay in the tree, since they say what was read, and none of
+them is written: the emitter skips a node marked `refused`, and a generated
+module writes a guarded unit through a `Held` sink that its guard releases.
+A guard that cannot be decided has not held, and refuses the same way. Until
+revision 12 this was true at message granularity only.
 
 `const` is the same need one field wide, and the timing is why it is not just a
 `confirm`. A guard runs **once the unit's fields are decoded**; a run holds as
@@ -501,6 +547,89 @@ Confirmation is per stream: per direction of a TCP session, per participant of a
 chained stage's input. Held output costs memory in proportion to the
 unconfirmed prefix, which for a stream that never confirms is all of it, since
 the decline that ends it cannot come earlier.
+
+**A message whose transform failed neither confirms nor declines** (0.5.0).
+Its framing held, so it decoded whole and the run goes on after it. But a
+transform is often a protocol's only real check of identity, a tag that
+verifies under the key, so its failing is evidence of neither: the next
+message decides. A stream that ends unconfirmed with every message that
+decoded having had a transform fail is declined, commented `every message
+that decoded had a transform fail; the first: …`. That is what a wrong key
+looks like, and nothing in the bytes can tell it from a wrong protocol, so the
+comment says what was seen rather than guessing which.
+
+#### After a gap (0.5.0)
+
+A message may not span a hole, so the driver decodes a byte stream run by run,
+and a run after a gap starts wherever the gap left off. That is usually inside
+a message. Until 0.5.0 the driver decoded from there as though a message began,
+and on a lossy capture with large bodies (#49) every one of 8 gaps landed in a
+body. The rest of the body became a start line; where the body had no line
+ending, that "start line" ran on into the next real status line, and the real
+response's headers and body were read as the phantom's. Four real responses
+were swallowed that way, and four junk messages were written.
+
+Two rules, depending on what the driver knows:
+
+- **Where the cut message said where it ends, resume there.** A field is
+  *message-tail* when nothing after it in its unit reads a byte, it is not
+  repeated, and its unit is reached only from such fields
+  (`kober.check.message_tail_fields`, a greatest fixed point over the unit
+  references). A fixed-size or counted read of one that runs out knows the
+  message's end: where the read would have ended. Both implementations report
+  it on the truncation (`TruncatedRead.reach`, `Node.reach`) and only for
+  those fields, so they agree by construction. The next run resumes there, and
+  the bytes before it are `skipped`, commented `rest of a message cut by a
+  gap`: what they are is known, and they are passed over on purpose. A run
+  lying wholly inside the cut message is all `skipped`, and the one after
+  still resumes.
+- **Where nothing said, hold the first message.** It is written through a
+  `Held` sink and released only if it decodes whole. If not, what it wrote is
+  dropped, since a partial tree read from the middle of a body is a
+  fabrication, and its bytes are `undecodable`, commented `no message
+  boundary found after a gap`. **If a guard refused it**, it was read far
+  enough for the guard to run, so where it stopped is known, and the next
+  attempt starts there, held in the same way. Any other failure (running out
+  of input, a field that could not be decoded) leaves no such place, and the
+  rest of the run is lost. None of these attempts confirms or declines the
+  stream: they say nothing about the protocol. A stream that ends
+  unconfirmed is declined as before, and its comment says that attempts
+  found no boundary when one failed other than by running out.
+
+**The retry after a refusal was not in the first version of this rule**, and
+#50 is what showed it was needed. With it, the HTTP spec says what a start line
+looks like, so it refuses the phantoms a gap leaves. Without the retry, a
+refused attempt lost the rest of its run; the next run then had no known end
+either, its attempt was refused in turn, and the loss cascaded to the end of
+the stream. On the lossy gzip capture that recovered **6 of 30** responses, where
+the spec without a `confirm` had recovered 30 by luck. With the retry it
+recovers all 30 with no phantom, and `http_gen` keeps its 58 real start lines
+and loses its 2 phantoms.
+
+**What was weighed against it: scanning byte by byte.** After any failed
+attempt, try again one byte later until an attempt decodes whole with its
+guards holding. It is the more thorough of the two. It cannot step over a real
+message start, which a retry after a refusal can when the refused attempt ran
+into one: a phantom whose "start line" runs on into a real status line takes
+that message with it. And it recovers after a failure that is not a refusal,
+where the retry gives up. It was measured on the same two inputs and recovered
+**exactly what the retry did** (30 of 30, 58 of 58), at 1.30 s against 0.02 s on
+the gzip capture. Each attempt is a whole decode from its byte, so the cost
+grows with the square of the distance to the next real message, and a
+megabyte body cut by a gap would take minutes. It also leans harder on the
+spec's guard, since it tries thousands of offsets per gap and stops at the
+first one that parses. The case it wins, a gap swallowing the end of a message
+whose length is not known and then a refused phantom running over the next
+real start, was in neither input, because rule 1 takes the length-framed case
+first. It remains the fallback to add if a capture shows that case mattering.
+
+**The limit, and whose it is.** A first message after a gap that happens to
+decode whole, and that no guard refuses, is believed. Only the spec can refuse
+it, with `const` or `confirm` on what the start of its message looks like.
+`examples/http.yaml` does since #50 (`startswith`/`endswith`): a start line is
+a status line or a request line, and a chunk-size line or a body's tail is
+neither. A spec with no such guard resynchronises only by luck, as the HTTP
+spec did before it.
 
 `Spec.foreign` holds the keys a document used that belong to **packeteer's**
 dialect of this format — `over`, `ports`, `derive`, `sensitive`. Recognised,
@@ -617,6 +746,11 @@ They do so only when the field started with nothing left to read, since
 `check` ignores conditions and a `remaining` that was absent from a message
 starves nothing: a field after it that runs out is really `truncated`.
 
+The third application is a short read inside a transform's output (0.5.0). The
+input it came from arrived whole, so running out of output is the output's
+fault: the transform fails, worded `<name> output does not decode: it ends
+before its type does`, and nothing is `truncated`.
+
 #### `Select` — asking a question about a repetition, revision 9
 
 ```python
@@ -691,6 +825,59 @@ The blank line ending a header block falls out of that with no special case: it
 has no colon before its CRLF, so an optional bounded terminator takes nothing
 and both halves come back empty.
 
+#### `Transform` and `Concat` — revision 12
+
+```python
+@dataclass(frozen=True)
+class Transform:          # bytes already decoded, after a named transform
+    source: str           # an earlier field that is bytes on every branch
+    name: str             # `with:`: core (gzip, deflate, deflate-raw) or declared
+    limit: int            # the most bytes the output may have; required
+    args: Mapping[str, Expr]
+    type: FieldType | None        # what the output decodes as; None keeps bytes
+    content_type: str | None      # the record label for kept bytes
+
+@dataclass(frozen=True)
+class Concat:             # one member of every element, joined
+    repeated: str
+    member: str
+```
+
+`Concat` exists because `from:` names one field and HTTP frames a body two
+ways. `body` becomes one switch with a `concat` case and a `bytes` case, and
+one transform inflates it. It cites its non-empty members' hull, first to
+last: an empty member cites nothing, which keeps the terminating chunk's size
+line out of it.
+
+**The outcome speaks for the source.** On success the output's records cite
+the transform's range in the input, its source and every field its `args`
+read, and the source is not written as a record of its own; nothing read
+inside the output becomes a region, since a region names input bytes. On
+failure the source is `undecodable`, the argument fields keep their records,
+and the message goes on. A `concat` source has no bytes of its own, so its
+members are taken over one by one: each member's record is taken back and each
+non-empty member named, while the framing between them keeps its records. An
+argument field marked `emit: none` is spoken for by an output that succeeded,
+which cites it, and is `skipped` when it fails. Each of these rules exists
+because a byte both cited and undecoded is the one thing the guarantee
+forbids, and the first versions of two of them allowed it.
+
+**A name means a specification**, not a library: `gzip` is RFC 1952,
+`deflate` RFC 1950 as in HTTP and the browser, `deflate-raw` RFC 1951. Those
+three are core and every backend binds them. `br`, `zstd`, `bzip2` and `xz`
+are extended and a spec declares them, which is how it says it is not
+portable; any other name is the spec's own, a cipher, declared with its
+parameters' types. `check` types all of it from the spec alone, with no
+registry, so a spec is valid or not whatever a process has bound. Binding
+happens when a decoder is built, or a generated module imported, and a name
+nothing binds is refused there, before any input.
+
+**The limit is enforced as the output is produced**, not after, so a
+decompression bomb stops at it in memory it bounds. A callable's exceptions
+become `TransformError` in kober's words; a caller's message is never passed
+on, since a cipher's can hold a key and a region's comment is written into the
+file.
+
 ### 3.3 Expressions
 
 Small, total, side-effect free: arithmetic, comparison, boolean ops, field
@@ -752,7 +939,7 @@ its static answer, since a spec's validity would come to depend on what a
 caller had registered. That extension point is question 5's *hooks* branch, and
 the shape it wants is the spec **naming** a transform while a registry supplies
 it — the spec file staying data, which is also what keeps a non-Python backend
-possible.
+possible. It was built that way in revision 12, as a field type (§3.2).
 
 This is the "richer expressions" branch of question 5, taken.
 
@@ -990,10 +1177,32 @@ run_compiled(dns, "raw.zpf", "decoded.zpf", produced_by="kober 0.1", produced_at
 A generated module imports :mod:`kober.runtime` and nothing else from here, so
 a decoder built from a spec ships without the machinery that built it.
 
+Revision 12 adds what a transform needs from the caller:
+
+```python
+from kober import Decoder, Registry
+
+transforms = Registry.standard()                 # gzip, deflate, … from the stdlib
+transforms.register("aes-gcm", my_aes_gcm)       # a cipher: the caller's, always
+decoder = Decoder(spec, params={"key": key}, transforms=transforms)
+decoder.params_digest()                          # what the output's descriptor says
+
+import tunnel                                    # binds from kober.transforms.DEFAULT
+tunnel.decode(datagram, params={"key": key})
+```
+
+`params:` are the document's parameters, typed in the spec and supplied once
+per decode, never per message. Every declared one is required, since a run
+missing one could not be reproduced, and none is ever quoted in a message.
+They go into the Decoder Descriptor's `params_digest`, a secret one only
+hashed, so a file says which configuration wrote it. The CLI takes them as
+`--param NAME=VALUE` and a module of the caller's transforms as
+`--load-transforms MODULE`, which runs as code because it is code.
+
 CLI, one verb per API entry point:
 
 ```
-kober run     SPEC IN.zpf -o OUT.zpf [--emit field|message]
+kober run     SPEC IN.zpf -o OUT.zpf [--emit field|message] [--param NAME=VALUE]
 kober check   SPEC                      # validate + type expressions
 kober show    SPEC                      # human-readable field tree
 kober try     SPEC --hex 0a0b           # decode one buffer, print tree
@@ -1264,6 +1473,22 @@ Q5 a per-field record can carry its name — via `comment=`, with §4.1's caveat
    Still on the far side and still refused: **specs are Python**. Nothing here
    moved it.
 
+   **The branch was taken — revision 12**, in the shape described above, and
+   it is worth saying which side of the line it landed on. A transform is a
+   registered callable, which is closer to a hook than anything before it. But
+   it gets bytes and returns bytes, cannot see a position, and is declared in
+   the spec with its parameters' types, so `check` stays static: a spec is
+   valid or not whatever a process has registered, and only *running* one
+   needs the registry. The spec file is still data, and a second backend can
+   bind the same names. What an author can add is a transform, not a place in
+   the decode: nothing registered decides where a field starts or ends.
+
+   What stays out, for now: **state between messages**. TLS 1.3's nonce
+   counter, deflate with context takeover, HPACK's dynamic table all carry
+   something from one message to the next, and a step is per message. A
+   stream-scoped instance is the natural extension of the registry, and
+   nothing built here makes it harder.
+
 6. ~~**How does a spec say anything about a repeated field?**~~ **Closed:
    `Select` (§3.2).** It could not, and that is what stopped HTTP choosing its
    own framing (§13.2). `headers` is a repeat, the checker refuses references
@@ -1467,6 +1692,46 @@ That last one also produced the phase's one reassuring result: across those 340
 adversarial datagrams the decoder **raised nothing**, which is the promise
 `kober.decoder` makes and the first time anything tried to break it.
 
+### 13.6 What the compressed-body corpus found (0.5.0)
+
+No capture in reach carried a compressed body, and packeteer's HTTP payload
+cannot generate one, so the corpus is built: `tools/gzip_http.py` writes 30
+responses, 15 gzip, 10 deflate and 5 identity, some chunked and some with
+trailers, and sends them through a one-field protocol of kober's own, cut into
+200-byte pieces so a loss lands inside a body. `tools/pipeline.py` checks every
+inflated body against the SHA-256 of the document that was compressed. On the
+lossless capture **all 25 compressed bodies inflate exactly**; with 5% loss,
+**21, every one genuine**. The other four were cut by a gap and never read.
+
+What it found, in the order found:
+
+- **`deflate` is a trap in the naming.** HTTP's `Content-Encoding` and the
+  browser's `DecompressionStream` both mean zlib (RFC 1950) by it, and raw
+  DEFLATE is `deflate-raw`. The names follow the browser's, so a header's
+  value can be used as it stands.
+- **The concat hull covered a size line**, the terminating chunk's, which
+  follows its empty data. An empty member cites nothing, and the hull said
+  nothing else false, so multi-range citation stayed out.
+- **An inner node's failure was read as a hole in the input.** The emitter
+  picked the narrowest failing node containing an uncovered run, and walked
+  nodes inside an output, whose offsets are another space's: a message that
+  arrived whole was written `truncated`. Nodes in another space are skipped.
+- **A failed transform over a concat named cited bytes `undecodable`.** The
+  hull covers the size lines, which have records of their own, and so do the
+  members. Found by the compiler's differential, in both implementations at
+  once; the members are now taken over one by one (§3.2).
+- **The two drivers wrote a message's blocks in different orders.** Nothing
+  had put a region in the middle of a message before a failed transform did.
+  The compiled step writes a message's regions after its records, as the
+  interpreter's does.
+- **An argument field marked `emit: none` was both cited and `skipped`**, the
+  tunnel's header under the plaintext that cites it. Found by writing the
+  two-stage example, which needs that header to write nothing (§3.2).
+
+The last three are the same failure, a byte both cited and undecoded, reached
+three ways that only a new construct could open. That is what the fuzz
+invariant is for, and what it had not been given a spec to reach.
+
 ## 14. The compiler — a second way to run a spec
 
 Revision 7. `kober compile` turns a spec into a Python module with a typed API.
@@ -1551,6 +1816,15 @@ which reads it to declare what the output's records assert about one another
 refuses a module without it rather than guessing, since a stale field module
 writing `contiguous` over sub-byte fields is the silent wrong statement
 `adjacency` exists to prevent.
+
+Revision 12 adds what a transform needs. A field that holds a transform's
+output is annotated `| TransformFailed` as well, since a failure is contained
+and the message still returned: the value says why, in the interpreter's
+words. A module carries `SPEC_DIGEST`, so `run_compiled` writes the same
+`params_digest` the interpreter does; `PARAMS`, when the spec declares any,
+which `decode` and `decode_from` then take as `params=`; and `TRANSFORMS`,
+bound from the default registry when the module is imported, so a name
+nothing binds fails the import once rather than every message.
 
 ### 14.4 Names, and refusing rather than renaming
 

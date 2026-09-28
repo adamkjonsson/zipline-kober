@@ -14,6 +14,10 @@ Ranges are **byte** offsets, half-open, and absolute in the stream's offset
 space. A sub-byte field cites the bytes *containing* it, because `zpf` spans
 are byte offsets (§1) and overlapping citations are legal — which is what makes
 a flags word and the bits inside it all expressible.
+
+The one exception is a node decoded from a transform's output. Its range is
+in that output, from its first byte, and it says so with :attr:`Node.space`.
+The transform node itself is in the stream, citing its input.
 """
 
 from __future__ import annotations
@@ -72,6 +76,26 @@ class Node:
         resolved_type: The field type actually decoded. Differs from
             ``spec_field.type`` for a :class:`~kober.spec.Switch`, where it is
             the case that matched.
+        refused: Whether this unit's own ``confirm`` or ``reject`` refused what
+            its fields read. The fields stay in the tree, since they say what
+            was read, but none of them is written: a guess that did not hold up
+            is an ``undecodable`` region, not a field tree (``DESIGN.md`` §3.1).
+            Only a guard sets it. A unit stopped any other way, a condition
+            that could not be evaluated say, keeps its fields as before.
+        reach: For a ``truncated`` leaf whose read was the message's last and
+            whose length was already decided, where the message would have
+            ended, as an absolute offset; else ``None``. See
+            :class:`~kober.errors.TruncatedRead`.
+        space: The name of the transform whose output this node was decoded
+            from, or ``None`` for the input. A node with one is measured from
+            its output's first byte, not in the stream, and nothing in a file
+            can say where it is: every record read from it cites the
+            transform's input instead.
+        failed: Whether this is a transform that produced nothing usable. It
+            stays ``OK``, since it read nothing where it stands and its message
+            is whole, with no value or children and the failure as its
+            ``detail``; its source's bytes are named ``undecodable`` instead
+            (the transform plan's *Decided* 1).
 
     """
 
@@ -86,6 +110,10 @@ class Node:
     is_repetition: bool = False
     spec_field: Field | None = None
     resolved_type: FieldType | None = None
+    refused: bool = False
+    reach: int | None = None
+    space: str | None = None
+    failed: bool = False
 
     def __post_init__(self) -> None:
         if self.off_end < self.off_start:
@@ -154,6 +182,10 @@ class Node:
         if self.value is not None:
             parts.append(f" = {self.value!r}")
         parts.append(f"  [{self.off_start}, {self.off_end})")
+        if self.space is not None:
+            parts.append(f" in {self.space}")
+        if self.failed:
+            parts.append("  failed")
         if self.status is not NodeStatus.OK:
             parts.append(f"  {self.status.value}")
         if self.detail:

@@ -34,12 +34,20 @@ from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from kober.check import Starved, require_valid, scope_at, starved_fields, trailing_width
+from kober.check import (
+    Starved,
+    message_tail_fields,
+    require_valid,
+    scope_at,
+    starved_fields,
+    trailing_width,
+)
 from kober.errors import CompileError, SpecError
 from kober.expr import SCOPE_WORDS, ExprType, IntLiteral, Ref, infer_type, references, unparse
 from kober.spec import (
     BytesType,
     Computed,
+    Concat,
     Count,
     Emit,
     Fill,
@@ -51,6 +59,7 @@ from kober.spec import (
     StringType,
     Switch,
     Terminated,
+    Transform,
     UnitRef,
     Until,
 )
@@ -89,6 +98,30 @@ KINDS: Mapping[ExprType, Kind] = MappingProxyType(
         ExprType.BYTES: Kind.BYTES,
     }
 )
+
+
+@dataclass(frozen=True)
+class TransformPlan:
+    """A transform: which bytes, which transform, and what it may produce.
+
+    Attributes:
+        name: The transform's name, as ``with`` spells it.
+        source: The field or parameter whose bytes it reads, as the spec
+            spells it.
+        limit: The most bytes the output may have.
+        args: Each argument's name and expression, in the spec's order.
+        content_type: The record label for an output kept as bytes.
+        typed: Whether the output is decoded as a unit (the :class:`ValueType`
+            carrying this describes that unit), rather than kept as bytes.
+
+    """
+
+    name: str
+    source: str
+    limit: int
+    args: tuple[tuple[str, Expr], ...] = ()
+    content_type: str | None = None
+    typed: bool = False
 
 
 @dataclass(frozen=True)
@@ -136,6 +169,11 @@ class ValueType:
         consumes: Whether reading this provably advances the read position.
             What lets a backend drop the runtime check that a repetition is
             making progress — see :func:`consumes`.
+        concat: For a ``concat``, the repeated field and the member of each
+            element that is joined. It reads nothing where it stands.
+        transform: For a ``transform``, what it reads and runs. The value
+            type is the output's: an ``OBJECT`` for a unit, ``BYTES`` for an
+            output kept as is. It reads nothing where it stands.
 
     """
 
@@ -156,6 +194,8 @@ class ValueType:
     where: Expr | None = None
     default: Expr | None = None
     consumes: bool = False
+    concat: tuple[str, str] | None = None
+    transform: TransformPlan | None = None
 
 
 @dataclass(frozen=True)
@@ -202,6 +242,10 @@ class FieldPlan:
             (:func:`kober.check.starved_fields`). Always ``None`` in a spec that
             passes ``check``; carried so a backend running one that does not
             can call its short read ``undecodable``, as the interpreter does.
+        tail: Whether nothing in the message reads a byte after this field
+            (:func:`kober.check.message_tail_fields`). A backend reports where
+            a fixed-size or counted read of it would have ended when the read
+            runs out, so the driver can resume there after a gap (#49).
 
     """
 
@@ -215,6 +259,7 @@ class FieldPlan:
     doc: str | None = None
     const: int | bytes | str | None = None
     starved: Starved | None = None
+    tail: bool = False
 
     @property
     def exhaustive(self) -> bool:
@@ -375,6 +420,11 @@ class Plan:
         enums: Every declared enum, by name.
         objects: One per unit reachable from ``entry``, in the order the spec
             declares them.
+        transforms: Every transform name the spec uses, sorted: what a backend
+            binds when it is set up.
+        params: The document's parameters, in the spec's order.
+        spec_digest: :meth:`kober.spec.Spec.digest`, so a backend without the
+            spec model computes the same ``params_digest``.
 
     """
 
@@ -384,6 +434,9 @@ class Plan:
     doc: str | None = None
     enums: Mapping[str, EnumDef] = field(default_factory=dict)
     objects: tuple[ObjectPlan, ...] = ()
+    transforms: tuple[str, ...] = ()
+    params: tuple[ParamPlan, ...] = ()
+    spec_digest: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "enums", MappingProxyType(dict(self.enums)))
@@ -425,10 +478,18 @@ class Plan:
             for name in units
         }
         starved = starved_fields(spec)
+        tails = message_tail_fields(spec)
         objects = tuple(
-            _object(spec, name, name in recursive, roots, callers[name], starved)
+            _object(spec, name, name in recursive, roots, callers[name], starved, tails)
             for name in units
         )
+        used = {
+            kind.name
+            for unit in units
+            for item in spec.unit(unit).fields
+            for kind in _nested_types(item.type)
+            if isinstance(kind, Transform)
+        }
         return cls(
             name=spec.name,
             version=spec.version,
@@ -436,6 +497,11 @@ class Plan:
             doc=spec.doc,
             enums=spec.enums,
             objects=objects,
+            transforms=tuple(sorted(used)),
+            params=tuple(
+                ParamPlan(name=param.name, kind=KINDS[param.type]) for param in spec.params
+            ),
+            spec_digest=spec.digest(),
         )
 
     @property
@@ -549,8 +615,19 @@ def _referenced(kind: FieldType) -> Iterator[str]:
             yield from _referenced(case)
         if kind.default is not None:
             yield from _referenced(kind.default)
-    elif isinstance(kind, Pointer):
+    elif isinstance(kind, Pointer) or (isinstance(kind, Transform) and kind.type is not None):
         yield from _referenced(kind.type)
+
+
+def _nested_types(kind: FieldType) -> Iterator[FieldType]:
+    """Yield a type and every type inside it: switch cases, targets, outputs."""
+    yield kind
+    if isinstance(kind, Switch):
+        for case in (*kind.cases.values(), kind.default):
+            if case is not None:
+                yield from _nested_types(case)
+    elif isinstance(kind, Pointer) or (isinstance(kind, Transform) and kind.type is not None):
+        yield from _nested_types(kind.type)
 
 
 def _reachable(spec: Spec) -> set[str]:
@@ -595,11 +672,12 @@ def _object(
     roots: Mapping[str, tuple[str, ...]],
     parents: tuple[str, ...],
     starved: Mapping[tuple[str, int], Starved],
+    tails: frozenset[tuple[str, int]] = frozenset(),
 ) -> ObjectPlan:
     """Reduce one unit to its shape."""
     target = spec.unit(unit)
     fields = tuple(
-        _field(spec, unit, index, item, starved.get((unit, index)))
+        _field(spec, unit, index, item, starved.get((unit, index)), tail=(unit, index) in tails)
         for index, item in enumerate(target.fields)
     )
     params = tuple(ParamPlan(name=param.name, kind=KINDS[param.type]) for param in target.params)
@@ -673,6 +751,10 @@ def _kind_exprs(kind: FieldType) -> Iterator[Expr]:
         yield from _kind_exprs(kind.type)
     elif isinstance(kind, UnitRef):
         yield from kind.args
+    elif isinstance(kind, Transform):
+        yield from kind.args.values()
+        if kind.type is not None:
+            yield from _kind_exprs(kind.type)
     else:
         size = kind.size if isinstance(kind, (BytesType, StringType)) else None
         if isinstance(size, FromExpr):
@@ -733,7 +815,13 @@ def _recursive(spec: Spec, units: Sequence[str]) -> set[str]:
 
 
 def _field(
-    spec: Spec, unit: str, index: int, item: Field, starved: Starved | None = None
+    spec: Spec,
+    unit: str,
+    index: int,
+    item: Field,
+    starved: Starved | None = None,
+    *,
+    tail: bool = False,
 ) -> FieldPlan:
     """Reduce one field to what it contributes."""
     switch = item.type if isinstance(item.type, Switch) else None
@@ -757,6 +845,7 @@ def _field(
         doc=item.doc,
         const=item.const,
         starved=starved,
+        tail=tail,
     )
 
 
@@ -817,6 +906,10 @@ def _value(spec: Spec, unit: str, index: int, kind: FieldType) -> ValueType:
         return _pointer(spec, unit, index, kind)
     if isinstance(kind, Select):
         return _select(spec, unit, index, kind)
+    if isinstance(kind, Concat):
+        return ValueType(kind=Kind.BYTES, concat=(kind.repeated, kind.member))
+    if isinstance(kind, Transform):
+        return _transform(spec, unit, index, kind)
     msg = f"unsupported field type {type(kind).__name__} in unit {unit!r}"
     raise TypeError(msg)
 
@@ -854,6 +947,40 @@ def _pointer(spec: Spec, unit: str, index: int, kind: Pointer) -> ValueType:
         )
         raise CompileError(msg)
     return replace(_value(spec, unit, index, kind.type), at=kind.at, consumes=False)
+
+
+def _transform(spec: Spec, unit: str, index: int, kind: Transform) -> ValueType:
+    """Describe a transform: the output's value type, with the transform stamped on.
+
+    A transform adds no kind of its own, as a pointer adds none: its value is
+    its output, bytes as they are or a unit decoded from them. ``consumes`` is
+    false, since it reads nothing where it stands.
+
+    Raises:
+        CompileError: If the output's ``type`` is anything but a unit. The
+            interpreter decodes one; this compiler decodes an output by calling
+            a unit's function over it, and a scalar type has no function. Wrap
+            it in a unit.
+
+    """
+    plan = TransformPlan(
+        name=kind.name,
+        source=kind.source,
+        limit=kind.limit,
+        args=tuple(kind.args.items()),
+        content_type=kind.content_type,
+        typed=kind.type is not None,
+    )
+    if kind.type is None:
+        return ValueType(kind=Kind.BYTES, transform=plan)
+    if not isinstance(kind.type, UnitRef):
+        msg = (
+            f"unit {unit!r}: the compiler decodes a transform's output only as a unit; "
+            f"wrap its type in one, or use the interpreter"
+        )
+        raise CompileError(msg)
+    output = _value(spec, unit, index, kind.type)
+    return replace(output, transform=plan, consumes=False)
 
 
 def _select(spec: Spec, unit: str, index: int, kind: Select) -> ValueType:

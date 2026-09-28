@@ -177,6 +177,10 @@ Arguments bind positionally and their types are checked, so a unit that takes an
 like a field, but it decodes nothing and appears in no output — it is a value,
 not a region of bytes.
 
+The document has parameters too, a different thing with the same key:
+[`params`](document.md#params) at the top level are supplied by whoever runs
+the spec, a key say, and are in scope in every unit.
+
 ### Why not just nest the fields?
 
 Two reasons, and neither is style.
@@ -234,17 +238,27 @@ read cleanly before the failure. Its bytes are named instead:
 | A hole in the capture | `gap` | As everywhere. |
 
 Every `undecodable` and `skipped` region of a declined stream carries a comment
-saying why, in one of two forms:
+saying why, in one of three forms:
 
 ```text
 not dns: no case for 7 and no default, stopped at offset 3
 not http: no message decoded; every attempt ran out of input
+not tunnel: every message that decoded had a transform fail; the first: xor: the transform raised ValueError
 ```
 
 The second is a stream that never failed outright, which is what plain text
 looks like to the HTTP spec: a start line whose line ending never arrives.
 Without the decline, that would be recorded as `truncated`, which says the
 capture had a hole where it had none.
+
+The third is about a [`transform`](types.md#transform). **A message whose
+transform failed neither confirms the stream nor declines it.** Its framing
+held, so it decoded whole and the stream goes on after it, but the transform
+is often a protocol's only real check of identity, a tag that verifies under
+the key, and its failing is evidence of neither. So the next message decides.
+A stream in which every message that decoded had a transform fail is declined
+at its end, saying so. That is what a wrong key looks like, and nothing in the
+bytes can tell it from a wrong protocol, so the comment says what was seen.
 
 Both reasons say the bytes **exist**, so a later stage, or another spec, can
 still read them. `skipped` says *declined*, `undecodable` says *tried and
@@ -273,6 +287,80 @@ There is no setting to turn this off. A decoder that believed a stream's first
 failure was corruption would write a field tree for every foreign stream it
 met, which is what `const` and `confirm` exist to prevent.
 
+## What a spec meets after a gap
+
+A message may not span a hole, so a stream with a gap is decoded run by run. A
+run after a gap usually starts **inside** a message: the gap took that message's
+start. What kober does there depends on whether it knows where that message
+ends.
+
+**When it knows,** it resumes there. If the gap cut a read whose length had
+already been decided, such as an HTTP body after its `Content-Length`, and
+nothing after that field reads a byte, the message ends where that read would
+have ended. The next run resumes at that offset, and the bytes before it are
+`skipped` with the comment `rest of a message cut by a gap`. Nothing is guessed:
+the message that follows is decoded at its real start.
+
+**When it does not,** the run's first message is a guess, and it is held. If it
+decodes whole, it is written. If it does not, nothing it read is written, and
+its bytes are `undecodable` with the comment `no message boundary found after a
+gap`. If the spec's `confirm` or `reject` is what refused it, the attempt was
+read far enough for that to run, so kober tries again where it stopped. Any
+other failure leaves no such place, and the rest of the run is lost. None of
+this declines the stream, since an attempt from the middle of a message says
+nothing about which protocol the stream is in. A stream that ends without a whole message is still declined, and its
+comment then says
+
+```text
+not http: no message decoded; every attempt ran out of input or found no message boundary after a gap
+```
+
+```{important}
+**A guess that decodes whole, and that nothing refuses, is believed.** A spec
+that does not say what the start of its message looks like cannot refuse one
+that only happens to parse, and a chunk-size line or a body's tail read after a
+gap parses as an HTTP message with no headers. So say it: a `const` on a magic
+number, or a `confirm` on the first field's shape. The HTTP example does:
+
+    confirm: >-
+      startswith(start_line, 'HTTP/')
+      or endswith(start_line, ' HTTP/1.1')
+      or endswith(start_line, ' HTTP/1.0')
+
+It is also what lets kober retry after a refusal: a spec with a guard
+resynchronises after a gap, and one without only by luck.
+```
+
+## A second offset space
+
+A [`transform`](types.md#transform) turns bytes already decoded into new ones:
+a body inflated, a datagram decrypted. What its `type` reads there is decoded
+from the output's first byte, in an **offset space of its own**, and nothing
+in the input stands at those offsets. In the decoded tree a node read there
+carries the transform's name as its {attr}`~kober.node.Node.space`, and its
+offsets are the output's.
+
+A file has only the input's offsets to cite, so it says less:
+
+- **Every record read from an output cites the transform's range in the
+  input**: its source, and every field its `args` read. Eight bytes of a
+  header field may cite the whole compressed body, since the body is what they
+  were computed from. The citation says *where this came from*, not *these
+  bytes are this value*.
+- **Nothing read from an output becomes a region.** A region names input bytes,
+  and an output has none. An output that does not decode fails the transform
+  as a whole.
+- **The transform speaks for its source.** The source is not written as a
+  record of its own when the output is; when the transform fails, the source's
+  bytes are `undecodable` and the message goes on. A `concat` source's bytes
+  are its members', so they are taken over one by one.
+
+So the output is in the file only through the records it produced. A consumer
+that wants it as bytes asks for a transform with no `type`: its output is one
+record, which a **second stage** reads like any other input. That is how a
+tunnel is decoded: the first stage decrypts each datagram into one plaintext
+record, and a spec for what was inside reads those.
+
 ## What a spec cannot say
 
 Worth knowing early, because each is a deliberate line rather than an omission.
@@ -287,6 +375,10 @@ Worth knowing early, because each is a deliberate line rather than an omission.
 - **Fields are read in the order written.** An expression may only name fields
   declared *before* it, because a later one has not been decoded yet. The
   checker enforces this before any data exists.
-- **Bytes are not transformed.** Decompression and decryption are not
-  expressible; a body that is gzipped decodes as the bytes it is. That is an
-  owed extension rather than a rule, and the reasoning is in `DESIGN.md` §11.5.
+- **A transform keeps nothing between messages.** Each runs over bytes one
+  message already decoded, and the next message starts afresh. So a whole
+  gzip body, a per-datagram cipher, or a TLS record whose nonce is in the record
+  or supplied as a parameter can be decoded; TLS 1.3's per-connection nonce
+  counter, WebSocket's `permessage-deflate` with context takeover, and HPACK's
+  dynamic table cannot. It is a line this version draws, and the reasoning is
+  in `DESIGN.md` §11.5.

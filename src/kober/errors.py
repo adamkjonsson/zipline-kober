@@ -142,6 +142,74 @@ class Undecodable(Stopped):
     code has no tree to record it on, so it says so by raising, and the entry
     point of a generated module turns it into an ``undecodable`` region. Like
     :class:`EvalError`, letting one escape a decode is a bug.
+
+    Attributes:
+        refused: Whether a unit's own ``confirm`` or ``reject`` is what failed,
+            here or in a unit inside. The stage driver retries after a refused
+            attempt that followed a gap (``DESIGN.md`` §3.1, *After a gap*),
+            since the attempt decoded far enough for its guard to run.
+
+    """
+
+    def __init__(self, message: str = "", at: int | None = None, *, refused: bool = False) -> None:
+        super().__init__(message, at)
+        self.refused = refused
+
+
+class Refused(Undecodable):
+    """A unit's own ``confirm`` or ``reject`` refused what its fields read.
+
+    Raised only inside a generated module, by a guarded unit's reading
+    function, and caught by the wrapper around it, which names the unit's
+    bytes ``undecodable`` and raises a plain :class:`Undecodable` in its place.
+    A distinct type because the wrapper must tell the unit's *own* refusal from
+    any other failure passing through it: only the refusal drops the unit's
+    records, since a guess that did not hold up is not written as a field tree
+    (``DESIGN.md`` §3.1). The conversion is what stops an enclosing guarded unit
+    mistaking a nested refusal for its own. The plain one it raises keeps
+    ``Undecodable.refused``, which is what the driver reads.
+    """
+
+    def __init__(self, message: str = "", at: int | None = None) -> None:
+        super().__init__(message, at, refused=True)
+
+
+class TransformError(KoberError):
+    """A transform could not produce its output from the bytes it was given.
+
+    Bad compressed data, output past the field's ``limit``, a cipher's tag
+    that did not verify. The bytes arrived and were read; what failed is the
+    transform, so a decoder reports it and never raises it
+    (:func:`kober.transforms.apply` is the one place it is raised).
+
+    Its message is **always kober's own wording**, never a codec's or a
+    callable's: it can end up in the output (a declined stream quotes a
+    failure), where two implementations must word it alike and where a
+    caller's cipher must not be able to write a key.
+    """
+
+
+class UnboundTransformError(SpecError):
+    """A spec uses a transform this process cannot run.
+
+    Raised when a decoder is set up, before any input is read, and never per
+    message: a transform nobody bound would otherwise make every message
+    ``undecodable`` and quietly mark a whole file. It says which kind of
+    missing it is, because the fixes differ: a well-known name this backend
+    does not bind (``br`` in the standard library) wants an implementation
+    registered, and a spec's own name wants the program that runs it to
+    register one.
+    """
+
+
+class ParameterError(KoberError, ValueError):
+    """The values supplied for a spec's ``params:`` do not match what it declares.
+
+    One missing, one the spec does not declare, or one of the wrong type.
+    Raised when a decoder is set up, before any input: a run missing a
+    parameter could not be reproduced, so it never starts. Also a
+    :class:`ValueError`, which is what a caller passing a bad argument would
+    look for. The message never quotes a value, since one may be a secret.
     """
 
 
@@ -168,7 +236,18 @@ class TruncatedRead(Stopped):
     an ordinary outcome — the message may simply continue in a segment we do
     not hold (``DESIGN.md`` §3.2) — so the decode engine turns it into a
     ``truncated`` region and carries on. It must not escape a decode.
+
+    Attributes:
+        reach: Where the message would have ended, as an absolute byte
+            offset, when the read that ran out was its last and its length was
+            already decided (:func:`kober.check.message_tail_fields`); else
+            ``None``. The stage driver resumes there after a gap (#49).
+
     """
+
+    def __init__(self, message: str = "", at: int | None = None, reach: int | None = None) -> None:
+        super().__init__(message, at)
+        self.reach = reach
 
 
 class EvalError(KoberError):

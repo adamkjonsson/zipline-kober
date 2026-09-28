@@ -32,7 +32,7 @@ from __future__ import annotations
 import ast
 import keyword
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from kober.decoder import MAX_DEPTH, MAX_POINTER_HOPS
@@ -55,7 +55,7 @@ from kober.expr import (
     unparse,
 )
 from kober.node import NodeStatus
-from kober.ops import Kind, Plan, nonnegative, walk_path
+from kober.ops import Kind, Plan, TransformPlan, nonnegative, walk_path
 from kober.runtime import TEXT_CONTENT_TYPE, prim_token
 from kober.spec import Count, Emit, Fill, Fixed, FromExpr, Remaining, Terminated, ToEnd, Until
 
@@ -128,15 +128,30 @@ RUNTIME_NAMES = frozenset(
     {
         "Cursor",
         "EvalError",
+        "Held",
+        "Output",
+        "Refused",
+        "TransformFailed",
+        "TransformError",
+        "bind_transforms",
+        "concat",
+        "decode_text",
+        "document_params",
+        "size_of",
+        "run_transform",
+        "take_over",
         "Sink",
         "Stopped",
         "TruncatedRead",
         "Undecodable",
         "cited",
+        "present",
         "prim_int",
+        "record_int",
         "read_int_le",
         "shift_left",
         "shift_right",
+        "span",
         "to_int",
     }
 )
@@ -260,6 +275,15 @@ UNDECODABLE = NodeStatus.UNDECODABLE.value
 SHIFT_HELPERS: Mapping[str, str] = {"<<": "shift_left", ">>": "shift_right"}
 
 #: How a value's kind is spelled as a Python annotation.
+#: How a document parameter's type is spelled in a module's ``PARAMS``: what
+#: :func:`kober.runtime.document_params` checks a supplied value against.
+PARAM_TYPES: Mapping[Kind, str] = {
+    Kind.INT: "int",
+    Kind.BOOL: "bool",
+    Kind.TEXT: "str",
+    Kind.BYTES: "bytes",
+}
+
 ANNOTATIONS: Mapping[Kind, str] = {
     Kind.INT: "int",
     Kind.BOOL: "bool",
@@ -395,6 +419,24 @@ class Names:
         """
         return f"_decode_{self.class_of(unit).lower()}"
 
+    def reader_of(self, unit: str) -> str:
+        """Return the name of the function that reads a guarded unit's fields.
+
+        Only a unit with a ``confirm`` or ``reject``, compiled at field
+        granularity, has one: :meth:`function_of` is then a wrapper that holds
+        the records this writes until the guard has held. No other generated
+        name begins ``_read_``, and the suffix is the class name's, so two units
+        cannot collide here without colliding there first.
+
+        Args:
+            unit: The unit's name as the spec spells it.
+
+        Returns:
+            The function's name.
+
+        """
+        return f"_read_{self.class_of(unit).lower()}"
+
     def constant_of(self, enum: str) -> str:
         """Return the module constant an enum's labels compile to.
 
@@ -493,6 +535,162 @@ def _safe(text: str) -> str:
     text = text.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
     stripped = text.rstrip('"')
     return stripped + '\\"' * (len(text) - len(stripped))
+
+
+#: Room left on a line for the statement around a rendered expression — an
+#: ``if … :``, a ``return …, _spans[_i]``, an assignment — before the
+#: expression is bound to a local over several lines instead (``_wrapped``).
+STATEMENT_ROOM = 30
+
+
+def _top_level_split(rendered: str, operator: str) -> list[str]:
+    """Split rendered Python at ``operator`` where it is outside brackets and strings.
+
+    Args:
+        rendered: A rendered expression.
+        operator: The spelling to split at, spaces included: ``" or "``.
+
+    Returns:
+        The operands, one per part, or the whole expression alone if the
+        operator never occurs at the top level.
+
+    """
+    parts: list[str] = []
+    depth, start, index, quote = 0, 0, 0, ""
+    while index < len(rendered):
+        char = rendered[index]
+        if quote:
+            if char == "\\":
+                index += 1
+            elif char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif depth == 0 and rendered.startswith(operator, index):
+            parts.append(rendered[start:index])
+            index += len(operator)
+            start = index
+            continue
+        index += 1
+    parts.append(rendered[start:])
+    return parts
+
+
+def _wrapped(rendered: str, pad: str, name: str) -> list[str] | None:
+    """Return an assignment of a long expression to ``name``, one operand per line.
+
+    A generated module is linted like everything else here, and an expression
+    as long as ``http.yaml``'s test for ``chunked`` being the last transfer
+    coding does not fit on one line. Split at its top-level ``or``, or failing
+    that its top-level ``and``, inside brackets, which Python continues across
+    lines. ``None`` when the expression has neither, and a caller keeps it on
+    one line as before.
+
+    Args:
+        rendered: The rendered expression.
+        pad: The indentation of the assignment.
+        name: The local to assign.
+
+    Returns:
+        The lines, or ``None``.
+
+    """
+    for operator in (" or ", " and "):
+        parts = _top_level_split(rendered, operator)
+        if len(parts) > 1:
+            word = operator.strip()
+            inner = f"{pad}    "
+            lines = [f"{pad}{name} = ("]
+            lines += _operand_lines(parts[0], inner, "")
+            for part in parts[1:]:
+                lines += _operand_lines(part, inner, f"{word} ")
+            return [*lines, f"{pad})"]
+    return None
+
+
+def _operand_lines(text: str, pad: str, lead: str) -> list[str]:
+    """Return one operand of a split expression, split again if it is too long.
+
+    Only a parenthesized operand can be: its brackets already continue it
+    across lines, and it splits at its own top-level ``or`` or ``and``.
+    """
+    line = f"{pad}{lead}{text}"
+    if len(line) <= LINE_LENGTH or not _enclosed(text):
+        return [line]
+    inner = text[1:-1]
+    for operator in (" or ", " and "):
+        parts = _top_level_split(inner, operator)
+        if len(parts) > 1:
+            word = operator.strip()
+            deeper = f"{pad}    "
+            lines = [f"{pad}{lead}("]
+            lines += _operand_lines(parts[0], deeper, "")
+            for part in parts[1:]:
+                lines += _operand_lines(part, deeper, f"{word} ")
+            return [*lines, f"{pad})"]
+    return [line]
+
+
+def _enclosed(text: str) -> bool:
+    """Whether ``text`` is one parenthesized group, its first bracket closing last."""
+    if not (text.startswith("(") and text.endswith(")")):
+        return False
+    depth, index, quote = 0, 0, ""
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == "\\":
+                index += 1
+            elif char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+            if depth == 0 and index < len(text) - 1:
+                return False
+        index += 1
+    return True
+
+
+def _one_line_doc(text: str, fallback: str) -> str:
+    """Return a one-line docstring, or ``fallback`` where ``text`` would not fit.
+
+    Args:
+        text: The docstring wanted.
+        fallback: A shorter one that always fits.
+
+    Returns:
+        The docstring's line, indented for a function body.
+
+    """
+    line = f'    """{text}"""'
+    return line if len(line) <= LINE_LENGTH else f'    """{fallback}"""'
+
+
+def _call_lines(head: str, arguments: Sequence[str]) -> list[str]:
+    """Return a call, on one line if it fits and one argument per line if not.
+
+    Args:
+        head: Everything before the opening parenthesis, indentation included:
+            ``"        return _read_x"``.
+        arguments: The arguments, already rendered.
+
+    Returns:
+        The lines.
+
+    """
+    one = f"{head}({', '.join(arguments)})"
+    if len(one) <= LINE_LENGTH:
+        return [one]
+    indent = " " * (len(head) - len(head.lstrip()))
+    return [f"{head}(", *(f"{indent}    {argument}," for argument in arguments), f"{indent})"]
 
 
 def _wrap(text: str, indent: int, *, hang: int = 0, width: int = DOC_WIDTH) -> list[str]:
@@ -648,11 +846,15 @@ class Binding:
     element: str = ELEMENT_LOCAL
     index: int | None = None
 
-    def render(self, path: Sequence[str]) -> str:
+    def render(self, path: Sequence[str], *, guarded: bool = False) -> str:
         """Render one reference as a Python expression.
 
         Args:
             path: The reference's components, scope word included.
+            guarded: Whether a step that may hold nothing, a field under a
+                ``condition`` or a transform's, is read through
+                :func:`kober.runtime.present`. What an expression wants; a
+                caller passing a value on, or naming a local, does not.
 
         Returns:
             Python source for the value it names.
@@ -665,6 +867,9 @@ class Binding:
         parts = tuple(path)
         word = parts[0] if parts and parts[0] in SCOPE_WORDS else None
         rest = parts[1:] if word else parts
+        document = self._document(word, rest)
+        if document is not None:
+            return document
         bound = (
             word in (None, "this")
             and self.element_of is not None
@@ -688,9 +893,46 @@ class Binding:
         else:
             local = self.names.attribute_of(head.unit, head.name)
         local = self.element if bound else prefix + local
-        return local + "".join(
-            f".{self.names.attribute_of(step.unit, step.name)}" for step in tail
+        if not guarded:
+            return local + "".join(
+                f".{self.names.attribute_of(step.unit, step.name)}" for step in tail
+            )
+        spelled = _literal(".".join(parts))
+        text = local
+        if not head.param and not bound and self._maybe_missing(head.unit, head.name):
+            text = f"present({text}, {spelled}, {_literal(head.name)}, None)"
+        previous = head.name
+        for step in tail:
+            text = f"{text}.{self.names.attribute_of(step.unit, step.name)}"
+            if self._maybe_missing(step.unit, step.name):
+                text = f"present({text}, {spelled}, {_literal(step.name)}, {_literal(previous)})"
+            previous = step.name
+        return text
+
+    def _maybe_missing(self, unit: str, name: str) -> bool:
+        """Whether a field may hold nothing: under a ``condition``, or a transform's."""
+        item = self.plan.object(unit).field(name)
+        if item is None:
+            return False
+        return item.condition is not None or any(
+            kind.transform is not None for kind in item.types
         )
+
+    def _document(self, word: str | None, rest: Sequence[str]) -> str | None:
+        """Render a document parameter, which every function is handed as ``_doc``.
+
+        ``check`` refuses a document parameter named like any field or unit
+        parameter, so a bare name that is not one of this unit's is one.
+        """
+        if word is not None or len(rest) != 1:
+            return None
+        name = rest[0]
+        if name not in {param.name for param in self.plan.params}:
+            return None
+        obj = self.plan.object(self.unit)
+        if obj.field(name) is not None or obj.param(name) is not None:
+            return None
+        return f"_doc[{_literal(name)}]"
 
     def _start(self, word: str | None, path: Sequence[str]) -> tuple[str, str]:
         """Return the unit a path resolves in, and the prefix its local carries."""
@@ -784,12 +1026,19 @@ def _expr(expr: Expr, binding: Binding, limit: int) -> str:
     if isinstance(expr, BoolLiteral):
         return "True" if expr.value else "False"
     if isinstance(expr, Ref):
-        return binding.render(expr.path)
+        return binding.render(expr.path, guarded=True)
     if isinstance(expr, UnaryOp):
+        if expr.op == "not" and isinstance(expr.operand, BoolOp):
+            negated = _membership(expr.operand, binding, negate=True)
+            if negated is not None:
+                return _group(negated, PRECEDENCE["=="], limit)
         level = PRECEDENCE["not"] if expr.op == "not" else UNARY_PRECEDENCE
         space = " " if expr.op == "not" else ""
         return _group(f"{expr.op}{space}{_expr(expr.operand, binding, level)}", level, limit)
     if isinstance(expr, BoolOp):
+        membership = _membership(expr, binding)
+        if membership is not None:
+            return _group(membership, PRECEDENCE["=="], limit)
         level = PRECEDENCE[expr.op]
         joined = f" {expr.op} ".join(_expr(operand, binding, level) for operand in expr.operands)
         return _group(joined, level, limit)
@@ -809,15 +1058,18 @@ def _builtin(expr: Call, binding: Binding) -> str:
     ``to_int`` goes through :func:`kober.runtime.to_int`, which **is** the
     function the interpreter evaluates — one implementation of a conversion
     that is deliberately stricter than Python's, so the two cannot drift and
-    the differential has nothing to find here. ``lower`` and ``trim`` are
-    method calls on a value the checker has already typed as text, and mean
-    exactly what the interpreter's ``str.lower`` and ``str.strip`` mean.
+    the differential has nothing to find here. ``lower``, ``trim``,
+    ``startswith`` and ``endswith`` are method calls on a value the checker has
+    already typed as text, and mean exactly what the interpreter's ``str``
+    methods of the same names mean.
     """
     arguments = [_expr(argument, binding, 0) for argument in expr.args]
     if expr.name == "lower":
         return f"{arguments[0]}.lower()"
     if expr.name == "trim":
         return f"{arguments[0]}.strip()"
+    if expr.name in ("startswith", "endswith"):
+        return f"{arguments[0]}.{expr.name}({arguments[1]})"
     return f"to_int({', '.join(arguments)})"
 
 
@@ -837,6 +1089,33 @@ def _binary(expr: BinOp, binding: Binding, limit: int) -> str:
 def _safe_shift(count: Expr) -> bool:
     """Whether a shift count is a literal the runtime's bound already allows."""
     return isinstance(count, IntLiteral) and 0 <= count.value <= MAX_SHIFT
+
+
+def _membership(expr: BoolOp, binding: Binding, *, negate: bool = False) -> str | None:
+    """Render one value compared with several literals as a membership test.
+
+    ``x == 'a' or x == 'b'`` is ``x in ('a', 'b')``, and ``x != 'a' and x !=
+    'b'`` is ``x not in ('a', 'b')``: the same answer, the value computed
+    once, and what ``ruff`` asks a reader to write (PLR1714). ``negate`` is
+    for a ``not`` around it, which flips the test rather than preceding it
+    (E713). ``None`` when the operands are anything else.
+    """
+    wanted = "==" if expr.op == "or" else "!="
+    lefts: set[str] = set()
+    rights: list[str] = []
+    for operand in expr.operands:
+        if not (
+            isinstance(operand, Compare)
+            and operand.op == wanted
+            and isinstance(operand.right, (IntLiteral, StrLiteral))
+        ):
+            return None
+        lefts.add(_expr(operand.left, binding, PRECEDENCE["=="] + 1))
+        rights.append(_expr(operand.right, binding, PRECEDENCE["=="] + 1))
+    if len(lefts) != 1 or len(rights) < 2:
+        return None
+    test = "in" if (wanted == "==") != negate else "not in"
+    return f"{lefts.pop()} {test} ({', '.join(rights)})"
 
 
 def _group(text: str, level: int, limit: int) -> str:
@@ -1024,6 +1303,9 @@ class _Function:
         self.delta = 0
         #: Which field is being rendered, for the expressions inside it.
         self.index_of = 0
+        #: The local holding a transform's name, when a switch chose it
+        #: (:meth:`chosen`); ``None`` when the name is the spec's literal.
+        self.transform_name: str | None = None
 
     # --- where the reads are ------------------------------------------------
 
@@ -1061,18 +1343,29 @@ class _Function:
         offset = -(-self.delta // 8)
         return ANCHOR if offset == 0 else f"{ANCHOR} + {offset}"
 
-    def need(self, bits: int, indent: int) -> None:
+    def need(self, bits: int, indent: int, reach: str | None = None) -> None:
         """Emit the bounds check for reading ``bits`` from the current position.
 
         One per field, never merged. A merged check would report the failure at
         the start of the run rather than at the field that ran out, and the
         interpreter stops at the field — so a merged check would be a different
         answer about which bytes were decoded.
+
+        ``reach`` is where the message ends, for a read the message ends with
+        (:attr:`~kober.ops.FieldPlan.tail`), carried on the truncation so the
+        driver can resume there after a gap (#49).
         """
         needed = -(-(self.delta + bits) // 8)
         pad = " " * indent
         self.emit(f"{pad}if _size - {ANCHOR} < {needed}:")
-        self.emit(f'{pad}    raise TruncatedRead("truncated", {self.stopped()})')
+        self.truncated(pad, reach)
+
+    def truncated(self, pad: str, reach: str | None) -> None:
+        """Emit the ``raise`` for a read that ran out, with where it would have ended."""
+        if reach is None:
+            self.emit(f'{pad}    raise TruncatedRead("truncated", {self.stopped()})')
+        else:
+            self.emit(f'{pad}    raise TruncatedRead("truncated", {self.stopped()}, {reach})')
 
     def advance(self, bits: int) -> None:
         """Note that ``bits`` more have been read, without emitting anything."""
@@ -1115,6 +1408,26 @@ class _Function:
         """Whether this function carries a sink and a field path."""
         return self.module is Emit.FIELD
 
+    @property
+    def held(self) -> bool:
+        """Whether this unit's records wait for its guard.
+
+        A generated unit writes each record as it reads the field, and its
+        ``confirm`` or ``reject`` runs after the last one. At field granularity
+        that would write a field tree for a guess that did not hold up, which
+        ``DESIGN.md`` §3.1 promises never to, so a guarded unit is split in two:
+        a reading function that writes through a :class:`~kober.runtime.Held`
+        sink and raises :class:`~kober.errors.Refused`, and a wrapper that
+        releases or drops what it held (:meth:`wrapper`).
+        """
+        guarded = self.obj.confirm is not None or self.obj.reject is not None
+        return self.threads and (guarded or self.transforms)
+
+    @property
+    def transforms(self) -> bool:
+        """Whether this unit holds a transform, which takes back its source's record."""
+        return any(value.transform is not None for item in self.obj.fields for value in item.types)
+
     def emits(self, item: FieldPlan) -> bool:
         """Whether one field's leaves write records."""
         return self.threads and (item.emit or self.inside) is not Emit.NONE
@@ -1142,11 +1455,69 @@ class _Function:
             head.extend(self.depth_guard())
         head.extend([f"    {ORIGIN} = _base + {ANCHOR}", f"    _extent = {ORIGIN}"])
         tail = ["", *self.guards(), f"    _s, _e = _extent, {self.end()}", *self.construct()]
+        if self.held:
+            tail.extend(["", "", *self.wrapper()])
         return "\n".join([*head, *self.lines, *tail])
+
+    def wrapper(self) -> list[str]:
+        """Return the function that holds a guarded unit's records until its guard holds.
+
+        Released when the unit decoded, and when it failed any other way, since
+        what it read before a truncation is real and is written today. Dropped
+        only when its own guard refused it: then the unit's bytes are one
+        ``undecodable`` region, which is what the interpreter's emitter writes
+        for a unit it marked ``refused``, and the refusal goes on as a plain
+        :class:`~kober.errors.Undecodable`, so an enclosing guarded unit does not
+        take it for its own.
+        """
+        name = self.names.function_of(self.obj.unit)
+        reader = self.names.reader_of(self.obj.unit)
+        parameters = self.parameters()
+        arguments = [parameter.split(":")[0] for parameter in parameters]
+        held = ["_held" if argument == "_sink" else argument for argument in arguments]
+        returns = f"tuple[{self.cls}, int]"
+        one = f"def {name}({', '.join(parameters)}) -> {returns}:"
+        if len(one) <= LINE_LENGTH:
+            lines = [one]
+        else:
+            lines = [
+                f"def {name}(",
+                *(f"    {parameter}," for parameter in parameters),
+                f") -> {returns}:",
+            ]
+        lines.extend(
+            [
+                _one_line_doc(
+                    f"Decode one ``{_safe(self.obj.unit)}``, holding its records until its "
+                    "guard holds.",
+                    "Decode one guarded unit, holding its records until its guard holds.",
+                ),
+                "    if _sink is None:",
+                *_call_lines(f"        return {reader}", arguments),
+                "    _held = Held(_sink)",
+                "    try:",
+                *_call_lines(f"        _value = {reader}", held),
+                "    except Refused as _exc:",
+                f"        _end = {ANCHOR} if _exc.at is None else _exc.at",
+                f"        if _end > {ANCHOR}:",
+                f'            _sink.undecoded(_base + {ANCHOR}, _base + _end, "undecodable")',
+                "        raise Undecodable(str(_exc), _exc.at, refused=True) from None",
+                "    except Stopped:",
+                "        _held.release()",
+                "        raise",
+                "    _held.release()",
+                "    return _value",
+            ]
+        )
+        return lines
 
     def definition(self) -> list[str]:
         """Return the ``def`` line, wrapped if its parameters do not fit."""
-        name = self.names.function_of(self.obj.unit)
+        name = (
+            self.names.reader_of(self.obj.unit)
+            if self.held
+            else self.names.function_of(self.obj.unit)
+        )
         parameters = self.parameters()
         returns = f"tuple[{self.cls}, int]"
         one = f"def {name}({', '.join(parameters)}) -> {returns}:"
@@ -1166,6 +1537,8 @@ class _Function:
         name, and a depth counter only where recursion can grow one.
         """
         parameters = ["_data: bytes", "_size: int", f"{ANCHOR}: int", "_base: int"]
+        if self.plan.params:
+            parameters.append("_doc: Mapping[str, object]")
         if self.threads:
             parameters.extend(["_sink: Sink | None", "_path: str"])
         parameters.extend(
@@ -1345,10 +1718,18 @@ class _Function:
                 self.index_of, element_of=element_of, element=element, element_as=element_as
             ),
         )
+        long = indent + len(rendered) + STATEMENT_ROOM > LINE_LENGTH
         if not _fallible(rendered):
-            return rendered
+            lines = _wrapped(rendered, pad, "_value") if long else None
+            if lines is None:
+                return rendered
+            for line in lines:
+                self.emit(line)
+            return "_value"
         self.emit(f"{pad}try:")
-        self.emit(f"{pad}    _value = {rendered}")
+        lines = _wrapped(rendered, pad + "    ", "_value") if long else None
+        for line in lines or [f"{pad}    _value = {rendered}"]:
+            self.emit(line)
         for line in _failing(self.stopped()):
             self.emit(f"{pad}{line}")
         return "_value"
@@ -1391,14 +1772,19 @@ class _Function:
             if expr is None:
                 continue
             rendered = render_expr(expr, binding)
+            long = 4 + len(rendered) + STATEMENT_ROOM > LINE_LENGTH
             if _fallible(rendered):
                 # Taken in a `try` as any other fallible expression is, so a
                 # division by zero in a guard fails where the interpreter says.
-                lines.extend(["    try:", f"        _guard = {rendered}"])
-                lines.extend(f"    {line}" for line in _failing(where))
+                wrapped = _wrapped(rendered, "        ", "_guard") if long else None
+                lines.extend(["    try:", *(wrapped or [f"        _guard = {rendered}"])])
+                lines.extend(f"    {line}" for line in _failing(where, "Refused"))
+                rendered = "_guard"
+            elif long and (wrapped := _wrapped(rendered, "    ", "_guard")) is not None:
+                lines.extend(wrapped)
                 rendered = "_guard"
             test = rendered if holds else f"not ({rendered})"
-            lines.extend([f"    if {test}:", f"        raise Undecodable({message}, {where})"])
+            lines.extend([f"    if {test}:", f"        raise Refused({message}, {where})"])
         if lines:
             lines.append("")
         return lines
@@ -1475,17 +1861,15 @@ class _Function:
         self.settle(4)
         self.index_of = index
         condition = self.evaluate(item.condition, 4)
+        if target is not None and item.name is not None:
+            # Written before the test rather than in an `else`: absent, not
+            # empty, it read nothing and cites nothing, and the test's branch
+            # overwrites all three when the field is there.
+            self.emit(f"    {target} = None")
+            self.emit(f"    _s_{target} = _e_{target} = {ORIGIN}")
         self.emit(f"    if {condition}:")
         self.present(index, item, target, 8)
         self.settle(8)
-        if target is not None and item.name is not None:
-            self.emit("    else:")
-            self.emit("        # Absent, not empty: it read nothing, so it cites nothing.")
-            self.emit(f"        {target} = None")
-            self.emit(f"        _s_{target} = _e_{target} = {ORIGIN}")
-        elif target is None:
-            self.emit("    else:")
-            self.emit("        pass")
 
     def segment(self, item: FieldPlan, index: int) -> str:
         """Return the path segment one field adds, as a Python expression.
@@ -1528,6 +1912,17 @@ class _Function:
         # where exactly one branch is left, the two tests fold into one, which
         # is both what a reader would write and what `ruff` insists on.
         writing = [branch for branch in item.branches if branch.type.kind is not Kind.OBJECT]
+        if len(writing) == len(item.branches) > 1:
+            # Every branch writes: when every one writes the same record, as a
+            # body read two ways does, it is one record and not a switch.
+            rendered = [
+                self.rendered(index, branch.type, target, role, start, end, indent + 4)
+                for branch in writing
+            ]
+            if all(lines == rendered[0] for lines in rendered):
+                self.emit(f"{pad}if _sink is not None:")
+                self.lines.extend(rendered[0])
+                return
         if len(writing) == 1 and writing[0].case is not None:
             test = f"_selector == {_literal(writing[0].case)}"
             self.emit(f"{pad}if _sink is not None and {test}:")
@@ -1543,6 +1938,25 @@ class _Function:
             self.record(index, branch.type, target, role, start, end, indent + 8)
             keyword = "elif"
 
+    def rendered(
+        self,
+        index: int,
+        value: ValueType,
+        local: str,
+        role: str,
+        start: str,
+        end: str,
+        indent: int,
+    ) -> list[str]:
+        """Return what :meth:`record` would emit, without emitting it."""
+        kept = self.lines
+        self.lines = []
+        try:
+            self.record(index, value, local, role, start, end, indent)
+            return self.lines
+        finally:
+            self.lines = kept
+
     def record(
         self,
         index: int,
@@ -1554,7 +1968,6 @@ class _Function:
         indent: int,
     ) -> None:
         """Emit one ``sink.record`` call, with everything known baked into it."""
-        pad = " " * indent
         if value.source is None and value.expr is not None:
             # A computed only. A select carries an ``expr`` too, but its span
             # locals already hold the element it chose — where `cites` would
@@ -1564,10 +1977,8 @@ class _Function:
             # The one payload a compiler cannot bake: nothing declares the width
             # of a computed integer, so it is sized by its value — and a value
             # too wide for the vocabulary gets no record at all.
-            self.emit(f"{pad}_labelled = prim_int({local})")
-            self.emit(f"{pad}if _labelled is not None:")
             self.lines.extend(
-                _call("_sink.record", ["*_labelled", start, end, role], indent + 4)
+                _call("record_int", ["_sink", local, start, end, role], indent)
             )
             return
         payload = payload_of(value, local)
@@ -1589,13 +2000,58 @@ class _Function:
         assert value.expr is not None  # noqa: S101 - the caller checked
         ranges: list[str] = []
         for ref in references(value.expr):
-            local = self.reachable(ref.path)
-            if local is not None and f"_s_{local}" in self.spans:
-                ranges.append(f"(_s_{local}, _e_{local})")
+            found = self.cited_range(ref.path)
+            if found is not None:
+                ranges.append(found)
         if not ranges:
             return start, end
-        self.emit(f"{pad}_cites = cited([{', '.join(ranges)}], ({start}, {end}))")
+        one = f"{pad}_cites = cited([{', '.join(ranges)}], ({start}, {end}))"
+        if len(one) <= LINE_LENGTH:
+            self.emit(one)
+        else:
+            # One range per line: an expression reading many fields has as
+            # many ranges, and a generated module is held to the line limit.
+            self.emit(f"{pad}_cites = cited(")
+            self.emit(f"{pad}    [")
+            for cited_range in ranges:
+                self.emit(f"{pad}        {cited_range},")
+            self.emit(f"{pad}    ],")
+            self.emit(f"{pad}    ({start}, {end}),")
+            self.emit(f"{pad})")
         return "_cites[0]", "_cites[1]"
+
+    def cited_range(self, path: tuple[str, ...]) -> str | None:
+        """Return the range a reference's value was read from, as a Python expression.
+
+        A field of this unit has its span locals. A path into a nested unit
+        reads the field's span off the object that holds it
+        (:func:`kober.runtime.span`), as the interpreter cites that field's
+        node. A path that passes through a transform stops there: past it the
+        offsets are the output's, so the transform's own range is the
+        evidence. ``None`` for what this function holds nothing for.
+        """
+        local = self.reachable(path[:1] if path[0] != "this" else path[:2])
+        if local is None or f"_s_{local}" not in self.spans:
+            return None
+        parts = path[1:] if path[0] == "this" else path
+        if len(parts) == 1:
+            return f"(_s_{local}, _e_{local})"
+        steps = walk_path(self.plan, self.obj.unit, parts)
+        holder = local
+        for position, step in enumerate(steps):
+            item = self.plan.object(step.unit).field(step.name)
+            is_transform = item is not None and any(
+                kind.transform is not None for kind in item.types
+            )
+            if position == 0:
+                if is_transform:
+                    return f"(_s_{local}, _e_{local})"
+                continue
+            attribute = self.names.attribute_of(step.unit, step.name)
+            if is_transform or position == len(steps) - 1:
+                return f"span({holder}, {_literal(attribute)})"
+            holder = f"{holder}.{attribute}"
+        return None
 
     def reachable(self, path: tuple[str, ...]) -> str | None:
         """Return the local a reference names, if it is one of this unit's fields.
@@ -1614,6 +2070,17 @@ class _Function:
             return None
         return self.names.attribute_of(self.obj.unit, item.name)
 
+    def derived(self, item: FieldPlan) -> tuple[bool, bool]:
+        """Return whether some, and whether all, of a field's alternatives cite elsewhere.
+
+        A ``concat`` and a ``transform`` read nothing where they stand and cite
+        what they read, as a ``select`` does; unlike a select, a ``switch`` may
+        mix one with an ordinary read, which is how one field holds a body
+        however it was framed.
+        """
+        flags = [value.concat is not None or value.transform is not None for value in item.types]
+        return any(flags), bool(flags) and all(flags)
+
     def container(self, item: FieldPlan) -> bool:
         """Whether a field holds only decoded objects, never a value of its own.
 
@@ -1623,7 +2090,9 @@ class _Function:
         and an integer case still has an integer to write when it takes that
         branch, and the record emitted for it dispatches on the same selector.
         """
-        return all(value.kind is Kind.OBJECT for value in item.types)
+        # A transform writes its own records, citing what it read: its output's,
+        # or its bytes labelled by its content type.
+        return all(value.kind is Kind.OBJECT or value.transform is not None for value in item.types)
 
     def present(self, index: int, item: FieldPlan, target: str | None, indent: int) -> None:
         """Emit a field's read, at whatever indentation its condition left.
@@ -1673,7 +2142,12 @@ class _Function:
             return
         if target is None:
             self.emit(f"{pad}# Anonymous: read and accounted for, but never named.")
-        if target is not None and not self.selected(item):
+        some, every = self.derived(item)
+        if target is not None and some and not every:
+            # A switch mixing an ordinary read with one that cites elsewhere:
+            # which it was is known only once a branch has run.
+            self.emit(f"{pad}_cite_{target} = None")
+        if target is not None and not self.selected(item) and not every:
             # Written down before the read, because a read that does not know
             # its own length moves the anchor the range is measured from. A
             # select is the exception: it reads nothing and takes its extent
@@ -1687,12 +2161,17 @@ class _Function:
             self.value(index, item, target, indent)
         if target is None:
             return
-        if self.selected(item):
+        if self.selected(item) or every:
             # A select's extent is the element it chose, not the empty range
             # where it stands. It read nothing, so `self.end()` here would say
             # only that it happened, and §3.2 wants a value to say where it came
-            # from.
+            # from. A concat and a transform likewise cite what they read.
             self.emit(f"{pad}_s_{target}, _e_{target} = _cite_{target}")
+        elif some:
+            own = f"(_s_{target}, {self.end()})"
+            self.emit(f"{pad}_s_{target}, _e_{target} = (")
+            self.emit(f"{pad}    {own} if _cite_{target} is None else _cite_{target}")
+            self.emit(f"{pad})")
         else:
             self.emit(f"{pad}_e_{target} = {self.end()}")
         if item.repeat is None and not self.container(item):
@@ -1968,6 +2447,17 @@ class _Function:
             return
         self.index_of = index
         self.emit(f"{pad}_selector = {self.evaluate(item.selector, indent)}")
+        chosen = self.chosen(item)
+        if chosen is not None:
+            names, default = chosen
+            self.emit(f"{pad}_name = {names}.get(_selector, {_literal(default.transform.name)})")
+            self.transform_name = "_name"
+            try:
+                self.read(index, default, target, indent, path)
+            finally:
+                self.transform_name = None
+            self.settle(indent)
+            return
         keyword = "if"
         for branch in item.branches:
             if branch.case is None:
@@ -1991,6 +2481,35 @@ class _Function:
             f"{self.stopped()})"
         )
         self.delta = 0
+
+    def chosen(self, item: FieldPlan) -> tuple[str, ValueType] | None:
+        """Return a switch of transforms as a lookup of the name, if it is one.
+
+        A content coding is the common case: every branch runs the same source
+        through a different transform, and nothing else differs. That is one
+        call with the name looked up, rather than a branch per coding, which
+        keeps a unit that decodes several codings under the branch limit
+        generated code is linted to. Only with a default, since without one an
+        unmatched value is a failure of its own.
+
+        Returns:
+            The rendered mapping from case to name, and the default's type;
+            ``None`` if the switch is anything else.
+
+        """
+        default = next((b.type for b in item.branches if b.case is None), None)
+        if default is None or default.transform is None:
+            return None
+        pairs = []
+        for branch in item.branches:
+            plan = branch.type.transform
+            if plan is None or replace(
+                branch.type, transform=replace(plan, name=default.transform.name)
+            ) != default:
+                return None
+            if branch.case is not None:
+                pairs.append(f"{_literal(branch.case)}: {_literal(plan.name)}")
+        return f"{{{', '.join(pairs)}}}", default
 
     def constant_mark(self, item: FieldPlan, indent: int) -> str | None:
         """Emit the local holding where a field carrying a ``const`` begins.
@@ -2055,6 +2574,12 @@ class _Function:
         if value.source is not None:
             self.select(index, value, target, indent)
             return
+        if value.transform is not None:
+            self.transformed(index, value, target or f"_anon{index}", indent, role)
+            return
+        if value.concat is not None:
+            self.joined(index, value, target or f"_anon{index}", indent)
+            return
         if value.expr is not None:
             # Computed: it reads nothing, so an anonymous one leaves no trace.
             if target is not None:
@@ -2073,13 +2598,175 @@ class _Function:
         self.sized(index, value, raw, indent)
         if value.kind is Kind.TEXT and target is not None:
             encoding = _literal(value.encoding or "utf-8")
+            self.emit(f"{pad}{target} = decode_text(_raw, {encoding})")
+
+    def joined(self, index: int, value: ValueType, target: str, indent: int) -> None:
+        """Emit a ``concat``: one field of every element, joined, citing their hull.
+
+        It reads nothing where it stands. The repetition is a list of decoded
+        objects by now, each carrying the span of the member joined.
+        """
+        repeated, member = value.concat or ("", "")
+        self.settle(indent)
+        elements = self.binding(index).render((repeated,))
+        element_unit = next(
+            (v.unit for item in self.obj.fields if item.name == repeated for v in item.types),
+            None,
+        )
+        attribute = self.names.attribute_of(element_unit or "", member)
+        detail = _literal(f"concat: {repeated!r} is not a decoded repetition")
+        self.lines.extend(
+            _call(
+                "concat",
+                [
+                    elements,
+                    _literal(attribute),
+                    self.start(),
+                    f"detail={detail}",
+                    f"at={self.stopped()}",
+                ],
+                indent,
+                target=f"{target}, _cite_{target}",
+            )
+        )
+
+    def transformed(
+        self, index: int, value: ValueType, target: str, indent: int, role: str
+    ) -> None:
+        """Emit a ``transform``: run it, decode its output, and say what it speaks for.
+
+        Every failure is contained and worded as the interpreter words it (the
+        transform plan's *Decided* 1): the field holds a
+        :class:`~kober.runtime.TransformFailed`, the source's record is taken back
+        and its bytes named ``undecodable``, and the message goes on. On
+        success the source's record is taken back too, since the output speaks
+        for it; a typed output is decoded by its unit's function over the
+        output, through an :class:`~kober.runtime.Output` that cites the input
+        and is released only once the whole output has decoded.
+        """
+        pad = " " * indent
+        plan = value.transform
+        if plan is None:
+            return
+        self.settle(indent)
+        self.index_of = index
+        binding = self.binding(index)
+        source = binding.render((plan.source,))
+        field = self.obj.field(plan.source)
+        source_local = None if field is None else self.local_of(field, self.obj.fields.index(field))
+        ranges = []
+        if source_local is not None:
+            ranges.append(f"(_s_{source_local}, _e_{source_local})")
+        for _, expr in plan.args:
+            for ref in references(expr):
+                local = self.reachable(ref.path)
+                if local is not None and f"_s_{local}" in self.spans:
+                    ranges.append(f"(_s_{local}, _e_{local})")
+        here = self.start()
+        self.lines.extend(
+            _call(
+                "cited",
+                [f"[{', '.join(ranges)}]", f"({here}, {here})"],
+                indent,
+                target=f"_cite_{target}",
+            )
+        )
+        name = self.transform_name or _literal(plan.name)
+        call = [name, f"TRANSFORMS[{name}]", source, f"limit={plan.limit}"]
+        if plan.args:
+            # Evaluated here, where the fields are; a failure is the transform's,
+            # as it is in the interpreter, so it is handed on rather than raised.
             self.emit(f"{pad}try:")
-            self.emit(f"{pad}    {target} = _raw.decode({encoding})")
-            self.emit(f"{pad}except UnicodeDecodeError:")
-            self.emit(f"{pad}    # A malformed string is a fact about the input, not a")
-            self.emit(f"{pad}    # failure of the decoder: §3.2. The bytes are accounted")
-            self.emit(f"{pad}    # for either way, so the region stays decoded.")
-            self.emit(f'{pad}    {target} = _raw.decode({encoding}, errors="replace")')
+            arguments = [
+                f"{_literal(key)}: {self.evaluate(expr, indent + 4)}" for key, expr in plan.args
+            ]
+            self.emit(f"{pad}    _args = {{{', '.join(arguments)}}}")
+            self.emit(f"{pad}except Undecodable as _exc:")
+            self.emit(f"{pad}    _args = TransformFailed(str(_exc))")
+            call.append("args=_args")
+        if field is not None:
+            missing = f"{plan.source}: {plan.source!r} has not been decoded"
+            call.append(f"missing={_literal(missing)}")
+        writing = self.threads and self.emits(self.obj.fields[index])
+        if plan.typed:
+            output = "None"
+            if writing:
+                output = "_o"
+                self.emit(
+                    f"{pad}_o = None if _sink is None else Output(_sink, *_cite_{target})"
+                )
+            function, decode = self.unit_call_parts(
+                index, value, [], [output, role], ["0", "-1", "0"]
+            )
+            call.append(f"decode={function}")
+            if decode:
+                call.append(f"decode_args=({', '.join(decode)},)")
+            if writing:
+                call.append(f"output={output}")
+        self.lines.extend(_call("run_transform", call, indent, target=target))
+        if not self.threads:
+            return
+        field_index = None if field is None else self.obj.fields.index(field)
+        over = [target]
+        if field is not None:
+            over.append(f"role={self.segment(field, field_index)}")
+        joins = [] if field is None else [kind.concat is not None for kind in field.types]
+        if source_local is not None and not all(joins or [False]):
+            over.append(f"source=(_s_{source_local}, _e_{source_local})")
+        if field is not None and any(joins):
+            over.append(f"members={self.members(index, field)}")
+            # Where a switch may have joined, `_cite_` says whether it did.
+            joined = "True" if all(joins) else f"_cite_{source_local} is not None"
+            over.append(f"joined={joined}")
+        if not self.emits(self.obj.fields[index]):
+            over.append("skipped=True")
+        elif not plan.typed:
+            content = _literal(plan.content_type or "prim:bytes")
+            over.append(f"record=({content}, {role}, _cite_{target})")
+        spoken = self.spoken(plan)
+        if spoken:
+            over.append(f"spoken=({', '.join(spoken)},)")
+        self.lines.extend(_call("take_over", ["_sink", *over], indent))
+
+    def spoken(self, plan: TransformPlan) -> list[str]:
+        """Return the ranges of the argument fields marked ``emit: none``.
+
+        They are ``skipped`` where they stand, and an output that succeeded
+        cites them, so :func:`kober.runtime.take_over` takes the regions back.
+        """
+        ranges: list[str] = []
+        for _, expr in plan.args:
+            for ref in references(expr):
+                item = self.obj.field(ref.path[0])
+                if item is None or not self.skips(item):
+                    continue
+                local = self.local_of(item, self.obj.fields.index(item))
+                if local is not None and f"_s_{local}" in self.spans:
+                    ranges.append(f"(_s_{local}, _e_{local})")
+        return ranges
+
+    def members(self, index: int, field: FieldPlan) -> str:
+        """Return what a concat source joined, as :func:`kober.runtime.take_over` takes it.
+
+        Raises:
+            CompileError: If the source's branches join different members.
+
+        """
+        joined = {kind.concat for kind in field.types if kind.concat is not None}
+        if len(joined) != 1:
+            msg = (
+                f"unit {self.obj.unit!r}: field {field.name!r} joins different members on "
+                "different branches, and a transform over it cannot say whose bytes failed; "
+                "use the interpreter"
+            )
+            raise CompileError(msg)
+        repeated, member = joined.pop()
+        elements = self.binding(index).render((repeated,))
+        item = self.obj.field(repeated)
+        element_unit = next((v.unit for v in item.types), None) if item is not None else None
+        attribute = self.names.attribute_of(element_unit or "", member)
+        path = self.segment(item, self.obj.fields.index(item)) if item is not None else "_path"
+        return f"({elements}, {_literal(attribute)}, {path}, {_literal(member)})"
 
     def select(self, index: int, value: ValueType, target: str | None, indent: int) -> None:
         """Emit the call to a select's function. The function itself is hoisted.
@@ -2112,7 +2799,10 @@ class _Function:
             return
         self.index_of = index
         binding = self.binding(index)
-        free = _free_values(value)
+        # A document parameter is not a free value: the helper is handed `_doc`.
+        free = tuple(
+            path for path in _free_values(value) if not binding.render(path).startswith("_doc[")
+        )
         name = self.helper(index, value, target, free)
         arguments = [
             binding.render((value.source or "",)),
@@ -2120,6 +2810,7 @@ class _Function:
             ANCHOR,
             self.start(),
             *(binding.render(path) for path in free),
+            *(["_doc"] if self.plan.params else []),
         ]
         self.lines.extend(
             _call(name, arguments, indent, target=f"{target}, _cite_{target}")
@@ -2284,8 +2975,10 @@ class _Function:
         self.aligned("a sized field")
         prefix = "" if target is None else f"{target} = "
         if isinstance(size, Fixed):
-            self.need(size.count * 8, indent)
-            first, after = self.byte(), self.byte(size.count * 8)
+            after = self.byte(size.count * 8)
+            reach = f"_base + {after}" if self.obj.fields[index].tail else None
+            self.need(size.count * 8, indent, reach)
+            first = self.byte()
             self.emit(f"{pad}{prefix}_data[{first}:{after}]")
             self.advance(size.count * 8)
         elif isinstance(size, Remaining):
@@ -2329,14 +3022,14 @@ class _Function:
         pad = " " * indent
         self.index_of = index
         rendered = self.evaluate(size.expr, indent)
-        self.emit(f"{pad}_want = {rendered}")
-        if not self.provable(size.expr):
-            self.emit(f"{pad}if _want < 0:")
-            self.emit(f'{pad}    raise Undecodable(f"negative size {{_want}}", {self.stopped()})')
+        if self.provable(size.expr):
+            self.emit(f"{pad}_want = {rendered}")
+        else:
+            self.emit(f"{pad}_want = size_of({rendered}, {self.stopped()})")
         start = self.byte()
         room = f"_size - {start}" if start == ANCHOR else f"_size - ({start})"
         self.emit(f"{pad}if {room} < _want:")
-        self.emit(f'{pad}    raise TruncatedRead("truncated", {self.stopped()})')
+        self.truncated(pad, f"_base + {start} + _want" if self.obj.fields[index].tail else None)
         self.emit(f"{pad}{prefix}_data[{start}:{start} + _want]")
         self.rebase(f"{start} + _want", indent)
 
@@ -2397,20 +3090,58 @@ class _Function:
 
     def call(self, index: int, value: ValueType, role: str) -> str:
         """Return the call that decodes a nested unit."""
+        self.aligned(f"the call to unit {value.unit or ''!r}")
+        return self.unit_call(
+            index,
+            value,
+            ["_data", "_size", self.byte(), "_base"],
+            ["_sink", role],
+            [MESSAGE_ORIGIN, POINTER_LIMIT, POINTER_HOPS],
+        )
+
+    def unit_call(
+        self,
+        index: int,
+        value: ValueType,
+        where: list[str],
+        sink: list[str],
+        pointers: list[str],
+    ) -> str:
+        """Return a call to a unit's function, reading from ``where``.
+
+        ``where`` is its four positional arguments, ``_data`` to ``_base``;
+        ``sink`` its sink and path, when this function threads them; and
+        ``pointers`` the message's pointer state, where the plan has pointers.
+        A transform's output is decoded through this with its own data, sink
+        and pointer state.
+        """
+        name, arguments = self.unit_call_parts(index, value, where, sink, pointers)
+        return f"{name}({', '.join(arguments)})"
+
+    def unit_call_parts(
+        self,
+        index: int,
+        value: ValueType,
+        where: list[str],
+        sink: list[str],
+        pointers: list[str],
+    ) -> tuple[str, list[str]]:
+        """Return :meth:`unit_call`'s function and arguments, for a caller that wraps them."""
         unit = value.unit or ""
         target = self.plan.object(unit)
         binding = self.binding(index)
-        self.aligned(f"the call to unit {unit!r}")
-        arguments = ["_data", "_size", self.byte(), "_base"]
+        arguments = list(where)
+        if self.plan.params:
+            arguments.append("_doc")
         if self.threads:
-            arguments.extend(["_sink", role])
+            arguments.extend(sink)
         arguments.extend(render_expr(argument, binding) for argument in value.args)
         arguments.extend(self.outer(index, target))
         if self.plan.recursive:
             arguments.append("_depth + 1")
         if self.plan.pointers:
-            arguments.extend([MESSAGE_ORIGIN, POINTER_LIMIT, POINTER_HOPS])
-        return f"{self.names.function_of(unit)}({', '.join(arguments)})"
+            arguments.extend(pointers)
+        return self.names.function_of(unit), arguments
 
     def outer(self, index: int, target: ObjectPlan) -> list[str]:
         """Return the outer values a nested unit needs, from where this one holds them.
@@ -2433,7 +3164,7 @@ class _Function:
         self.lines.append(line)
 
 
-def _failing(where: str) -> list[str]:
+def _failing(where: str, raised: str = "Undecodable") -> list[str]:
     """Return the handlers that turn a failed expression into ``Undecodable``.
 
     Worded as the interpreter words it, and for division by zero fixed rather
@@ -2443,6 +3174,9 @@ def _failing(where: str) -> list[str]:
 
     Args:
         where: The position expression to report the failure at.
+        raised: The exception to raise. A guard that cannot be decided raises
+            ``Refused``, because a guard that did not hold is a refusal
+            whatever the reason (``DESIGN.md`` §3.1).
 
     Returns:
         The ``except`` clauses, unindented, for the ``try`` just emitted.
@@ -2450,9 +3184,9 @@ def _failing(where: str) -> list[str]:
     """
     return [
         "except ZeroDivisionError as _exc:",
-        f'    raise Undecodable("division by zero", {where}) from _exc',
+        f'    raise {raised}("division by zero", {where}) from _exc',
         "except EvalError as _exc:",
-        f"    raise Undecodable(str(_exc), {where}) from _exc",
+        f"    raise {raised}(str(_exc), {where}) from _exc",
     ]
 
 
@@ -2466,11 +3200,13 @@ def _fallible(rendered: str) -> bool:
     ``to_int`` is here because the differential put it here: text that is not a
     number raises, and without the wrapper a generated decoder let `EvalError`
     escape — breaking the promise that a decode never raises, on input the
-    interpreter had already turned into an undecodable region.
+    interpreter had already turned into an undecodable region. ``present`` is
+    here for the same reason: a field under a condition may be absent, and a
+    transform's may have failed.
     """
     return any(
         token in rendered
-        for token in ("//", " % ", "shift_left(", "shift_right(", "to_int(")
+        for token in ("//", " % ", "shift_left(", "shift_right(", "to_int(", "present(")
     )
 
 
@@ -2578,8 +3314,19 @@ def render_entry(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.ME
         arguments.extend(["sink", "NAME"])
     if plan.recursive:
         arguments.append("0")
+    if plan.params:
+        signature = [
+            "def decode_from(",
+            "    cur: Cursor,",
+            "    sink: Sink | None = None,",
+            "    *,",
+            "    params: Mapping[str, object] | None = None,",
+            f") -> {cls}:",
+        ]
+    else:
+        signature = [f"def decode_from(cur: Cursor, sink: Sink | None = None) -> {cls}:"]
     lines = [
-        f"def decode_from(cur: Cursor, sink: Sink | None = None) -> {cls}:",
+        *signature,
         f'    """Decode one ``{unit}`` from wherever ``cur`` stands.',
         "",
         *_wrap(
@@ -2593,6 +3340,11 @@ def render_entry(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.ME
         "    Args:",
         "        cur: The cursor to read from.",
         "        sink: Where records and undecoded regions go.",
+        *(
+            ["        params: The document's parameters, by name: every one in PARAMS."]
+            if plan.params
+            else []
+        ),
         "",
         "    Returns:",
         f"        The decoded ``{unit}``.",
@@ -2604,6 +3356,8 @@ def render_entry(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.ME
         '    """',
     ]
     arguments = ["_data", "_size", "_at", "cur.base"]
+    if plan.params:
+        arguments.append("_doc")
     if emit is Emit.FIELD:
         arguments.extend(["sink", "NAME"])
     if plan.recursive:
@@ -2612,6 +3366,8 @@ def render_entry(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.ME
         # The origin is where *this* message starts, not where the run does.
         arguments.extend(["_start", "-1", "0"])
     call = f"{names.function_of(plan.entry)}({', '.join(arguments)})"
+    if plan.params:
+        lines.append("    _doc = document_params(NAME, PARAMS, params or {})")
     lines.extend(
         [
             "    _data = cur.data",
@@ -2686,7 +3442,22 @@ def render_entry(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.ME
         [
             "",
             "",
-            f"def decode(data: bytes, *, base: int = 0, sink: Sink | None = None) -> {cls} | None:",
+            *(
+                [
+                    "def decode(",
+                    "    data: bytes,",
+                    "    *,",
+                    "    base: int = 0,",
+                    "    sink: Sink | None = None,",
+                    "    params: Mapping[str, object] | None = None,",
+                    f") -> {cls} | None:",
+                ]
+                if plan.params
+                else [
+                    f"def decode(data: bytes, *, base: int = 0, sink: Sink | None = None) -> "
+                    f"{cls} | None:"
+                ]
+            ),
             f'    """Decode one ``{unit}`` from ``data``, accounting for all of it.',
             "",
             *_wrap(
@@ -2711,6 +3482,11 @@ def render_entry(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.ME
             "        sink: Where records and undecoded regions go. ``None`` decodes",
             "            without emitting anything, for a caller who wants only the",
             "            typed objects.",
+            *(
+                ["        params: The document's parameters, by name: every one in PARAMS."]
+                if plan.params
+                else []
+            ),
             "",
             "    Returns:",
             "        The message, or ``None`` if it could not be decoded.",
@@ -2719,7 +3495,11 @@ def render_entry(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.ME
             "    cur = Cursor(data, base)",
             "    _end = base + len(data)",
             "    try:",
-            "        _message = decode_from(cur, sink)",
+            (
+                "        _message = decode_from(cur, sink, params=params)"
+                if plan.params
+                else "        _message = decode_from(cur, sink)"
+            ),
             "    except Stopped as _exc:",
             "        if sink is not None:",
             *_comment(
@@ -2848,6 +3628,8 @@ def _value_annotation(values: Sequence[ValueType], names: Names) -> str:
         names.class_of(value.unit or "") if value.kind is Kind.OBJECT else ANNOTATIONS[value.kind]
         for value in values
     )
+    if any(value.transform is not None for value in values):
+        parts["TransformFailed"] = None
     return " | ".join(parts)
 
 
@@ -2984,7 +3766,8 @@ def render_enums(plan: Plan, names: Names | None = None) -> str:
 def _granularity_constants(plan: Plan, emit: Emit) -> list[str]:
     """Return the constants that say what a module is, and what it needs.
 
-    ``NAME`` and ``VERSION`` record which spec; ``EMIT`` records which way it
+    ``NAME`` and ``VERSION`` record which spec, and ``SPEC_DIGEST`` exactly
+    which; ``EMIT`` records which way it
     was built, as the :class:`~kober.spec.Emit` value's string rather than the
     enum, since a generated module imports :mod:`kober.runtime` only and the
     string is what a spec says. The stage driver reads ``EMIT`` to declare what
@@ -3007,7 +3790,31 @@ def _granularity_constants(plan: Plan, emit: Emit) -> list[str]:
         "#: the output's records assert about one another.",
         f"EMIT = {_literal(emit.value)}",
         "",
+        "#: A digest of the specification, which the stage driver combines with",
+        "#: EMIT and the parameters into the output's ``params_digest``, the one",
+        "#: the interpreter writes for the same configuration.",
+        f"SPEC_DIGEST = {_literal(plan.spec_digest)}",
+        "",
     ]
+    if plan.params:
+        declared = ", ".join(
+            f"{_literal(param.name)}: {_literal(PARAM_TYPES[param.kind])}"
+            for param in plan.params
+        )
+        lines += [
+            "#: The document's parameters and their types: every one must be supplied",
+            "#: to a decode, as ``params=``.",
+            f"PARAMS = MappingProxyType({{{declared}}})",
+            "",
+        ]
+    if plan.transforms:
+        listed = ", ".join(_literal(name) for name in plan.transforms)
+        lines += [
+            "#: What each transform this module uses is bound to, bound when it is",
+            "#: imported: a name nothing binds fails the import, not every message.",
+            f"TRANSFORMS = bind_transforms(({listed},))",
+            "",
+        ]
     if emit is Emit.MESSAGE:
         return lines + [
             "#: How a whole-message record is labelled. A ``dec:`` type means",
@@ -3156,9 +3963,11 @@ def render(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.MESSAGE)
     body.extend([_rule("the decoder"), "", "", render_decoder(plan, names, emit=emit), "", ""])
     body.extend([_rule("entry points"), "", "", render_entry(plan, names, emit=emit), ""])
     rendered = "\n".join(body)
-    lines.extend(_runtime_import(rendered))
+    constants = _granularity_constants(plan, emit)
+    # The constants are scanned too: `TRANSFORMS` calls into the runtime.
+    lines.extend(_runtime_import("\n".join([rendered, *constants])))
     lines.extend(["if TYPE_CHECKING:", "    from collections.abc import Mapping", ""])
-    lines.extend(_granularity_constants(plan, emit))
+    lines.extend(constants)
     source = "\n".join([*lines, rendered])
     try:
         ast.parse(source)
