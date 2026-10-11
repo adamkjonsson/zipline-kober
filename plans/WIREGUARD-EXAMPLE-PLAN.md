@@ -1,0 +1,338 @@
+# Phase plan: a WireGuard tunnel, as the worked example of bringing your own code
+
+**State: not started.** Upstream issues filed 2026-10-11 (see *What it waits
+for*). Nothing in this repository has changed yet.
+
+> **Written 2026-10-11** against `0.5.0`, `zpf` 0.5.1 (spec 0.21), packeteer
+> 0.17.0, `zpfwire` 0.4.0. The prompt: *make a demo that decodes a VPN tunnel,
+> WireGuard, with keys and cleartexts known so the decode can be checked, and
+> with packeteer generating the traffic under impairments of the author's
+> choosing.* A follow-up widened it: the demo is to be **the** example of
+> implementing a protocol that needs the user's own transform code, test
+> material included. So no WireGuard-specific code goes into kober,
+> packeteer, `python-zipline` or `zpfwire`. Each gets a general seam instead,
+> and how easy that seam is to use counts as a design goal in its own right.
+
+```
+  packeteer stream (DNS, later HTTP)                        ← inner traffic, generated
+      │  inner impairments (TCP: loss, retransmission, …)
+      ▼
+  wg_seal.py  — the user's tunnel wrapper (packeteer#197)   ← handshake, counters, keys
+      │  outer impairments: loss, corruption, reorder, duplicate (#194, #196)
+      ▼
+  wg.pcap ──zpfwire convert──▶ outer.zpf
+      │
+      ▼  kober run wireguard.yaml --load-transforms wg_transforms.py --param keys=file:keys.json
+  packets.zpf   one dec:ip-packet per datagram; a bad tag is decrypt-failed
+      │
+      ▼  zpfwire convert packets.zpf (zpfwire#35)
+  inner.zpf ──kober run dns.yaml──▶ dns.zpf
+      │
+      ▼
+  checked against truth.jsonl, which wg_seal.py wrote as it sealed
+```
+
+This is `../zipline/vectors/tunnel/` built from real traffic rather than by
+hand, and it is the first time that chain would run end to end.
+
+## Why this phase
+
+**Decryption is the half of the transform phase that was never shown on a
+real protocol.** `0.5.0` proved `transform` with gzip and deflate on HTTP, and
+proved the tunnel *shape* with `tests/cipher.py`, an XOR with a CRC "tag". No
+real cipher, real framing, real key handling, or traffic that was not built in
+a test. The `transforming-protocols` goal, compression **and** encryption,
+is half met.
+
+**Every user who has a protocol of their own will do the same steps.** They
+write a transform kober cannot ship (`CLAUDE.md`: stdlib only, no cipher),
+write a generator packeteer cannot ship, and wire the two to a spec. Today
+each step is possible but awkward, and nothing shows how the pieces fit. One
+example worked through completely, with the awkward parts fixed upstream, is
+worth more than a section of prose.
+
+**It is affordable now.** The 2026-10-11 investigation ran a prototype end to
+end. It used a stdlib ChaCha20-Poly1305 that passes RFC 8439 §2.8.2 at about
+6 ms per 1400-byte packet, a sketch `wireguard.yaml` that passes `kober check`
+on `0.5.0` unchanged, and packeteer → `zpfwire` → `kober run --emit field`.
+Every plaintext came back as one `dec:ip-packet` record citing its datagram.
+What did not work is the subject of this plan.
+
+## What the prototype found
+
+1. **The spec language is enough for the framing.** The four message types
+   are a `switch` on `type`. The transport message is `receiver`, `counter`
+   (both little-endian, `emit: none`) and `sealed`, then a declared transform
+   `wg-transport: {params: {key: bytes, counter: int}}`. The handshake decodes
+   as structure. Its encrypted fields stay opaque bytes, because Noise IK
+   carries state from initiation to response and a transform keeps none
+   (`DESIGN.md` §11.5; transform plan Q8). That is a line this phase keeps,
+   not one it moves.
+2. **Picking the key is where it breaks.** Each direction has its own key, and
+   a transport message names the *receiver's* index. With no conditional
+   expression, the sketch dispatched on `receiver ^ initiator_index` to two
+   `switch` cases, one per key. It works, but it reads like a trick, and it
+   cannot survive a rekey, which brings new indices and keys. Because
+   `receiver` is read only by the dispatch, it is written as `skipped`,
+   although it chose the key.
+3. **A failed tag is written `undecodable`.** The vector, and any reader, would
+   say `decrypt-failed`. `zpf` already carries that reason in its open
+   vocabulary, with `reason_class` saying how to treat it.
+4. **packeteer's UDP path dropped every impairment in silence**
+   ([packeteer#194](https://github.com/adamkjonsson/packeteer/issues/194)).
+   It also sends everything client to server (#195), and `--gap-jitter` cannot
+   reorder it (#196). So this pipeline's own "lossy DNS" corpus has never
+   been lossy. That is worth a line in the CHANGELOG when #194 lands and the
+   pipeline baseline moves.
+5. **Nothing turns decrypted packets into sessions.** `zpfwire` reads captures
+   only ([zpfwire#35](https://github.com/adamkjonsson/python-zipline-wire/issues/35)).
+
+## What it waits for
+
+| Issue | What it gives | What it blocks here | Until it lands |
+| --- | --- | --- | --- |
+| [packeteer#194](https://github.com/adamkjonsson/packeteer/issues/194) | UDP loss and corruption that apply | Every impaired corpus | Nothing impaired; the clean path works |
+| [packeteer#195](https://github.com/adamkjonsson/packeteer/issues/195) | Datagrams in both directions | Both keys exercised from a generated stream | One direction; hand-built tests cover the other |
+| [packeteer#196](https://github.com/adamkjonsson/packeteer/issues/196) | Reordering, duplication | The two impairments a counter nonce exists for | Not shown |
+| [packeteer#197](https://github.com/adamkjonsson/packeteer/issues/197) | A tunnel whose payload is the user's code, in wire order | Stage 4 as designed | `tools/` script feeding a one-field protocol, as `gzip_http.py` does |
+| [zpfwire#35](https://github.com/adamkjonsson/python-zipline-wire/issues/35) | Sessions from a `.zpf` of IP packets | Stage 5 as designed | Stage 5's fallback |
+
+Nothing is needed from `python-zipline`.
+
+**Stages 1–3 depend on none of them**, and are worth landing first: they are
+the kober half, and they are testable with datagrams built in the test.
+
+## Design questions
+
+### Q1 — How does a spec choose a key? *(language addition)*
+
+**Leaning: a map-typed document parameter, read by indexing.**
+
+```yaml
+params:
+  keys: {type: {map: [int, bytes]}, secret: true}
+...
+      - name: packet
+        transform:
+          from: sealed
+          with: wg-transport
+          limit: 65535
+          args: {key: "keys[receiver]", counter: counter}
+          content_type: "dec:ip-packet"
+```
+
+- **It is what the protocol does.** A WireGuard peer finds a session by the
+  receiver index in the message. The same table holds both directions, every
+  rekey and every peer. TLS key logs, ESP SAs keyed by SPI, and OpenVPN peer
+  IDs have the same shape, so this is not a WireGuard feature.
+- **`check` stays static.** `keys[receiver]` is typed from the declaration:
+  the index must be `int`, and the result is `bytes`. Indexing is only allowed
+  on a map-typed **parameter**. There is no list type, and none is added
+  (`concepts.md`, *What a spec cannot say*).
+- **A missing index is the existing rule.** An argument that cannot be
+  evaluated fails the transform, its source is named (Q2), and the message
+  goes on. That is correct for a session whose key nobody logged.
+- **Citation comes free.** `receiver` becomes an argument, and an output cites
+  its arguments, so the `skipped` quirk of finding 2 is gone.
+- **From the CLI**, `--param keys=file:keys.json` reads a JSON object mapping
+  each key's text form (`"1234"`) to the value's text form (`"hex:…"`), the
+  same per-type rules `--param` uses now. From Python, a `dict`. The tunnel
+  wrapper writes `keys.json` in exactly that form, so generator and decoder
+  meet with no glue. This is the ergonomic point, and it should be
+  demonstrated, not just possible.
+- **Digest.** A secret map is hashed whole, in a canonical order, and nothing
+  of it is written, as a secret `bytes` is now.
+
+Allowed map types: keys `int` or `str`, values any scalar. Also
+`ast.Subscript`, which `expr.py` currently refuses by name, admitted only
+when its value is a map parameter. The refusal message for every other
+subscript stays.
+
+*Considered and not leaned on:*
+
+- **A conditional expression** (`a if c else b`). It is cheaper and generally
+  useful, but it picks between keys known when the spec is written, so it
+  fails the moment there is a rekey. It is worth having on its own merits, but
+  it is not this phase's answer.
+- **`switch` cases keyed by parameters.** It is the trick made official, and
+  it has the same rekey problem.
+
+### Q2 — What does a failed decryption write?
+
+**Leaning: the declaration names it.**
+
+```yaml
+transforms:
+  wg-transport: {params: {key: bytes, counter: int}, fails_as: decrypt-failed}
+```
+
+The region is written with that reason and `reason_class: bytes`, and the
+discontinuity carries it too, which is the vector's shape. Undeclared, it
+stays `undecodable`. A name that `zpf` classifies otherwise must agree with
+it, and `check` refuses `fails_as: gap`, since a failed transform's bytes
+did exist. The fuzz invariant *every reason is one `zpf` classifies* widens
+to *one `zpf` classifies, or a declared `fails_as` with its class*, and gets
+a fuzz test of its own (`CLAUDE.md`, *Testing*).
+
+Open: whether a core codec's failure should then be `decompress-failed` by
+the same route. Not this phase. The key is general enough to allow it later.
+
+### Q3 — Where does the user's code live?
+
+**In `examples/wireguard/`, never in `src/kober`.** It is the example, and it is
+what a user copies:
+
+| File | What it is |
+| --- | --- |
+| `wireguard.yaml` | The spec. |
+| `wg_crypto.py` | ChaCha20-Poly1305, and for Q5 X25519, BLAKE2s-based HKDF and the Noise IK steps, stdlib only. |
+| `wg_transforms.py` | Registers `wg-transport`. It is what `--load-transforms` loads, and it is ten lines, which is the point. |
+| `wg_seal.py` | The packeteer tunnel wrapper (#197): handshake, counters, `keys.json`, `truth.jsonl`. |
+| `README.md` | How to run it, and what each file teaches. |
+
+`examples/` has held only specs until now. `test_examples.py` and the docs'
+example loader must skip the `.py` files rather than read them as specs.
+
+### Q4 — How is the cipher itself verified?
+
+**Independently of the code that seals.** `wg_seal.py` and `wg_transforms.py`
+share `wg_crypto.py`. A bug in it would seal and open consistently, and the
+whole demo would pass over a cipher that is not ChaCha20-Poly1305. So:
+
+- **Known-answer tests**: RFC 8439 §2.8.2 (AEAD), §2.5.2 (Poly1305), §2.4.2
+  (ChaCha20) and RFC 7748 §5.2/§6.1 (X25519).
+- **A WireGuard known answer**: a handshake and first transport message whose
+  bytes come from outside this code, so the framing and the key derivation are
+  checked, not only the primitives. Where it comes from is open: a capture with
+  logged keys is the obvious candidate, and `../python-zipline-wire/tests/captures/`
+  has none.
+- **An optional cross-check**: if `cryptography` happens to be installed, open
+  everything with it too. Skipped otherwise. A test may use what the product
+  may not.
+
+### Q5 — A real handshake, or chosen transport keys?
+
+**Leaning: real.** `wg_seal.py` runs Noise IK from chosen static and ephemeral
+private keys, so the capture is genuine WireGuard. Wireshark, given the same
+keys, should decrypt it. That is the outside check that example tests cannot
+give (`CLAUDE.md`: example-based tests verify the code against its author's
+reading). The "known keys" a user chooses are then the four private keys, and
+`keys.json` is derived. It costs about 100 more lines of stdlib code in the
+example: X25519 and the handshake. Chosen transport keys with a handshake of
+random bytes would decode identically in kober, and would teach less.
+
+### Q6 — What is inside the tunnel?
+
+**DNS first, over UDP:** one inner packet is one message, so Stage 5 has a
+fallback that needs no reassembly. **HTTP over TCP second**, once zpfwire#35
+lands. It is the case where inner impairments (retransmission) and outer ones
+(loss of a sealed datagram) interact, and where #197's "seal in wire order"
+pays off.
+
+### Q7 — What is the oracle?
+
+`truth.jsonl`, written by the wrapper as it seals. Each line holds a direction,
+counter, receiver index, the inner packet, and whether the outer datagram was
+later lost, corrupted or duplicated. Whether the wrapper can know the outer
+fate depends on where #197 puts the outer impairments, so that is an open
+question to put to that issue's design. The assertions are shape first
+(`CLAUDE.md`: *assert the shape*):
+
+- decrypted records = sealed datagrams − lost − corrupted + duplicated;
+- each one byte-identical to its inner packet;
+- each corrupted datagram is exactly one `decrypt-failed` region;
+- order and duplication make no difference to any record's content.
+
+### Q8 — Replays and duplicates
+
+A duplicated datagram decrypts twice. Kober keeps nothing between messages, so
+it cannot do what WireGuard's replay window does. The example says so in its
+README rather than leaving it to be discovered. It is the same line as Q8 of
+the transform plan.
+
+## Stages
+
+### Stage 0 — `0.6.0.dev0`, and a baseline
+
+Version bump. Run `tools/pipeline.py` and keep its output as the
+`--baseline` for this phase.
+
+### Stage 1 — map parameters and indexing (Q1)
+
+Model (`spec.py`: `Param.type` gains a map type), loader, `check` (indexing
+only on a map parameter; key type matches; result typed), the interpreter
+(`expr.py`), the compiler (`pygen.py`), `--param` parsing from `file:` JSON
+(`cli.py`), and `params_digest` canonical over a map. Fuzz: an index that is
+missing never raises, and fails the transform. Docs: `types.md`,
+`document.md#params`, `expressions.md` (*What cannot be referenced* gains its
+exception). CHANGELOG under `Added`.
+
+### Stage 2 — `fails_as` (Q2)
+
+Declaration key, `check` against `zpf.blocks.UNDECODED_REASONS`, emission in
+both drivers (`emit.py`, `runtime.py`, `stage.py`), the discontinuity's
+reason, the widened fuzz invariant. CHANGELOG under `Added`.
+
+### Stage 3 — the example, decoded from datagrams built in the test
+
+`examples/wireguard/` without `wg_seal.py`: spec, crypto, transforms, the
+known-answer tests of Q4. A stage test builds datagrams in Python, both
+directions and a rekey, through both drivers, with the `tests/cipher.py` tests
+as the template. **This proves the kober half without any upstream issue.**
+
+### Stage 4 — generated traffic
+
+`wg_seal.py` against packeteer#197, with #194–#196 for the impairments. Until
+#197 lands, a `tools/wireguard.py` in the shape of `tools/gzip_http.py`
+generates the inner stream with packeteer, seals it itself, and feeds it
+through a one-field UDP protocol. That interim script is deleted when #197
+lands, not kept beside it. A worked example that shows a workaround teaches
+the workaround.
+
+### Stage 5 — the inner traffic
+
+With zpfwire#35: `packets.zpf` → `inner.zpf` → `examples/dns.yaml`, checked
+against `truth.jsonl`. First check that kober's tunnel output has the shape #35
+expects (`vectors/tunnel/packets.jsonl`: its own session, `dec:ip-packet`).
+That is unverified today. Fallback until #35: a second-stage spec that reads
+IPv4 and UDP headers and then DNS from each plaintext record, which needs no
+reassembly. Whether it lives on as an example after #35 is decided then.
+
+### Stage 6 — the pipeline and the walkthrough
+
+- `tools/pipeline.py` gains the WireGuard corpus: clean, and each impairment
+  alone, so a moved count says which one moved it.
+- The lossy DNS corpus is re-baselined once #194 makes it lossy.
+- A docs page, *Bringing your own code: a WireGuard tunnel*. It is written for
+  a user with a protocol of their own and walks through the five files, the
+  two commands, and the decisions (Q1, Q2, Q4, Q8). It is linked from
+  `types.md#transform`, which today only says a cipher is the caller's.
+- `run` it as a user would, from the README, in a clean venv.
+
+## Acceptance
+
+1. A user can run the example from its README with packeteer, `zpfwire` and
+   kober installed, and nothing else.
+2. The pipeline's WireGuard corpus decodes to `truth.jsonl` exactly (Q7),
+   under loss, corruption, reordering and duplication, with both directions
+   and at least one rekey.
+3. Each corrupted datagram is one `decrypt-failed` region with
+   `reason_class: bytes`, and the next datagram decodes.
+4. No key appears in any output, diagnostic or failure detail.
+   `params_digest` differs when any key in `keys.json` differs.
+5. Nothing under `src/kober` names WireGuard, and no upstream project gained
+   WireGuard code.
+6. The cipher passes its known-answer tests independently of `wg_seal.py`
+   (Q4).
+7. The walkthrough is the page a user with another protocol would follow.
+   Read it as that user before calling it done.
+
+## What this phase does not do
+
+- **Decrypt the handshake in kober.** The Noise IK state runs across
+  messages. If that line ever moves, it moves in its own phase, with the
+  stateful-transform design the transform plan reserved.
+- **Detect replays.** Same reason (Q8).
+- **Ship a cipher in kober.** `CLAUDE.md`, and the transform plan's Q7.
+- **Add a conditional expression.** That is considered under Q1 and is worth
+  doing on its own merits, separately.
