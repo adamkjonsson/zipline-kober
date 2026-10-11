@@ -46,10 +46,12 @@ minor bump here too.
 
 ### Changed
 
-- `kober.expr.Scope` gains `resolve_map(name)` and `kober.expr.Environment`
-  gains `lookup_map(name)`: an implementation of either protocol outside kober
-  needs the method to type or evaluate an expression that indexes a map.
-  `Param.type` may now be a `MapType`, for a document parameter.
+- **Breaking:** `kober.expr.Scope` gains `resolve_map(name)` and
+  `kober.expr.Environment` gains `lookup_map(name)`. An implementation of
+  either protocol outside kober must add the method, raising `ExprError` or
+  `EvalError` if it has no maps, to type or evaluate an expression that
+  indexes one. `Param.type` may now be a `MapType`, for a document parameter,
+  so code that reads it as an `ExprType` must allow for one.
 
 ## [0.5.0] - 2026-09-28
 
