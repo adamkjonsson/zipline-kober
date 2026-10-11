@@ -47,6 +47,7 @@ from kober.expr import (
     BoolOp,
     Call,
     Compare,
+    Index,
     IntLiteral,
     Ref,
     StrLiteral,
@@ -63,7 +64,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from kober.expr import Expr
-    from kober.ops import FieldPlan, ObjectPlan, ValueType
+    from kober.ops import FieldPlan, ObjectPlan, ParamPlan, ValueType
     from kober.spec import Spec
 
 #: Longest line the backend emits, matching this project's ``ruff.toml``.
@@ -101,6 +102,7 @@ RESERVED_MODULE = frozenset(
         "Protocol",
         "Sink",
         "Spanned",
+        "map_entry",
         "shift_left",
         "shift_right",
         "to_int",
@@ -137,6 +139,7 @@ RUNTIME_NAMES = frozenset(
         "concat",
         "decode_text",
         "document_params",
+        "map_entry",
         "size_of",
         "run_transform",
         "take_over",
@@ -283,6 +286,20 @@ PARAM_TYPES: Mapping[Kind, str] = {
     Kind.TEXT: "str",
     Kind.BYTES: "bytes",
 }
+
+
+
+def _param_type(param: ParamPlan) -> str:
+    """Spell a document parameter's type as ``PARAMS`` does, a map's included.
+
+    The spelling is :attr:`kober.expr.MapType.value`'s, which is what
+    :func:`kober.runtime.document_params` reads back.
+    """
+    if param.entries is None:
+        return PARAM_TYPES[param.kind]
+    key, item = param.entries
+    return f"map[{PARAM_TYPES[key]}, {PARAM_TYPES[item]}]"
+
 
 ANNOTATIONS: Mapping[Kind, str] = {
     Kind.INT: "int",
@@ -1049,6 +1066,11 @@ def _expr(expr: Expr, binding: Binding, limit: int) -> str:
         return _group(f"{left} {expr.op} {right}", level, limit)
     if isinstance(expr, Call):
         return _builtin(expr, binding)
+    if isinstance(expr, Index):
+        # An atom, like a call. Through the runtime's helper, which is the
+        # interpreter's own, so a missing entry is worded the same in both.
+        name = _literal(expr.table)
+        return f"map_entry(_doc[{name}], {_expr(expr.key, binding, 0)}, {name})"
     return _binary(expr, binding, limit)
 
 
@@ -3193,9 +3215,10 @@ def _failing(where: str, raised: str = "Undecodable") -> list[str]:
 def _fallible(rendered: str) -> bool:
     """Whether a rendered expression can fail for some input.
 
-    Integer division, modulo, a bounded shift, and reading text as a number.
-    Everything else in this language answers for every value it can be handed,
-    which is what makes checking worth the two lines it costs.
+    Integer division, modulo, a bounded shift, reading text as a number, and
+    an entry of a map parameter, which may not be there. Everything else in
+    this language answers for every value it can be handed, which is what
+    makes checking worth the two lines it costs.
 
     ``to_int`` is here because the differential put it here: text that is not a
     number raises, and without the wrapper a generated decoder let `EvalError`
@@ -3206,7 +3229,9 @@ def _fallible(rendered: str) -> bool:
     """
     return any(
         token in rendered
-        for token in ("//", " % ", "shift_left(", "shift_right(", "to_int(", "present(")
+        for token in (
+            "//", " % ", "shift_left(", "shift_right(", "to_int(", "present(", "map_entry("
+        )
     )
 
 
@@ -3798,8 +3823,7 @@ def _granularity_constants(plan: Plan, emit: Emit) -> list[str]:
     ]
     if plan.params:
         declared = ", ".join(
-            f"{_literal(param.name)}: {_literal(PARAM_TYPES[param.kind])}"
-            for param in plan.params
+            f"{_literal(param.name)}: {_literal(_param_type(param))}" for param in plan.params
         )
         lines += [
             "#: The document's parameters and their types: every one must be supplied",
@@ -3904,6 +3928,8 @@ def _shift_names(expr: Expr) -> set[str]:
             found |= _shift_names(operand)
     elif isinstance(expr, UnaryOp):
         found |= _shift_names(expr.operand)
+    elif isinstance(expr, Index):
+        found |= _shift_names(expr.key)
     return found
 
 

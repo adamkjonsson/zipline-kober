@@ -1,9 +1,10 @@
 # Phase plan: a WireGuard tunnel, as the worked example of bringing your own code
 
-**State: Stage 0 done (2026-10-11).** `0.6.0.dev0`, with the pipeline baseline
-taken on the unchanged `0.5.0` code in `../kober-baselines/v0.5.0`, outside the
-repository. Upstream issues filed 2026-10-11 (see *What it waits for*). Stage 1
-is next.
+**State: Stages 0 and 1 done (2026-10-11).** `0.6.0.dev0`, with the pipeline
+baseline taken on the unchanged `0.5.0` code in `../kober-baselines/v0.5.0`,
+outside the repository; map parameters and `keys[receiver]` landed in both
+backends (*Stage 1 — done*, below). Upstream issues filed 2026-10-11 (see
+*What it waits for*). Stage 2 is next.
 
 > **Written 2026-10-11** against `0.5.0`, `zpf` 0.5.1 (spec 0.21), packeteer
 > 0.17.0, `zpfwire` 0.4.0. The prompt: *make a demo that decodes a VPN tunnel,
@@ -268,6 +269,40 @@ only on a map parameter; key type matches; result typed), the interpreter
 missing never raises, and fails the transform. Docs: `types.md`,
 `document.md#params`, `expressions.md` (*What cannot be referenced* gains its
 exception). CHANGELOG under `Added`.
+
+#### Stage 1 — done
+
+As Q1 leaned, with these choices made on the way:
+
+- **Spelling.** `{type: {map: [K, V]}}`, long form only, since a map has no
+  short form that does not collide with a parameter's long one. A map's type
+  spells itself `map[K, V]` (`MapType.value`, named like an `ExprType`'s), and
+  that string is the contract between the backends: a generated module's
+  `PARAMS` holds it, and `document_params` reads it back.
+- **The node.** `kober.expr.Index(table, key)`, where the table is a name and
+  never an expression. `Scope` gains `resolve_map` and `Environment`
+  `lookup_map`, which is a change to two public protocols, recorded under
+  `Changed`. The plan gains `Kind.MAP` and `ParamPlan.entries`, so it stays
+  language-neutral.
+- **One helper, two backends.** `kober.expr.map_entry` is the interpreter's
+  lookup and what generated code calls, as `shift_left` is, so a missing entry
+  is worded `'keys' has no entry for 9` by both.
+- **A supplied map is copied**, read-only, when the decode is set up, so the
+  digest and the decode cannot drift from each other if the caller changes
+  their `dict`.
+- **On failure the receiver is `skipped`.** The output cites the key's
+  fields when it succeeds. When it fails, an `emit: none` argument is
+  `skipped`, the rule `0.5.0` already had, so the receiver and nonce of a
+  datagram with no key are one `skipped` region before the `undecodable`
+  ciphertext.
+- **The fuzz invariant runs against two broken lookups in the suite**, one
+  that lets a miss escape and one that quotes the table, as `testing.md`
+  requires of every check.
+
+`DESIGN.md` is at revision 13, which says why this does not reopen §3.2's
+refused keyed repeat: that was a map built from the input, and this one is
+supplied whole by the run. The pipeline differs from the baseline in 0 of 80
+outputs.
 
 ### Stage 2 — `fails_as` (Q2)
 

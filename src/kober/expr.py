@@ -31,6 +31,7 @@ cannot be checked free of.
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
@@ -39,7 +40,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from kober.errors import EvalError, ExprError
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     from kober.source import Location
 
@@ -56,6 +57,44 @@ class ExprType(Enum):
     BOOL = "bool"
     STR = "str"
     BYTES = "bytes"
+
+
+#: The types a map parameter may be keyed by. They are what a wire field that
+#: names a session, a peer, or a security association reads as.
+MAP_KEY_TYPES = frozenset({ExprType.INT, ExprType.STR})
+
+
+@dataclass(frozen=True)
+class MapType:
+    """The type of a document parameter that is a table: one value per key.
+
+    Not an expression type. No expression evaluates to a map; one is only ever
+    **indexed**, ``keys[receiver]``, which gives a scalar. That is what lets a
+    spec choose a key per message, from a table a run supplies, without the
+    language gaining a collection type it would then have to say how to
+    iterate.
+
+    Attributes:
+        key: What it is indexed by, one of :data:`MAP_KEY_TYPES`.
+        item: What indexing it gives.
+
+    """
+
+    key: ExprType
+    item: ExprType
+
+    @property
+    def value(self) -> str:
+        """The type as messages and a generated module's ``PARAMS`` spell it.
+
+        Named like an :class:`ExprType` member's ``value`` on purpose, so a
+        parameter's type spells itself the same way whichever kind it is.
+        """
+        return f"map[{self.key.value}, {self.item.value}]"
+
+
+#: What a document parameter may be declared as.
+ParamType = ExprType | MapType
 
 
 @dataclass(frozen=True)
@@ -187,7 +226,27 @@ class Call:
         object.__setattr__(self, "args", tuple(self.args))
 
 
-Expr = IntLiteral | StrLiteral | BoolLiteral | Ref | UnaryOp | BinOp | BoolOp | Compare | Call
+@dataclass(frozen=True)
+class Index:
+    """One entry of a map parameter: ``keys[receiver]``.
+
+    The table is named, never computed: it is always a document parameter
+    declared as a map, by its bare name, which ``check`` proves. Only the key
+    is an expression.
+
+    Attributes:
+        table: The map parameter's name.
+        key: Which entry.
+
+    """
+
+    table: str
+    key: Expr
+
+
+Expr = (
+    IntLiteral | StrLiteral | BoolLiteral | Ref | UnaryOp | BinOp | BoolOp | Compare | Call | Index
+)
 
 
 @dataclass(frozen=True)
@@ -356,6 +415,10 @@ class Scope(Protocol):
         """Return the type named by ``path``, or raise :class:`ExprError`."""
         ...
 
+    def resolve_map(self, name: str) -> MapType:
+        """Return the type of the map parameter ``name``, or raise :class:`ExprError`."""
+        ...
+
 
 def parse(source: str, where: Location | None = None) -> Expr:
     """Parse expression text to an AST.
@@ -415,8 +478,34 @@ def _translate(node: ast.expr, source: str, where: Location | None) -> Expr:
         return _translate_compare(node, source, where)
     if isinstance(node, ast.Call):
         return _translate_call(node, source, where)
+    if isinstance(node, ast.Subscript):
+        return _translate_index(node, source, where)
     msg = f"{_describe(node)} is not allowed in an expression"
     raise ExprError(msg, source, where)
+
+
+def _translate_index(node: ast.Subscript, source: str, where: Location | None) -> Expr:
+    """Translate ``name[key]``: one entry of a map parameter, and nothing else.
+
+    What is indexed must be a bare name, since a map is only ever a document
+    parameter, and the key one expression. A slice, or a key of several parts,
+    is refused here; whether the name is a map at all is ``check``'s question.
+    """
+    if isinstance(node.slice, ast.Slice):
+        msg = "a slice is not allowed in an expression"
+        raise ExprError(msg, source, where)
+    if isinstance(node.slice, ast.Tuple):
+        msg = "an index is one expression, not several"
+        raise ExprError(msg, source, where)
+    table = node.value
+    if (
+        not isinstance(table, ast.Name)
+        or table.id in SCOPE_WORDS
+        or table.id in BOOLEAN_WORDS
+    ):
+        msg = "only a map parameter can be indexed, by its name: keys[receiver]"
+        raise ExprError(msg, source, where)
+    return Index(table=table.id, key=_translate(node.slice, source, where))
 
 
 def _translate_call(node: ast.Call, source: str, where: Location | None) -> Expr:
@@ -519,7 +608,6 @@ _CONSTRUCT_NAMES: dict[type[ast.AST], str] = {
     ast.Call: "a function call",
     ast.Lambda: "a lambda",
     ast.IfExp: "a conditional expression",
-    ast.Subscript: "an index or slice",
     ast.ListComp: "a comprehension",
     ast.SetComp: "a comprehension",
     ast.DictComp: "a comprehension",
@@ -596,7 +684,17 @@ def infer_type(expr: Expr, scope: Scope, source: str, where: Location | None = N
         return _infer_boolop(expr, scope, source, where)
     if isinstance(expr, Call):
         return _infer_call(expr, scope, source, where)
+    if isinstance(expr, Index):
+        return _infer_index(expr, scope, source, where)
     return _infer_compare(expr, scope, source, where)
+
+
+def _infer_index(expr: Index, scope: Scope, source: str, where: Location | None) -> ExprType:
+    """Type an entry of a map parameter: the key must be the map's key type."""
+    table = scope.resolve_map(expr.table)
+    actual = infer_type(expr.key, scope, source, where)
+    _require(actual, table.key, f"the key of {expr.table!r}", source, where)
+    return table.item
 
 
 def _infer_call(expr: Call, scope: Scope, source: str, where: Location | None) -> ExprType:
@@ -665,6 +763,10 @@ def _infer_compare(expr: Compare, scope: Scope, source: str, where: Location | N
 #: names, since evaluation is the value side of the type side.
 ExprValue = int | str | bytes | bool
 
+#: What a document parameter holds. A value, or for a map parameter a table
+#: of them (:class:`MapType`).
+ParamValue = ExprValue | Mapping[ExprValue, ExprValue]
+
 #: Largest shift count :func:`evaluate` will perform. A shift amount can come
 #: straight off the wire, and ``1 << 2**32`` is a memory-exhaustion bug rather
 #: than a big number. Well past any real protocol field, and refused loudly.
@@ -683,6 +785,37 @@ class Environment(Protocol):
     def lookup(self, path: tuple[str, ...]) -> ExprValue:
         """Return the value named by ``path``, or raise :class:`EvalError`."""
         ...
+
+    def lookup_map(self, name: str) -> Mapping[ExprValue, ExprValue]:
+        """Return the map parameter ``name``, or raise :class:`EvalError`."""
+        ...
+
+
+def map_entry(table: Mapping[ExprValue, ExprValue], key: ExprValue, name: str) -> ExprValue:
+    """Return one entry of a map parameter, or say it has none.
+
+    Public because **generated code calls it**, for the reason
+    :func:`shift_left` is: a missing entry is a decode-time failure, and the
+    two backends have to word it alike. The message names the key, which came
+    off the wire, and never a value, which may be a secret.
+
+    Args:
+        table: The map.
+        key: Which entry.
+        name: The parameter's name, for the message.
+
+    Returns:
+        The entry.
+
+    Raises:
+        EvalError: If the map has no entry for ``key``.
+
+    """
+    try:
+        return table[key]
+    except KeyError:
+        msg = f"{name!r} has no entry for {key!r}"
+        raise EvalError(msg) from None
 
 
 def evaluate(expr: Expr, env: Environment) -> ExprValue:
@@ -727,6 +860,8 @@ def evaluate(expr: Expr, env: Environment) -> ExprValue:
         return _eval_boolop(expr, env)
     if isinstance(expr, Call):
         return _eval_call(expr, env)
+    if isinstance(expr, Index):
+        return map_entry(env.lookup_map(expr.table), evaluate(expr.key, env), expr.table)
     return _eval_compare(expr, env)
 
 
@@ -988,6 +1123,10 @@ def _collect(expr: Expr, found: list[Ref]) -> None:
     elif isinstance(expr, Call):
         for argument in expr.args:
             _collect(argument, found)
+    elif isinstance(expr, Index):
+        # The table is a parameter, which cites nothing; the key is what the
+        # entry was chosen by, and is a reference like any other.
+        _collect(expr.key, found)
 
 
 def unparse(expr: Expr) -> str:
@@ -1039,6 +1178,9 @@ def _unparse(expr: Expr, limit: int) -> str:
         # A call is an atom: it carries its own brackets and never needs more.
         rendered = ", ".join(_unparse(argument, 0) for argument in expr.args)
         return f"{expr.name}({rendered})"
+    if isinstance(expr, Index):
+        # An atom too, for the same reason.
+        return f"{expr.table}[{_unparse(expr.key, 0)}]"
     if isinstance(expr, UnaryOp):
         level = PRECEDENCE["not"] if expr.op == "not" else UNARY_PRECEDENCE
         space = " " if expr.op == "not" else ""

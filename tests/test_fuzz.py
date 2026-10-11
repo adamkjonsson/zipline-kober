@@ -20,13 +20,14 @@ import random
 import sys
 import zlib
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import pytest
+from cipher import xor_open
 from fuzzing import (
     CONST_SPEC,
     FILL_SPEC,
@@ -34,6 +35,9 @@ from fuzzing import (
     HOSTILE_MESSAGES,
     HOSTILE_SECRET,
     HOSTILE_SPEC,
+    KEYED_KEYS,
+    KEYED_MESSAGES,
+    KEYED_SPEC,
     SEEDS,
     SELECT_SPEC,
     STARVED_SPECS,
@@ -45,6 +49,7 @@ from fuzzing import (
     framing_cases,
     hostile,
     hostile_cases,
+    keyed_cases,
     mutate,
     pointer_cases,
     select_cases,
@@ -52,17 +57,19 @@ from fuzzing import (
     transform_cases,
     variants,
 )
+from test_compiled_transforms import imported
 from zpf.reassembly import Gap
 
 from kober import emit as emit_module
+from kober import expr as expr_module
 from kober import stage, transforms
 from kober.cursor import Cursor
 from kober.decoder import Decoder
 from kober.emit import Emission, Unclaimed, field_path, plan
-from kober.errors import TransformError
+from kober.errors import EvalError, TransformError
 from kober.node import Node, NodeStatus
 from kober.pygen import render_spec
-from kober.runtime import Held
+from kober.runtime import Held, TransformFailed
 from kober.spec import Concat, Emit, Field, Select, Spec, Transform
 from kober.transforms import Registry
 
@@ -818,6 +825,112 @@ def test_a_misbehaving_transform_never_escapes_and_never_speaks(seed: int, emit:
         named = {at for r in regions for at in range(r.off_start, r.off_end)}
         assert not cited & named, f"both cited and undecoded on {data!r}"
         assert all(HOSTILE_SECRET.encode() not in r.payload for r in records), data
+
+
+# --- an entry of a map parameter ---------------------------------------------
+#
+# A key chosen per message by a field off the wire (the WireGuard example plan's
+# Q1). The field is the input's to choose, so a table with no entry for it is
+# ordinary rather than adverse, and must fail the transform it keys and nothing
+# else: the message goes on, and no value of the table is ever seen.
+
+
+def keyed_decoder() -> Decoder:
+    registry = Registry.standard()
+    registry.register("xor", xor_open)
+    return Decoder(Spec.from_yaml(KEYED_SPEC), params={"keys": KEYED_KEYS}, transforms=registry)
+
+
+def _no_key_in(text: str | bytes) -> bool:
+    if isinstance(text, bytes):
+        return all(key not in text for key in KEYED_KEYS.values())
+    return all(key.hex() not in text and repr(key) not in text for key in KEYED_KEYS.values())
+
+
+def test_the_keyed_seeds_reach_both_keys_and_a_missing_one():
+    decoder = keyed_decoder()
+    outcomes = []
+    for data in KEYED_MESSAGES:
+        tree = decoder.decode_bytes(data)
+        assert tree.status is NodeStatus.OK, tree.render()
+        inner = tree.find("inner")
+        assert inner is not None
+        outcomes.append(inner.detail if inner.failed else inner.value)
+    assert outcomes == [b"to the initiator", b"to the responder", "'keys' has no entry for 9"]
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+@pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD])
+def test_a_missing_entry_fails_its_transform_and_nothing_else(seed: int, emit: Emit):
+    keyed_promises(seed, emit)
+
+
+def _escaping(table: Mapping[object, object], key: object, name: str) -> object:
+    return table[key]
+
+
+def _telling(table: Mapping[object, object], key: object, name: str) -> object:
+    if key not in table:
+        msg = f"{name!r} has no entry for {key!r}; it has {dict(table)!r}"
+        raise EvalError(msg)
+    return table[key]
+
+
+@pytest.mark.parametrize(
+    ("broken", "caught"), [(_escaping, KeyError), (_telling, AssertionError)]
+)
+def test_the_keyed_check_catches_a_missing_entry_that_escapes_or_tells(
+    monkeypatch: pytest.MonkeyPatch, broken: object, caught: type[Exception]
+):
+    """A miss that escapes the decode, or a message that quotes the table, fails the check."""
+    monkeypatch.setattr(expr_module, "map_entry", broken)
+    with pytest.raises(caught):
+        keyed_promises(1, Emit.FIELD)
+
+
+def keyed_promises(seed: int, emit: Emit) -> None:
+    """Hold one batch of keyed cases to the promises a missing entry must keep."""
+    decoder = keyed_decoder()
+    for data in keyed_cases(seed):
+        try:
+            tree = decoder.decode_bytes(data)
+        except Exception as exc:
+            exc.add_note(f"escaped a decode: keyed seed={seed} on {data!r}")
+            raise
+        check_tree(tree, data)
+        assert _no_key_in(tree.render()), data
+        inner = tree.find("inner")
+        if inner is not None and data[0] not in KEYED_KEYS:
+            assert inner.failed, f"no key for {data[0]}, and the transform held on {data!r}"
+            assert inner.detail == f"'keys' has no entry for {data[0]}", data
+            after = tree.find("after")
+            if after is not None and after.status is NodeStatus.OK:
+                assert tree.status is NodeStatus.OK, f"the message stopped on {data!r}"
+        records, regions = plan(decoder.spec, tree, data, emit=emit)
+        cited = {at for r in records for at in range(r.off_start, r.off_end)}
+        named = {at for r in regions for at in range(r.off_start, r.off_end)}
+        assert not cited & named, f"both cited and undecoded on {data!r}"
+        assert all(_no_key_in(r.payload) for r in records), data
+
+
+@pytest.mark.parametrize("seed", [1, 2])
+def test_a_compiled_index_never_raises_and_agrees(seed: int):
+    """A generated module holds the same promise, and words a missing entry alike."""
+    registry = Registry.standard()
+    registry.register("xor", xor_open)
+    module = imported(Spec.from_yaml(KEYED_SPEC), registry)
+    decoder = keyed_decoder()
+    for data in keyed_cases(seed):
+        try:
+            message = module.decode(data, params={"keys": KEYED_KEYS})
+        except Exception as exc:
+            exc.add_note(f"escaped a compiled decode: keyed seed={seed} on {data!r}")
+            raise
+        inner = decoder.decode_bytes(data).find("inner")
+        if message is None or inner is None or not inner.failed:
+            continue
+        assert isinstance(message.inner, TransformFailed), data
+        assert message.inner.detail == inner.detail, data
 
 
 # --- fill --------------------------------------------------------------------

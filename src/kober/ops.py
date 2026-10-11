@@ -43,7 +43,16 @@ from kober.check import (
     trailing_width,
 )
 from kober.errors import CompileError, SpecError
-from kober.expr import SCOPE_WORDS, ExprType, IntLiteral, Ref, infer_type, references, unparse
+from kober.expr import (
+    SCOPE_WORDS,
+    ExprType,
+    IntLiteral,
+    MapType,
+    Ref,
+    infer_type,
+    references,
+    unparse,
+)
 from kober.spec import (
     BytesType,
     Computed,
@@ -68,7 +77,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
 
     from kober.expr import Expr
-    from kober.spec import EnumDef, Field, FieldType, Repeat, SizeSpec, Spec, Unit
+    from kober.spec import EnumDef, Field, FieldType, Param, Repeat, SizeSpec, Spec, Unit
 
 
 class Kind(Enum):
@@ -77,8 +86,10 @@ class Kind(Enum):
     The four scalars are :class:`kober.expr.ExprType`'s members — a spec's
     values and its expressions are the same small set of types, and having two
     vocabularies for it would be surface with nothing behind it. ``OBJECT`` is
-    the one addition: an instance of another unit, which an expression cannot
-    name and therefore has no expression type.
+    an addition: an instance of another unit, which an expression cannot name
+    and therefore has no expression type. ``MAP`` is the other: a document
+    parameter that is a table (:class:`kober.expr.MapType`), which no field
+    holds and an expression only ever indexes.
     """
 
     INT = "int"
@@ -86,6 +97,7 @@ class Kind(Enum):
     TEXT = "text"
     BYTES = "bytes"
     OBJECT = "object"
+    MAP = "map"
 
 
 #: How an expression's type maps onto a value's kind. A ``computed:`` field's
@@ -323,11 +335,14 @@ class ParamPlan:
     Attributes:
         name: The parameter's name as the spec spells it.
         kind: What kind of value the caller must pass.
+        entries: For a ``MAP``, the kinds of its keys and of its values;
+            ``None`` for anything else.
 
     """
 
     name: str
     kind: Kind
+    entries: tuple[Kind, Kind] | None = None
 
 
 @dataclass(frozen=True)
@@ -498,9 +513,7 @@ class Plan:
             enums=spec.enums,
             objects=objects,
             transforms=tuple(sorted(used)),
-            params=tuple(
-                ParamPlan(name=param.name, kind=KINDS[param.type]) for param in spec.params
-            ),
+            params=tuple(_document_param(param) for param in spec.params),
             spec_digest=spec.digest(),
         )
 
@@ -628,6 +641,17 @@ def _nested_types(kind: FieldType) -> Iterator[FieldType]:
                 yield from _nested_types(case)
     elif isinstance(kind, Pointer) or (isinstance(kind, Transform) and kind.type is not None):
         yield from _nested_types(kind.type)
+
+
+def _document_param(param: Param) -> ParamPlan:
+    """Plan one document parameter: a scalar's kind, or a map's and its entries'."""
+    if isinstance(param.type, MapType):
+        return ParamPlan(
+            name=param.name,
+            kind=Kind.MAP,
+            entries=(KINDS[param.type.key], KINDS[param.type.item]),
+        )
+    return ParamPlan(name=param.name, kind=KINDS[param.type])
 
 
 def _reachable(spec: Spec) -> set[str]:

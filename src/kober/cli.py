@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.util
+import json
 import sys
 import textwrap
 from datetime import UTC, datetime
@@ -40,7 +41,7 @@ from kober import __version__
 from kober.check import Severity, check
 from kober.decoder import Decoder
 from kober.errors import KoberError, ParameterError
-from kober.expr import ExprType, ExprValue, unparse
+from kober.expr import ExprType, ExprValue, MapType, ParamValue, unparse
 from kober.node import NodeStatus
 from kober.ops import Plan
 from kober.pygen import render_spec
@@ -230,12 +231,13 @@ def _add_params(verb: argparse.ArgumentParser) -> None:
         help=(
             "a value for one of the spec's params, repeatable. Read as the "
             "parameter's declared type: bytes as hex:0a0b or file:PATH, int as a "
-            "decimal, bool as true or false, str as given"
+            "decimal, bool as true or false, str as given; a map as file:PATH, a "
+            "JSON object of keys and values each written as --param would write it"
         ),
     )
 
 
-def _params(spec: Spec, pairs: Sequence[str]) -> dict[str, ExprValue]:
+def _params(spec: Spec, pairs: Sequence[str]) -> dict[str, ParamValue]:
     """Read ``--param NAME=VALUE`` pairs as the types the spec declares.
 
     A bytes value is never guessed from text: it is ``hex:`` or ``file:``, so a
@@ -243,7 +245,7 @@ def _params(spec: Spec, pairs: Sequence[str]) -> dict[str, ExprValue]:
     one may be a secret.
     """
     declared = {param.name: param.type for param in spec.params}
-    values: dict[str, ExprValue] = {}
+    values: dict[str, ParamValue] = {}
     for pair in pairs:
         name, equals, text = pair.partition("=")
         if not equals or not name:
@@ -252,8 +254,53 @@ def _params(spec: Spec, pairs: Sequence[str]) -> dict[str, ExprValue]:
         if name not in declared:
             msg = f"--param {name}: spec {spec.name!r} declares no such parameter"
             raise ParameterError(msg)
-        values[name] = _param_value(name, declared[name], text)
+        kind = declared[name]
+        if isinstance(kind, MapType):
+            values[name] = _param_map(name, kind, text)
+        else:
+            values[name] = _param_value(name, kind, text)
     return values
+
+
+def _param_map(name: str, kind: MapType, text: str) -> dict[ExprValue, ExprValue]:
+    """Read a map ``--param``: ``file:PATH``, a JSON object of text forms.
+
+    Each key and each value is written as ``--param`` would write it, so a key
+    log reads the same way a single key does: ``{"1234": "hex:…"}``. JSON
+    keys are always text, which is why an ``int`` key is written in decimal
+    rather than as a number. No message quotes a value.
+    """
+    form, colon, path = text.partition(":")
+    if not colon or form != "file":
+        msg = f"--param {name}: a map is file:PATH, a JSON object"
+        raise ParameterError(msg)
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        msg = f"--param {name}: cannot read {path!r}: {exc.strerror}"
+        raise ParameterError(msg) from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        msg = f"--param {name}: {path!r} is not JSON"
+        raise ParameterError(msg) from exc
+    if not isinstance(document, dict):
+        msg = f"--param {name}: {path!r} is not a JSON object"
+        raise ParameterError(msg)
+    table: dict[ExprValue, ExprValue] = {}
+    for key, value in document.items():
+        if not isinstance(value, str):
+            msg = (
+                f"--param {name}: each value in {path!r} is text, written as "
+                "--param would write it"
+            )
+            raise ParameterError(msg)
+        entry = f"{name}[{key}]"
+        read = _param_value(entry, kind.key, key)
+        if read in table:
+            # "1" and "01" are one int key; which value is meant is not ours to guess.
+            msg = f"--param {name}: {path!r} has key {read!r} more than once"
+            raise ParameterError(msg)
+        table[read] = _param_value(entry, kind.item, value)
+    return table
 
 
 def _param_value(name: str, kind: ExprType, text: str) -> ExprValue:

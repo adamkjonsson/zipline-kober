@@ -47,7 +47,7 @@ from kober.errors import (
     UnboundTransformError,
     Undecodable,
 )
-from kober.expr import ExprType, shift_left, shift_right
+from kober.expr import ExprType, MapType, ParamValue, map_entry, shift_left, shift_right
 from kober.loader import from_dict, from_file, from_json, from_yaml
 from kober.node import Node, NodeStatus
 from kober.ops import (
@@ -181,6 +181,7 @@ __all__ = [
     "Kind",
     "KoberError",
     "Location",
+    "MapType",
     "Names",
     "Node",
     "NodeStatus",
@@ -188,6 +189,7 @@ __all__ = [
     "ObjectPlan",
     "Param",
     "ParamPlan",
+    "ParamValue",
     "ParameterError",
     "Plan",
     "Pointer",
@@ -239,6 +241,7 @@ __all__ = [
     "from_json",
     "from_yaml",
     "granularity",
+    "map_entry",
     "nonnegative",
     "normalize_int",
     "params_digest",

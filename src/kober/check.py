@@ -54,7 +54,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from kober.errors import ExprError, SpecError
-from kober.expr import ExprType, IntLiteral, infer_type, unparse
+from kober.expr import MAP_KEY_TYPES, ExprType, IntLiteral, MapType, infer_type, unparse
 from kober.loader import FOREIGN_KEYS
 from kober.spec import (
     BytesType,
@@ -82,11 +82,11 @@ from kober.spec import (
 from kober.transforms import WELL_KNOWN, is_core
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
 
     from kober.expr import Expr, Scope
     from kober.source import Location
-    from kober.spec import FieldType, Repeat, SizeSpec, Spec
+    from kober.spec import FieldType, Param, Repeat, SizeSpec, Spec
 
 
 class Severity(Enum):
@@ -802,6 +802,13 @@ class _Checker:
                     f"parameter {param.name!r} has the name of a field or unit parameter, "
                     "and a document parameter is in scope in every unit",
                 )
+            if isinstance(param.type, MapType) and param.type.key not in MAP_KEY_TYPES:
+                allowed = " or ".join(sorted(kind.value for kind in MAP_KEY_TYPES))
+                self.error(
+                    f"{self.spec.name}.params.{param.name}",
+                    f"parameter {param.name!r}: a map is keyed by {allowed}, "
+                    f"not {param.type.key.value}",
+                )
         used = {
             kind.name
             for unit in self.spec.units.values()
@@ -949,6 +956,13 @@ class _Checker:
         seen_params = {param.name for param in unit.params}
         if len(seen_params) != len(unit.params):
             self.error(where, "unit declares duplicate parameter names")
+        for param in unit.params:
+            if isinstance(param.type, MapType):
+                self.error(
+                    where,
+                    f"parameter {param.name!r} is a map, and only a document parameter "
+                    "may be one: a unit's are bound from expressions, and none is a map",
+                )
 
         # confirm/reject see the whole unit: both are decided once it is done.
         whole = _visible_names(unit, len(unit.fields))
@@ -1514,6 +1528,41 @@ class _Scope:
             return self._resolve_parent(tuple(rest), path)
         return self._in_unit(self.unit, path, self.visible, path)
 
+    def resolve_map(self, name: str) -> MapType:
+        """Return the type of the map parameter ``name``, or raise :class:`ExprError`.
+
+        Only a document parameter may be a map, so that is the only place
+        looked. Anything else of the name is named in the refusal, since a
+        field called ``keys`` indexed by mistake deserves better than *unknown*.
+        """
+        for param in self.checker.spec.params:
+            if param.name == name:
+                if isinstance(param.type, MapType):
+                    return param.type
+                message = (
+                    f"{name!r} is {param.type.value}, and only a map parameter can be indexed"
+                )
+                raise ExprError(message, name)
+        if self.unit.field(name) is not None or any(p.name == name for p in self.unit.params):
+            message = f"{name!r} is not a map parameter, and only a map parameter can be indexed"
+            raise ExprError(message, name)
+        maps = sorted(p.name for p in self.checker.spec.params if isinstance(p.type, MapType))
+        known = ", ".join(maps) or "none"
+        message = f"unknown map parameter {name!r}; the spec's maps: {known}"
+        raise ExprError(message, name)
+
+    def _scalar(self, param: Param, rest: Sequence[str], path: tuple[str, ...]) -> ExprType:
+        """Type a reference to a parameter, which has no fields and is never a map."""
+        if rest:
+            raise self._fail(path, f"parameter {param.name!r} has no fields to reference")
+        if isinstance(param.type, MapType):
+            raise self._fail(
+                path,
+                f"{param.name!r} is a map; an expression reads one entry of it, "
+                f"{param.name}[key]",
+            )
+        return param.type
+
     def _fail(self, path: tuple[str, ...], message: str) -> ExprError:
         """Build the error for an unresolvable path."""
         return ExprError(message, ".".join(path))
@@ -1589,9 +1638,7 @@ class _Scope:
 
         for param in unit.params:
             if param.name == head:
-                if rest:
-                    raise self._fail(path, f"parameter {head!r} has no fields to reference")
-                return param.type
+                return self._scalar(param, rest, path)
 
         item = unit.field(head)
         if item is None:
@@ -1599,9 +1646,7 @@ class _Scope:
             # one named like a field or unit parameter, so nothing is shadowed.
             for param in self.checker.spec.params:
                 if param.name == head:
-                    if rest:
-                        raise self._fail(path, f"parameter {head!r} has no fields to reference")
-                    return param.type
+                    return self._scalar(param, rest, path)
         if item is None:
             known = ", ".join(sorted(visible or ())) or "none"
             message = f"unknown name {head!r} in unit {unit.name!r}; in scope: {known}"

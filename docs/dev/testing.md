@@ -28,6 +28,7 @@ itself came from the second kind, and none of them needed a clever test.
 | `test_emit_conformance.py` | What `zpf` *accepts*: real files written through a decode stage and put past `ConformanceChecker` and `check_coverage`. |
 | `test_stage.py` | The driver: gaps, seams, shape dispatch, chaining, timestamps, `content_registry`, and what the output declares — a unit sequence at field granularity, the input's adjacency carried forward otherwise. |
 | `test_stage_transforms.py` | What a stage writes for a transform, through both drivers: take-over, a failure that neither confirms nor declines, the digest, and a tunnel feeding a second stage. |
+| `test_map_params.py` | Map parameters and `keys[receiver]`: loaded, checked, decoded by both drivers, read from a JSON key log, and in the digest, with no value ever written. |
 | `test_cli.py` | All five verbs, driving `main()` directly. |
 | `test_examples.py` | The shipped `examples/` specs — they must check clean, carry documentation, and still decode. |
 | `test_packeteer.py` | packeteer's shipped specs, vendored under `tests/packeteer/` at a stated version: they load, decode, and have every key kober has no meaning for declined by name. |
@@ -128,6 +129,14 @@ which carry a secret, must never reach the file. Streams whose messages carry
 transforms, some failing, fuzz the driver as well: a failure neither confirms
 the stream nor declines it, and the message after one is still decoded. The
 compiled module is held to the same corpus by the differential.
+
+A key chosen per message from a map parameter, `keys[receiver]`, adds one
+more: a receiver with no entry fails the transform it keys and nothing else,
+in the interpreter's words in both backends, and no value of the table is ever
+seen in a tree, a record or a message. The receiver is the corpus's first
+byte, so most mutations of it name a key the table lacks. The check is run
+against a lookup that lets the miss escape and one that quotes the table, and
+must fail on both.
 
 ### A seed is only worth the code it reaches
 

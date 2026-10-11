@@ -16,9 +16,10 @@ exists**.
 
 ## The language
 
-Arithmetic, comparison, boolean operators, references, literals, and the
-closed table of [functions](#functions) below. No other calls, no loops, no
-indexing, no conditional expressions.
+Arithmetic, comparison, boolean operators, references, literals, the
+closed table of [functions](#functions) below, and one entry of a
+[map parameter](#an-entry-of-a-map-parameter). No other calls, no loops, no
+other indexing, no conditional expressions.
 
 | | |
 | --- | --- |
@@ -27,6 +28,7 @@ indexing, no conditional expressions.
 | Comparison | `==` `!=` `<` `<=` `>` `>=` |
 | Boolean | `and` `or` `not` |
 | Literals | `42`, `0x2a`, `0b101010`, `'text'`, `true`, `false` |
+| Map entry | `keys[receiver]` |
 
 Precedence and associativity are Python's, because the parser is Python's —
 `ast.parse` in expression mode, with a whitelist of node types. That is why "no
@@ -114,6 +116,8 @@ back.
   bindings do not add one: nothing can hold a list, pass one, or return one.
 - **Switch fields**, whose type depends on the value dispatched on, so they
   have no single type to give.
+- **A map parameter, whole.** Only one entry of it is a value:
+  `keys[receiver]`, never `keys`.
 
 ## Functions
 
@@ -164,6 +168,40 @@ the same path as any other size expression that cannot be evaluated.
 **The table is closed.** An unknown name is a load-time error naming what does
 exist, and a spec cannot add to it. That is what keeps "a spec cannot run
 code" true now that calls parse at all.
+
+## An entry of a map parameter
+
+```yaml
+params:
+  keys: {type: {map: [int, bytes]}, secret: true}
+...
+args: {key: "keys[receiver]", nonce: nonce}
+```
+
+A document parameter declared as a [map](document.md#params) is read one entry
+at a time, chosen by an expression: the value `keys` holds for the key
+`receiver`. It is how a spec chooses a key per message when the message says
+which: a WireGuard receiver index, an ESP SPI, a TLS key log's client random.
+One table holds both directions of a tunnel, every rekey and every peer.
+
+- **Only a map parameter is indexed**, by its bare name. A field, a unit
+  parameter or a scalar document parameter is refused by `check`, and so is a
+  slice or a key of several parts when the spec loads.
+- **The key must be the map's key type**, and the entry has its value type:
+  `keys[receiver]` above is `bytes`, and `receiver` must be an `int`.
+- **A key with no entry makes the expression unanswerable**, as a division by
+  zero does. In a transform's `args` that fails the
+  [transform](types.md#transform), and the message goes on; anywhere else the
+  field is `undecodable`. The failure says `'keys' has no entry for 9`. It
+  names the key, which came off the wire, and never a value, which may be a
+  secret.
+- **The key is cited.** An entry read for a transform's `args` makes the
+  output cite the fields its key reads, so a receiver field read only to
+  choose the key is spoken for, not `skipped`.
+
+There is still no collection type: no expression evaluates to a map, so one
+cannot be compared, passed to a unit, iterated, or built from the input. A map
+comes whole from whoever runs the spec.
 
 ## What the language deliberately cannot do
 

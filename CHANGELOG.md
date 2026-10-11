@@ -22,6 +22,35 @@ minor bump here too.
 
 ## [Unreleased]
 
+### Added
+
+- **Map parameters, and reading one entry of one**: a key chosen per message
+  from a table a run supplies. A document parameter may be declared
+  `{type: {map: [K, V]}}`, keyed by `int` or `str` and holding any of the four
+  types, and an expression reads one entry, `keys[receiver]`, typed as the
+  map's values. Only a map parameter is indexed, by its bare name, and a map is
+  never read whole, so the language still has no collection type. A key with
+  no entry makes the expression unanswerable: in a transform's `args` it fails
+  the transform, saying `'keys' has no entry for 9` and never a value, and the
+  message goes on. The field the key reads is cited by the output, so a
+  receiver read only to choose the key is spoken for rather than `skipped`.
+  Both backends decode it; a generated module calls
+  `kober.runtime.map_entry`, which is the interpreter's own. From Python a map
+  is a `dict`, checked entry by entry and copied when the decode is set up;
+  from `kober run` and `kober try`, `--param NAME=file:PATH`, a JSON object of
+  keys and values each written as `--param` would write it. A map goes into
+  `params_digest` as its entries in a canonical order. New public names:
+  `kober.MapType`, `kober.ParamValue`, `kober.map_entry`, `kober.expr.Index`,
+  `Kind.MAP` and `ParamPlan.entries`. It is the first step of the WireGuard
+  example ([`plans/WIREGUARD-EXAMPLE-PLAN.md`](plans/WIREGUARD-EXAMPLE-PLAN.md)).
+
+### Changed
+
+- `kober.expr.Scope` gains `resolve_map(name)` and `kober.expr.Environment`
+  gains `lookup_map(name)`: an implementation of either protocol outside kober
+  needs the method to type or evaluate an expression that indexes a map.
+  `Param.type` may now be a `MapType`, for a document parameter.
+
 ## [0.5.0] - 2026-09-28
 
 ### Added
