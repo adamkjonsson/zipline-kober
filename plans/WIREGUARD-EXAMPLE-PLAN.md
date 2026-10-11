@@ -1,7 +1,9 @@
 # Phase plan: a WireGuard tunnel, as the worked example of bringing your own code
 
-**State: not started.** Upstream issues filed 2026-10-11 (see *What it waits
-for*). Nothing in this repository has changed yet.
+**State: Stage 0 done (2026-10-11).** `0.6.0.dev0`, with the pipeline baseline
+taken on the unchanged `0.5.0` code in `../kober-baselines/v0.5.0`, outside the
+repository. Upstream issues filed 2026-10-11 (see *What it waits for*). Stage 1
+is next.
 
 > **Written 2026-10-11** against `0.5.0`, `zpf` 0.5.1 (spec 0.21), packeteer
 > 0.17.0, `zpfwire` 0.4.0. The prompt: *make a demo that decodes a VPN tunnel,
