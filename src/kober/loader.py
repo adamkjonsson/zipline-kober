@@ -151,7 +151,7 @@ _POINTER_KEYS = frozenset({"at", "type"})
 _TRANSFORM_KEYS = frozenset({"from", "with", "limit", "args", "type", "content_type"})
 _TRANSFORM_REQUIRED = ("from", "with", "limit")
 #: Every key of a transform's declaration under ``transforms:``.
-_TRANSFORM_DECL_KEYS = frozenset({"params", "doc"})
+_TRANSFORM_DECL_KEYS = frozenset({"params", "fails_as", "doc"})
 #: Every key of a document parameter written out.
 _DOC_PARAM_KEYS = frozenset({"type", "secret", "doc"})
 #: Every key of a parameter type written as a mapping.
@@ -1287,6 +1287,9 @@ def _transform_decls(document: object, at: _At, owner: str) -> dict[str, Transfo
         body = _require_mapping({} if value is None else value, site)
         _reject_unknown(body, _TRANSFORM_DECL_KEYS, site)
         params_doc = _require_mapping(body.get("params", {}), site.child("params"))
+        fails_as = body.get("fails_as")
+        if fails_as is not None:
+            fails_as = _require_str(fails_as, site.child("fails_as"))
         site.record(f"{owner}.transforms.{name}")
         decls[name] = TransformDecl(
             name=name,
@@ -1294,6 +1297,7 @@ def _transform_decls(document: object, at: _At, owner: str) -> dict[str, Transfo
                 param: _member(ExprType, kind, site.child("params").child(param))
                 for param, kind in params_doc.items()
             },
+            fails_as=fails_as,
         )
     return decls
 

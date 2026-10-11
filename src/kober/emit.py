@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
     from kober.node import Node
-    from kober.spec import Spec
+    from kober.spec import FieldType, Spec
 
 @dataclass(frozen=True)
 class Emission:
@@ -407,14 +407,15 @@ def _transform(
     kind = node.resolved_type
     source = parent.find(kind.source) if isinstance(kind, Transform) else None
     if granularity is Emit.NONE or node.failed:
-        reason = NodeStatus.SKIPPED if granularity is Emit.NONE else NodeStatus.UNDECODABLE
+        skipped = granularity is Emit.NONE
+        reason = NodeStatus.SKIPPED.value if skipped else failure_reason(spec, kind)
         if source is None:
             return
         if isinstance(source.resolved_type, Concat):
             members = (source.resolved_type, path[:-1], reason)
             _take_over_members(parent, *members, emissions, unclaimed, cite)
         elif source.width > 0 and cite is None:
-            unclaimed.append(Unclaimed(source.off_start, source.off_end, reason.value))
+            unclaimed.append(Unclaimed(source.off_start, source.off_end, reason))
         return
     if isinstance(kind, Transform):
         spoken = {
@@ -442,11 +443,29 @@ def _transform(
     emissions.append(_citing(emission, outer))
 
 
+def failure_reason(spec: Spec, kind: FieldType | None) -> str:
+    """Return what a failed transform's source is named: ``fails_as``, or ``undecodable``.
+
+    Args:
+        spec: The spec, whose ``transforms:`` may declare the reason.
+        kind: The failed field's type, a :class:`~kober.spec.Transform`.
+
+    Returns:
+        The reason.
+
+    """
+    if isinstance(kind, Transform):
+        declared = spec.transforms.get(kind.name)
+        if declared is not None and declared.fails_as is not None:
+            return declared.fails_as
+    return NodeStatus.UNDECODABLE.value
+
+
 def _take_over_members(
     parent: Node,
     kind: Concat,
     names: list[str | None],
-    reason: NodeStatus,
+    reason: str,
     emissions: list[Emission],
     unclaimed: list[Unclaimed],
     cite: tuple[int, int] | None,
@@ -466,7 +485,7 @@ def _take_over_members(
         return
     for _, member in members:
         if member.width > 0:
-            unclaimed.append(Unclaimed(member.off_start, member.off_end, reason.value))
+            unclaimed.append(Unclaimed(member.off_start, member.off_end, reason))
 
 
 def _leaf(node: Node, path: list[str | None], parent: Node) -> Emission | None:

@@ -149,7 +149,14 @@ Revision 13, for `0.6.0`, begins the WireGuard example
 document parameter may be a **map**, and an expression reads one entry of it,
 `keys[receiver]`: a tunnel's key is chosen per message by a field, from a table
 the run supplies. §3.3 says what indexing is and is not, §3.2's refused keyed
-repeat says why this does not reopen it, and §6 how a map is supplied.
+repeat says why this does not reopen it, and §6 how a map is supplied. A
+transform's declaration may say what its failure is called, `fails_as:
+decrypt-failed`, a reason of the `bytes` class the source's bytes are named
+with in place of `undecodable`. Both backends plan it. The file carries it once
+`zpf`'s stage can pass the class a reason outside the canonical four needs
+([python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79));
+until then the region is written `undecodable`, right about its class and
+silent about the rest.
 
 Claims below marked **[verified]** were executed, not reasoned about: against
 `zpf` 0.16 by the script in §10, and against real captures as recorded in §13.

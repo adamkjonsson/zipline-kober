@@ -29,6 +29,7 @@ itself came from the second kind, and none of them needed a clever test.
 | `test_stage.py` | The driver: gaps, seams, shape dispatch, chaining, timestamps, `content_registry`, and what the output declares — a unit sequence at field granularity, the input's adjacency carried forward otherwise. |
 | `test_stage_transforms.py` | What a stage writes for a transform, through both drivers: take-over, a failure that neither confirms nor declines, the digest, and a tunnel feeding a second stage. |
 | `test_map_params.py` | Map parameters and `keys[receiver]`: loaded, checked, decoded by both drivers, read from a JSON key log, and in the digest, with no value ever written. |
+| `test_fails_as.py` | A transform's declared `fails_as`: loaded, checked against the format's classes, planned alike by both backends, and written `undecodable` until python-zipline#79. |
 | `test_cli.py` | All five verbs, driving `main()` directly. |
 | `test_examples.py` | The shipped `examples/` specs — they must check clean, carry documentation, and still decode. |
 | `test_packeteer.py` | packeteer's shipped specs, vendored under `tests/packeteer/` at a stated version: they load, decode, and have every key kober has no meaning for declined by name. |
@@ -137,6 +138,11 @@ seen in a tree, a record or a message. The receiver is the corpus's first
 byte, so most mutations of it name a key the table lacks. The check is run
 against a lookup that lets the miss escape and one that quotes the table, and
 must fail on both.
+
+A transform may declare the reason its failure is named, `fails_as`, so the
+vocabulary invariant widens: every region's reason is one `zpf` classifies, or
+a `fails_as` the spec declared. It is fuzzed over the transform corpus with a
+reason declared for each codec, and the corpus is required to reach each.
 
 ### A seed is only worth the code it reaches
 

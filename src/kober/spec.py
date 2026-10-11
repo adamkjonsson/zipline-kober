@@ -638,11 +638,16 @@ class TransformDecl:
         name: The transform's name, as ``with`` spells it.
         params: Each parameter's name and type. A well-known transform has
             none.
+        fails_as: What a failure of it is called, where its source's bytes
+            are named: ``decrypt-failed`` for a cipher, say. ``None`` is
+            ``undecodable``. A reason of the format's ``bytes`` class, since
+            the bytes a transform could not use did exist.
 
     """
 
     name: str
     params: Mapping[str, ExprType] = field(default_factory=dict)
+    fails_as: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():

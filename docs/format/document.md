@@ -107,7 +107,7 @@ datagrams is allowed — each datagram is one self-contained message.
 ```yaml
 transforms:
   br: {}
-  aes-gcm: {params: {key: bytes, nonce: bytes, aad: bytes}}
+  aes-gcm: {params: {key: bytes, nonce: bytes, aad: bytes}, fails_as: decrypt-failed}
 ```
 
 Each transform a [`transform`](types.md#transform) field uses that is not in the
@@ -115,6 +115,18 @@ core tier, by name, with its parameters and their types. An extended name such
 as `br` takes none, and declaring it is how the spec says it relies on one a
 backend may decline. A name of the spec's own, such as a cipher, lists what its
 `args` must supply. A declaration nothing uses is a warning.
+
+`fails_as` is what the transform's failure is called where its source's bytes
+are named, in place of `undecodable`: `decrypt-failed` for a cipher, so a reader
+can tell a wrong key from bytes that made no sense. Any declared transform may
+have one, a core name included. It is spelled as the format spells a reason,
+lower-case words joined by hyphens, and must be a reason of the format's `bytes`
+class, since a failed transform's bytes did exist: `gap` and `truncated` are
+refused. **The file does not carry it yet.** A reason outside the format's four
+must say its class, and `zpf`'s stage cannot pass one
+([python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79)),
+so until it can, the region is written `undecodable`, which is right about its
+class. Both backends already plan it.
 
 What a name is bound to is decided by the program that runs the spec, not by
 the spec: `check` reads this block, never a registry.

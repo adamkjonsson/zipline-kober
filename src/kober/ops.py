@@ -42,6 +42,7 @@ from kober.check import (
     starved_fields,
     trailing_width,
 )
+from kober.emit import failure_reason
 from kober.errors import CompileError, SpecError
 from kober.expr import (
     SCOPE_WORDS,
@@ -125,6 +126,8 @@ class TransformPlan:
         content_type: The record label for an output kept as bytes.
         typed: Whether the output is decoded as a unit (the :class:`ValueType`
             carrying this describes that unit), rather than kept as bytes.
+        fails_as: What its source is named when it fails: its declaration's
+            ``fails_as``, else ``undecodable``.
 
     """
 
@@ -134,6 +137,7 @@ class TransformPlan:
     args: tuple[tuple[str, Expr], ...] = ()
     content_type: str | None = None
     typed: bool = False
+    fails_as: str = "undecodable"
 
 
 @dataclass(frozen=True)
@@ -994,6 +998,7 @@ def _transform(spec: Spec, unit: str, index: int, kind: Transform) -> ValueType:
         args=tuple(kind.args.items()),
         content_type=kind.content_type,
         typed=kind.type is not None,
+        fails_as=failure_reason(spec, kind),
     )
     if kind.type is None:
         return ValueType(kind=Kind.BYTES, transform=plan)

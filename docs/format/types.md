@@ -386,7 +386,8 @@ A transform may be a `switch` case, which is how a content coding chooses one:
 **A transform that fails does not fail its message.** Bad compressed data, an
 output past `limit`, an argument that cannot be evaluated, an output its `type`
 does not decode or does not read to its end: the message still decodes whole,
-and the transform's source is what is named `undecodable`. Its node in the
+and the transform's source is what is named `undecodable`, or the
+[`fails_as`](document.md#transforms) its declaration gives. Its node in the
 tree says `failed`, with why. A short read inside an output is never
 `truncated`, since the input it came from arrived whole.
 

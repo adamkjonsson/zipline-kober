@@ -44,6 +44,19 @@ minor bump here too.
   `Kind.MAP` and `ParamPlan.entries`. It is the first step of the WireGuard
   example ([`plans/WIREGUARD-EXAMPLE-PLAN.md`](plans/WIREGUARD-EXAMPLE-PLAN.md)).
 
+- **`fails_as` on a transform's declaration**: what its failure is called
+  where its source's bytes are named, in place of `undecodable`, such as
+  `decrypt-failed` for a cipher. Any declared transform may have one, a core
+  name included. `check` requires it spelled as the format spells a reason and
+  of the `bytes` class, refusing `gap` and `truncated`. Both backends plan it,
+  and so does a concat source's every member. **The file does not carry it
+  yet**: a reason outside the canonical four must state its class, which
+  `zpf`'s `DecodeStage.undecoded` cannot pass
+  ([python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79)),
+  so the stage driver writes such a region `undecodable` until it can. New:
+  `TransformDecl.fails_as`, `TransformPlan.fails_as`, `take_over(fails_as=)`,
+  `kober.emit.failure_reason` and `kober.stage.canonical_class`.
+
 ### Changed
 
 - **Breaking:** `kober.expr.Scope` gains `resolve_map(name)` and

@@ -617,11 +617,13 @@ def take_over(
     skipped: bool = False,
     record: tuple[str, str | None, tuple[int, int]] | None = None,
     spoken: Sequence[tuple[int, int]] = (),
+    fails_as: str = "undecodable",
 ) -> None:
     """Write what a transform's outcome says about its source (*Decided* 1).
 
     The source's own record is taken back, since the outcome speaks for it.
-    On failure its bytes are ``undecodable``; with ``emit: none`` they are
+    On failure its bytes are named ``fails_as``, ``undecodable`` unless the
+    transform's declaration says otherwise; with ``emit: none`` they are
     ``skipped`` whatever happened. A type-less output that succeeded is
     written as a record of its own.
 
@@ -644,6 +646,7 @@ def take_over(
         spoken: The ranges of argument fields marked ``emit: none``. They were
             named ``skipped`` where they stand; an output that succeeded cites
             them, so those regions are taken back.
+        fails_as: What a failure names the source's bytes.
 
     """
     if sink is None:
@@ -651,7 +654,7 @@ def take_over(
     if role is not None:
         sink.retract(role)
     failed = isinstance(value, TransformFailed)
-    reason = "skipped" if skipped else "undecodable"
+    reason = "skipped" if skipped else fails_as
     if (failed or skipped) and joined and members is not None:
         elements, attribute, path, name = members
         for index, element in enumerate(elements or ()):

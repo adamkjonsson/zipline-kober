@@ -1,10 +1,13 @@
 # Phase plan: a WireGuard tunnel, as the worked example of bringing your own code
 
-**State: Stages 0 and 1 done (2026-10-11).** `0.6.0.dev0`, with the pipeline
-baseline taken on the unchanged `0.5.0` code in `../kober-baselines/v0.5.0`,
-outside the repository; map parameters and `keys[receiver]` landed in both
-backends (*Stage 1 — done*, below). Upstream issues filed 2026-10-11 (see
-*What it waits for*). Stage 2 is next.
+**State: Stages 0 and 1 done, Stage 2 done short of the file (2026-10-11).**
+`0.6.0.dev0`, with the pipeline baseline taken on the unchanged `0.5.0` code in
+`../kober-baselines/v0.5.0`, outside the repository. Map parameters and
+`keys[receiver]` landed in both backends (*Stage 1 — done*). `fails_as` is
+declared, checked and planned by both backends, and is written `undecodable`
+until [python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79)
+lets a stage pass a reason's class (*Stage 2 — done short of the file*).
+Upstream issues filed 2026-10-11 (see *What it waits for*). Stage 3 is next.
 
 > **Written 2026-10-11** against `0.5.0`, `zpf` 0.5.1 (spec 0.21), packeteer
 > 0.17.0, `zpfwire` 0.4.0. The prompt: *make a demo that decodes a VPN tunnel,
@@ -99,8 +102,11 @@ What did not work is the subject of this plan.
 | [packeteer#196](https://github.com/adamkjonsson/packeteer/issues/196) | Reordering, duplication | The two impairments a counter nonce exists for | Not shown |
 | [packeteer#197](https://github.com/adamkjonsson/packeteer/issues/197) | A tunnel whose payload is the user's code, in wire order | Stage 4 as designed | `tools/` script feeding a one-field protocol, as `gzip_http.py` does |
 | [zpfwire#35](https://github.com/adamkjonsson/python-zipline-wire/issues/35) | Sessions from a `.zpf` of IP packets | Stage 5 as designed | Stage 5's fallback |
+| [python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79) | `DecodeStage.undecoded(reason_class=)` | Stage 2's reason reaching the file | Written `undecodable` (Stage 2) |
 
-Nothing is needed from `python-zipline`.
+*Corrected in Stage 2:* this said nothing was needed from `python-zipline`.
+#79 was found writing the first reason outside the canonical four: the stage
+API cannot pass the class one needs, and the writer refuses the region.
 
 **Stages 1–3 depend on none of them**, and are worth landing first: they are
 the kober half, and they are testable with datagrams built in the test.
@@ -309,6 +315,40 @@ outputs.
 Declaration key, `check` against `zpf.blocks.UNDECODED_REASONS`, emission in
 both drivers (`emit.py`, `runtime.py`, `stage.py`), the discontinuity's
 reason, the widened fuzz invariant. CHANGELOG under `Added`.
+
+#### Stage 2 — done short of the file
+
+`fails_as` is declared, loaded, checked, and planned by both backends, a concat
+source's members included, and fuzzed. Four things the design questions did
+not foresee:
+
+- **`zpf` cannot write it yet.** `DecodeStage.undecoded` takes no
+  `reason_class`, and a reason outside the canonical four without one is
+  refused by the writer as it is written, not at conformance:
+  [python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79).
+  Decided 2026-10-11: build everything short of the write. The stage driver's
+  `_writable` is the one place a declared reason becomes `undecodable`, and the
+  one test that pins it, in `tests/test_fails_as.py`, says it is the one to
+  change. When #79 ships, the follow-up passes `reason_class="bytes"` there,
+  moves the `zpf` floor, and flips that test.
+- **Q2's "the discontinuity carries it too" was wrong.** A `bytes`-class region
+  owes no seam: its bytes existed, and content either side still runs on
+  (`stage._seam_for`). The tunnel's first stage is at field granularity,
+  whose output is a unit sequence, which takes no seams at all. The vector's
+  `discontinuity` belongs to a stage that writes its plaintext as a
+  contiguous stream of its own, and kober does not.
+- **Any declared name may have one, a core one included**, `deflate:
+  {fails_as: inflate-failed}`. That made the differential and the fuzz possible
+  with no cipher at all, and it is the route Q2 left open for
+  `decompress-failed`.
+- **The spelling is checked**: lower-case words joined by hyphens, as every
+  reason the format and its vectors use is spelled. `zpf`'s vocabulary is
+  open; this is kober's own line, so a typo is a finding rather than a new
+  reason.
+
+`zpf` stays imported in `stage.py` only: `check` reaches the class table
+through `kober.stage.canonical_class`, lazily, as the decoder reaches the
+stage. The pipeline differs from the baseline in 0 of 80 outputs.
 
 ### Stage 3 — the example, decoded from datagrams built in the test
 

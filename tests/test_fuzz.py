@@ -63,6 +63,7 @@ from zpf.reassembly import Gap
 from kober import emit as emit_module
 from kober import expr as expr_module
 from kober import stage, transforms
+from kober.check import Severity, check
 from kober.cursor import Cursor
 from kober.decoder import Decoder
 from kober.emit import Emission, Unclaimed, field_path, plan
@@ -474,6 +475,45 @@ def test_the_transform_seeds_decode_whole():
         assert tree.status is NodeStatus.OK, tree.render()
         assert not any(node.failed for node in tree.walk()), tree.render()
         assert tree.off_end == len(data)
+
+
+#: The transform corpus's spec, with each of its transforms declaring the reason
+#: its failure is named (the WireGuard example plan's Q2).
+DECLARED = {"deflate": "inflate-failed", "deflate-raw": "raw-inflate-failed"}
+
+
+def declared_spec() -> Spec:
+    """Return :data:`TRANSFORM_SPEC` with :data:`DECLARED` under ``transforms:``."""
+    block = "".join(f"  {name}: {{fails_as: {reason}}}\n" for name, reason in DECLARED.items())
+    return Spec.from_yaml(TRANSFORM_SPEC.replace("units:\n", f"transforms:\n{block}units:\n", 1))
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+@pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD])
+def test_every_reason_is_classified_or_declared(seed: int, emit: Emit):
+    """A region's reason is one `zpf` classifies, or a ``fails_as`` the spec declared."""
+    spec = declared_spec()
+    assert all(f.severity is not Severity.ERROR for f in check(spec)), check(spec)
+    decoder = Decoder(spec)
+    allowed = {member.value for member in NodeStatus if member is not NodeStatus.OK}
+    allowed |= set(DECLARED.values())
+    for data in transform_cases(seed):
+        tree = decoder.decode_bytes(data)
+        _, unclaimed = plan(spec, tree, data, emit=emit)
+        for region in unclaimed:
+            assert region.reason in allowed, f"{region.reason!r} on {data!r}"
+
+
+def test_the_corpus_reaches_each_declared_reason():
+    """Or the test above only ever sees the canonical ones."""
+    spec = declared_spec()
+    decoder = Decoder(spec)
+    seen = set()
+    for data in transform_cases(1):
+        tree = decoder.decode_bytes(data)
+        _, unclaimed = plan(spec, tree, data, emit=Emit.FIELD)
+        seen |= {region.reason for region in unclaimed}
+    assert set(DECLARED.values()) <= seen
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3, 4])

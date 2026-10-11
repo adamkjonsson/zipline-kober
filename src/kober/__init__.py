@@ -32,7 +32,7 @@ __version__: str = _distribution_version("kober")
 
 from kober.check import Finding, Severity, check, require_valid, scope_at
 from kober.decoder import Decoder
-from kober.emit import Emission, Unclaimed, field_path, plan
+from kober.emit import Emission, Unclaimed, failure_reason, field_path, plan
 from kober.errors import (
     CompileError,
     EvalError,
@@ -139,6 +139,7 @@ from kober.spec import (
     Until,
 )
 from kober.stage import (
+    canonical_class,
     content_registry,
     decode_stream,
     decode_stream_compiled,
@@ -229,11 +230,13 @@ __all__ = [
     "decode_text",
     "cited",
     "bind_transforms",
+    "canonical_class",
     "content_registry",
     "content_type_of",
     "decode_stream",
     "decode_stream_compiled",
     "document_params",
+    "failure_reason",
     "field_path",
     "first_failed",
     "from_dict",

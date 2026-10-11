@@ -719,6 +719,10 @@ def _int_range(kind: IntType) -> tuple[int, int]:
 
 #: What a record's content type may look like, loosely: a namespace the format
 #: defines, and a name. ``prim:bytes``, ``mime:application/json``, ``dec:ip-packet``.
+#: How the format spells an undecoded region's reason: lower-case words joined
+#: by hyphens, as ``undecodable`` and ``decrypt-failed`` are.
+_REASON = re.compile(r"[a-z]+(-[a-z0-9]+)*")
+
 _CONTENT_TYPE = re.compile(r"^(prim:[a-z0-9]+|mime:[\w.+-]+/[\w.+-]+(;.*)?|dec:[\w.-]+)$")
 
 
@@ -826,6 +830,35 @@ class _Checker:
                 )
             if name not in used:
                 self.warn(where, f"transform {name!r} is declared and never used")
+            if declared.fails_as is not None:
+                self._check_fails_as(name, declared.fails_as, f"{where}.fails_as")
+
+    def _check_fails_as(self, name: str, reason: str, where: str) -> None:
+        """Check the reason a transform's failure is written with.
+
+        Any reason the format's open vocabulary allows, spelled as its own
+        are, and of the ``bytes`` class: a failed transform's source was
+        read whole, so naming it a hole would tell a reader to look upstream
+        for bytes that were never missing.
+        """
+        if not _REASON.fullmatch(reason):
+            self.error(
+                where,
+                f"transform {name!r}: fails_as {reason!r} is not a reason as the format "
+                "spells one: lower-case words joined by hyphens, such as 'decrypt-failed'",
+            )
+            return
+        # The stage driver is the one module that imports `zpf`, and it imports
+        # this one, so its table is reached lazily, as the decoder reaches it.
+        from kober.stage import canonical_class
+
+        canonical = canonical_class(reason)
+        if canonical is not None and canonical != "bytes":
+            self.error(
+                where,
+                f"transform {name!r}: fails_as {reason!r} is a {canonical!r}-class reason, "
+                "and a failed transform's bytes did exist; use a 'bytes'-class one",
+            )
 
     def _check_foreign(self) -> None:
         """Report every packeteer key the spec used, and why it means nothing here.

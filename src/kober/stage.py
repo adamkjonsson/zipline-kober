@@ -131,6 +131,41 @@ class _Verdict:
     refused: bool = False
 
 
+def canonical_class(reason: str) -> str | None:
+    """Return the class `zpf` gives a canonical reason, or ``None`` for any other.
+
+    The four canonical reasons imply their class, ``bytes`` or ``hole``; a
+    reason of a producer's own, such as a transform's declared ``fails_as``,
+    has to state one. Read from :data:`zpf.blocks.UNDECODED_REASONS` here, the
+    one module that imports `zpf`, so ``check`` and the writer agree with the
+    conformance checker and with each other.
+
+    Args:
+        reason: A region's reason.
+
+    Returns:
+        ``"bytes"`` or ``"hole"`` for a canonical reason, else ``None``.
+
+    """
+    return UNDECODED_REASONS.get(reason)
+
+
+def _writable(reason: str) -> str:
+    """Return the reason a region is written with.
+
+    A reason of the spec's own, a transform's ``fails_as``, must carry a
+    ``reason_class``, and :meth:`zpf.DecodeStage.undecoded` cannot pass one
+    yet (python-zipline#79): the writer refuses the region outright. Until it
+    can, such a reason is written as what it was before ``fails_as`` existed,
+    ``undecodable``, which is right about its class, since ``check`` allows a
+    ``fails_as`` of the ``bytes`` class only. Everything short of the file
+    already carries the declared reason.
+    """
+    if canonical_class(reason) is None:
+        return NodeStatus.UNDECODABLE.value
+    return reason
+
+
 def _seam_for(reason: str) -> zpf.Seam | None:
     """Return the seam owed after an undecoded region, if any.
 
@@ -492,7 +527,9 @@ class _Writer:
             return
         off_start, off_end, reason, comment = self._pending
         self._pending = None
-        self.stage.undecoded(self.stream, off_start, off_end, reason=reason, comment=comment)
+        self.stage.undecoded(
+            self.stream, off_start, off_end, reason=_writable(reason), comment=comment
+        )
         self._seam = _seam_for(reason) or self._seam
 
 

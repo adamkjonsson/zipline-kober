@@ -2748,6 +2748,8 @@ class _Function:
         spoken = self.spoken(plan)
         if spoken:
             over.append(f"spoken=({', '.join(spoken)},)")
+        if plan.fails_as != NodeStatus.UNDECODABLE.value:
+            over.append(f"fails_as={_literal(plan.fails_as)}")
         self.lines.extend(_call("take_over", ["_sink", *over], indent))
 
     def spoken(self, plan: TransformPlan) -> list[str]:
