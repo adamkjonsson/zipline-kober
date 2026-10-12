@@ -386,6 +386,48 @@ reassembly. Whether it lives on as an example after #35 is decided then.
   `types.md#transform`, which today only says a cipher is the caller's.
 - `run` it as a user would, from the README, in a clean venv.
 
+## Found on the way: a `gzip` transfer-coding is framed but not inflated
+
+Found 2026-10-12 while reviewing packeteer 0.18.0.dev3, which fixed #172 (an
+`http` section could not carry a header name twice). Kober raised #172 for this
+very case, so it was run end to end: a response with
+
+```
+Transfer-Encoding: gzip
+Transfer-Encoding: chunked
+```
+
+and a chunked gzip body. packeteer sends both lines in order, `parse` writes
+them as `[name, value]` pairs, and a replay of the parsed capture is byte for
+byte the original. `examples/http.yaml` frames the message as chunked, as
+`0.5.0` made it, and its `body` record is exactly the gzip stream, de-chunked.
+**It does not inflate it.** The `encoding` select reads `Content-Encoding`
+only, so a `gzip` *transfer*-coding leaves no `content` record, the body
+stays compressed, and nothing in the file says why.
+
+That is within what `0.5.0` promised: it made two `Transfer-Encoding` lines one
+list for **framing**, and its CHANGELOG says a coding it does not decode leaves
+the body as it arrived. It is a gap rather than a bug, and a rare one in real
+traffic, since servers send `Content-Encoding`. It is not this phase's work and
+not in its acceptance.
+
+**What closing it would take**, as a change of its own:
+
+- In `examples/http.yaml`, a transfer-coding before `chunked` (RFC 7230 §4:
+  `gzip`, `x-gzip`, `deflate`) decoded after the chunks are joined and before
+  any `Content-Encoding`, so a body with both is inflated twice, in that
+  order. A transfer-coding it does not know (`compress`, `br`) leaves the body
+  as it arrived, as an unknown content coding does. Its own `select` over
+  `transfer-encoding`, since the last item is the framing and those before it
+  are codings, which is what `endswith` (#50) was added to say.
+- What the file says when a coding is left undecoded: a field naming it, so
+  the body's record says why it is still compressed rather than staying
+  silent.
+- A corpus: packeteer 0.18.0's `--protocol-messages` with header pairs, as in
+  the review, framed by hand (the gzip body cut into chunks), through
+  `tools/pipeline.py` lossless and lossy, with the shape asserted: each
+  inflated `content` byte-identical to the document compressed.
+
 ## Acceptance
 
 1. A user can run the example from its README with packeteer, `zpfwire` and
