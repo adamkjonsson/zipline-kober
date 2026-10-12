@@ -89,18 +89,32 @@ What did not work is the subject of this plan.
    It also sends everything client to server (#195), and `--gap-jitter` cannot
    reorder it (#196). So this pipeline's own "lossy DNS" corpus has never
    been lossy. That is worth a line in the CHANGELOG when #194 lands and the
-   pipeline baseline moves.
+   pipeline baseline moves. *(All three fixed in packeteer 0.18.0.dev1; see
+   What it waits for.)*
 5. **Nothing turns decrypted packets into sessions.** `zpfwire` reads captures
    only ([zpfwire#35](https://github.com/adamkjonsson/python-zipline-wire/issues/35)).
 
 ## What it waits for
 
+**Delivered in packeteer 0.18.0, not yet released.** Implemented across
+0.18.0.dev1 to dev3 and verified here on 2026-10-12, each against the repro it
+was filed with and against WireGuard-shaped traffic. The example needs
+packeteer 0.18.0 or later, and is developed against the dev build until it
+ships. The issues close at that release, by packeteer's own rule.
+
+| Issue | What it gives | Verified |
+| --- | --- | --- |
+| [packeteer#194](https://github.com/adamkjonsson/packeteer/issues/194) | UDP loss and corruption that apply | dev1: loss drops datagrams; corruption flips the last byte, which fails a Poly1305 tag |
+| [packeteer#195](https://github.com/adamkjonsson/packeteer/issues/195) | Datagrams in both directions | dev1: `"direction"` beside a wrapped section; a parsed capture's directions inferred from its ports |
+| [packeteer#196](https://github.com/adamkjonsson/packeteer/issues/196) | Reordering, duplication | dev1: a real overtake per direction, reaching further with `--reorder-depth`; exact copies |
+| [packeteer#197](https://github.com/adamkjonsson/packeteer/issues/197) | A tunnel whose payload is the user's code, in wire order | dev2: see Stage 4 |
+| [packeteer#200](https://github.com/adamkjonsson/packeteer/issues/200) | Corruption that lands on the payload in a short frame | dev2: found in the dev1 review; the padding is untouched and the checksum fails |
+| [packeteer#202](https://github.com/adamkjonsson/packeteer/issues/202) | A seeded run reproduces as a file; `--start-time` | dev2: two seeded tunnel runs write identical pcaps and key logs |
+
+**Still open:**
+
 | Issue | What it gives | What it blocks here | Until it lands |
 | --- | --- | --- | --- |
-| [packeteer#194](https://github.com/adamkjonsson/packeteer/issues/194) | UDP loss and corruption that apply | Every impaired corpus | Nothing impaired; the clean path works |
-| [packeteer#195](https://github.com/adamkjonsson/packeteer/issues/195) | Datagrams in both directions | Both keys exercised from a generated stream | One direction; hand-built tests cover the other |
-| [packeteer#196](https://github.com/adamkjonsson/packeteer/issues/196) | Reordering, duplication | The two impairments a counter nonce exists for | Not shown |
-| [packeteer#197](https://github.com/adamkjonsson/packeteer/issues/197) | A tunnel whose payload is the user's code, in wire order | Stage 4 as designed | `tools/` script feeding a one-field protocol, as `gzip_http.py` does |
 | [zpfwire#35](https://github.com/adamkjonsson/python-zipline-wire/issues/35) | Sessions from a `.zpf` of IP packets | Stage 5 as designed | Stage 5's fallback |
 | [python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79) | `DecodeStage.undecoded(reason_class=)` | Stage 2's reason reaching the file | Written `undecodable` (Stage 2) |
 
@@ -240,17 +254,27 @@ pays off.
 
 ### Q7 — What is the oracle?
 
-`truth.jsonl`, written by the wrapper as it seals. Each line holds a direction,
-counter, receiver index, the inner packet, and whether the outer datagram was
-later lost, corrupted or duplicated. Whether the wrapper can know the outer
-fate depends on where #197 puts the outer impairments, so that is an open
-question to put to that issue's design. The assertions are shape first
-(`CLAUDE.md`: *assert the shape*):
+`truth.jsonl`, written by the wrapper as it seals, **and the capture itself.**
+Each truth line holds the session, direction, receiver index and counter, the
+inner packet, and the sealed outer payload.
 
-- decrypted records = sealed datagrams − lost − corrupted + duplicated;
-- each one byte-identical to its inner packet;
-- each corrupted datagram is exactly one `decrypt-failed` region;
-- order and duplication make no difference to any record's content.
+*Answered by #197 (2026-10-12):* the wrapper cannot know a datagram's fate,
+and does not need to. packeteer applies the outer impairments after `wrap`,
+from an RNG of its own, so what happened to a datagram is read off the
+capture: a sealed payload on the wire unchanged arrived, as many times as it
+appears; one whose bytes arrive with only the last changed was corrupted; one
+not on the wire at all was lost. The dev2 prototype checked a decode this way
+over five sessions and all four impairments.
+
+The assertions are shape first (`CLAUDE.md`: *assert the shape*):
+
+- the plaintext records are, as a multiset, the inner packets of the truth
+  lines whose sealed payloads reached the wire unchanged, once per arrival.
+  That one assertion covers loss, reordering and duplication together;
+- every other transport datagram on the wire, a duplicated corrupt one
+  included, is exactly one `decrypt-failed` region;
+- a handshake message decodes as structure, and its corruption is not
+  detected, since kober checks no handshake MAC (Q5). The example says so.
 
 ### Q8 — Replays and duplicates
 
@@ -359,12 +383,56 @@ as the template. **This proves the kober half without any upstream issue.**
 
 ### Stage 4 — generated traffic
 
-`wg_seal.py` against packeteer#197, with #194–#196 for the impairments. Until
-#197 lands, a `tools/wireguard.py` in the shape of `tools/gzip_http.py`
-generates the inner stream with packeteer, seals it itself, and feeds it
-through a one-field UDP protocol. That interim script is deleted when #197
-lands, not kept beside it. A worked example that shows a workaround teaches
-the workaround.
+`examples/wireguard/wg_seal.py` is a packeteer tunnel module (#197, 0.18.0):
+it defines `make_wrapper(args)`, returning an object whose `wrap(inner,
+direction, timestamp)` returns the outer datagrams to send. packeteer
+generates the inner traffic and calls it once per inner packet actually sent,
+in wire order. The wrapper:
+
+- runs the handshake of Q5 on the first call, one message each way, and again
+  at every rekey, which brings new receiver indices and keys;
+- seals each inner packet as a transport message under its direction's key
+  and counter, with `wg_crypto.py`;
+- writes `keys.json`, receiver index to `hex:` key, which is exactly what
+  `--param keys=file:keys.json` reads (Q1), and `truth.jsonl` (Q7).
+
+Paths and the seed come in as `--tunnel-arg`. One command makes a capture:
+
+```console
+packeteer stream --protocol udp --payload dns --protocol-messages dns.json \
+    --client-ip 10.8.0.2 --server-ip 10.8.0.1 --server-port 53 --packets 60 \
+    --udp-tunnel 198.51.100.7 203.0.113.9 --tunnel-port 51820 \
+    --tunnel-module examples/wireguard/wg_seal.py \
+    --tunnel-arg seed=11 --tunnel-arg rekey_after=12 \
+    --tunnel-arg keylog=keys.json --tunnel-arg truth=truth.jsonl \
+    --tunnel-packet-loss 0.15 --tunnel-corruption 0.15 \
+    --tunnel-reorder 0.3 --tunnel-duplicate 0.1 --seed 7 --pcap wg.pcap
+```
+
+The inner stream keeps its own impairments (`--packet-loss`,
+`--retransmit-lost` on TCP), separate from the tunnel's (`--tunnel-*`). Its
+DNS messages go both ways with a `"direction"` key beside each section (#195).
+A seeded run reproduces the pcap and the key log byte for byte (#202), so the
+pipeline can pin one.
+
+**What the dev2 prototype established (2026-10-12)**, in the scratchpad, with
+real ChaCha20-Poly1305 and framing-only handshakes:
+
+- DNS inside, 60 packets over 5 sessions, 10 lost, 8 corrupted, 8
+  duplicated: kober recovered exactly the 47 plaintexts Q7's rule expects.
+- TCP inside with `--packet-loss 0.2 --retransmit-lost`: the wrapper sealed
+  exactly the 60 packets the inner stream put on the wire. Lost segments were
+  never sealed, each retransmission was sealed once with a fresh counter, and
+  no counter repeated in a session. All 60 decrypted.
+- The spec caught a framing bug in the prototype's own wrapper: an initiation
+  of 144 bytes where WireGuard's is 148, written `truncated`. That is the
+  example doing its job, and the README should say a user's wrapper is
+  checked the same way.
+
+What is left for this stage is the real Noise IK handshake (Q5), the tests:
+the pipeline corpus of Stage 6, and a suite test that runs one small seeded
+capture through `stream` if a packeteer is on the path, skipped if not. There
+is no interim script: #197 shipped before this stage started.
 
 ### Stage 5 — the inner traffic
 
@@ -379,7 +447,11 @@ reassembly. Whether it lives on as an example after #35 is decided then.
 
 - `tools/pipeline.py` gains the WireGuard corpus: clean, and each impairment
   alone, so a moved count says which one moved it.
-- The lossy DNS corpus is re-baselined once #194 makes it lossy.
+- The lossy DNS corpus is re-baselined once packeteer 0.18.0 is released.
+  Against the 0.5.0 baseline, dev1, dev2 and dev3 each moved exactly the
+  eight `dns_gen` outputs, now 35 of 40 messages, with every check holding;
+  dev2 and dev3 wrote the same outputs block for block. The CHANGELOG says the
+  corpus was never lossy before.
 - A docs page, *Bringing your own code: a WireGuard tunnel*. It is written for
   a user with a protocol of their own and walks through the five files, the
   two commands, and the decisions (Q1, Q2, Q4, Q8). It is linked from
