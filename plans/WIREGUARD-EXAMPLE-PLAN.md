@@ -544,6 +544,9 @@ That is unverified today. Fallback until #35: a second-stage spec that reads
 IPv4 and UDP headers and then DNS from each plaintext record, which needs no
 reassembly. Whether it lives on as an example after #35 is decided then.
 
+*Decided 2026-10-13:* wait for zpfwire#35 rather than take the fallback.
+Stage 5 starts when #35 lands in a `zpfwire` build to verify.
+
 ### Stage 6 — the pipeline and the walkthrough
 
 - `tools/pipeline.py` gains the WireGuard corpus: clean, and each impairment
