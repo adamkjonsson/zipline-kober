@@ -1326,7 +1326,14 @@ class _Recording:
         self.calls.append(("record", payload, tuple(sorted(kwargs.items(), key=str))))
 
     def undecoded(
-        self, stream: object, off_start: int, off_end: int, *, reason: str, comment: Any = None
+        self,
+        stream: object,
+        off_start: int,
+        off_end: int,
+        *,
+        reason: str,
+        reason_class: str | None = None,
+        comment: Any = None,
     ) -> None:
         self.calls.append(("undecoded", off_start, off_end, reason, comment))
 

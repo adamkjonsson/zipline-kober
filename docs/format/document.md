@@ -122,11 +122,9 @@ can tell a wrong key from bytes that made no sense. Any declared transform may
 have one, a core name included. It is spelled as the format spells a reason,
 lower-case words joined by hyphens, and must be a reason of the format's `bytes`
 class, since a failed transform's bytes did exist: `gap` and `truncated` are
-refused. **The file does not carry it yet.** A reason outside the format's four
-must say its class, and `zpf`'s stage cannot pass one
-([python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79)),
-so until it can, the region is written `undecodable`, which is right about its
-class. Both backends already plan it.
+refused. A reason outside the format's four must say its class, so the region
+is written with `reason_class: bytes` beside it, which needs `zpf` 0.5.2
+([python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79)).
 
 What a name is bound to is decided by the program that runs the spec, not by
 the spec: `check` reads this block, never a registry.

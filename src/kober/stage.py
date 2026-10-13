@@ -150,20 +150,15 @@ def canonical_class(reason: str) -> str | None:
     return UNDECODED_REASONS.get(reason)
 
 
-def _writable(reason: str) -> str:
-    """Return the reason a region is written with.
+def _reason_class(reason: str) -> str | None:
+    """Return the ``reason_class`` a region's reason must be written with.
 
-    A reason of the spec's own, a transform's ``fails_as``, must carry a
-    ``reason_class``, and :meth:`zpf.DecodeStage.undecoded` cannot pass one
-    yet (python-zipline#79): the writer refuses the region outright. Until it
-    can, such a reason is written as what it was before ``fails_as`` existed,
-    ``undecodable``, which is right about its class, since ``check`` allows a
-    ``fails_as`` of the ``bytes`` class only. Everything short of the file
-    already carries the declared reason.
+    ``None`` for a canonical reason, which implies its class. A reason of the
+    spec's own, a transform's ``fails_as``, must state one, and it is always
+    ``bytes``: ``check`` allows a ``fails_as`` of that class only, since a
+    failed transform's bytes did exist.
     """
-    if canonical_class(reason) is None:
-        return NodeStatus.UNDECODABLE.value
-    return reason
+    return None if canonical_class(reason) is not None else "bytes"
 
 
 def _seam_for(reason: str) -> zpf.Seam | None:
@@ -528,7 +523,12 @@ class _Writer:
         off_start, off_end, reason, comment = self._pending
         self._pending = None
         self.stage.undecoded(
-            self.stream, off_start, off_end, reason=_writable(reason), comment=comment
+            self.stream,
+            off_start,
+            off_end,
+            reason=reason,
+            reason_class=_reason_class(reason),
+            comment=comment,
         )
         self._seam = _seam_for(reason) or self._seam
 

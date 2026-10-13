@@ -6,11 +6,9 @@ every other failure is. Declared beside the transform's parameters, checked
 against the format's classes, and carried by both backends into the regions
 they plan.
 
-**Not yet into the file.** A reason outside the canonical four must carry a
-``reason_class``, and ``zpf``'s ``DecodeStage.undecoded`` cannot pass one
-(python-zipline#79), so the stage driver writes such a region as
-``undecodable`` until it can. The tests of the file below pin that, and are
-the ones to change when it lands.
+Into the file too: a reason outside the canonical four must state its
+``reason_class``, which ``zpf`` 0.5.2's ``DecodeStage.undecoded`` passes on
+(python-zipline#79), and a ``fails_as`` is always of the ``bytes`` class.
 """
 
 from __future__ import annotations
@@ -163,18 +161,24 @@ units:
     writes(built, data, Emit.FIELD)
 
 
-# --- the file, until python-zipline#79 ---------------------------------------------------
+# --- the file ------------------------------------------------------------------------------
 
 
-def test_the_file_says_undecodable_until_zpf_can_carry_a_reasons_class(tmp_path: Path):
-    """Conformant today, and right about the class; the reason itself waits on zpf.
-
-    When ``DecodeStage.undecoded`` takes ``reason_class`` (python-zipline#79),
-    this is the test that changes: the region says ``inflate-failed``, with
-    ``reason_class`` ``bytes``.
-    """
+def test_the_file_names_the_failure_with_its_declared_reason_and_class(tmp_path: Path):
+    """Both drivers write it, conformant, saying the bytes existed (python-zipline#79)."""
     source = tmp_path / "in.zpf"
     write_transport(source, [(1000, GOOD + BAD, 1001)])
     written = decode(spec(), source, tmp_path)
     start = len(GOOD) + 1
-    assert regions(written) == [(start, len(GOOD) + len(BAD) - 1, "undecodable", None)]
+    assert regions(written) == [(start, len(GOOD) + len(BAD) - 1, "inflate-failed", None)]
+    (region,) = [block for block in written if block[0] == "undecoded"]
+    assert region[5] == "bytes"
+
+
+def test_a_canonical_reason_states_no_class(tmp_path: Path):
+    """It implies its own, so a file written before ``fails_as`` is written the same."""
+    source = tmp_path / "in.zpf"
+    write_transport(source, [(1000, GOOD + BAD, 1001)])
+    written = decode(spec(""), source, tmp_path)
+    (region,) = [block for block in written if block[0] == "undecoded"]
+    assert (region[1], region[5]) == ("undecodable", None)

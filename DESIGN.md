@@ -152,11 +152,11 @@ the run supplies. §3.3 says what indexing is and is not, §3.2's refused keyed
 repeat says why this does not reopen it, and §6 how a map is supplied. A
 transform's declaration may say what its failure is called, `fails_as:
 decrypt-failed`, a reason of the `bytes` class the source's bytes are named
-with in place of `undecodable`. Both backends plan it. The file carries it once
-`zpf`'s stage can pass the class a reason outside the canonical four needs
-([python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79));
-until then the region is written `undecodable`, right about its class and
-silent about the rest.
+with in place of `undecodable`. Both backends write it, with the
+`reason_class` a reason outside the canonical four must state, which `zpf`'s
+stage passes since 0.5.2
+([python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79),
+filed for this).
 
 Claims below marked **[verified]** were executed, not reasoned about: against
 `zpf` 0.16 by the script in §10, and against real captures as recorded in §13.

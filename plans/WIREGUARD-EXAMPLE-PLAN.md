@@ -1,13 +1,14 @@
 # Phase plan: a WireGuard tunnel, as the worked example of bringing your own code
 
-**State: Stages 0 and 1 done, Stage 2 done short of the file (2026-10-11).**
-`0.6.0.dev0`, with the pipeline baseline taken on the unchanged `0.5.0` code in
+**State: Stages 0, 1 and 2 done (2026-10-13).** `0.6.0.dev0`, with the
+pipeline baseline taken on the unchanged `0.5.0` code in
 `../kober-baselines/v0.5.0`, outside the repository. Map parameters and
 `keys[receiver]` landed in both backends (*Stage 1 — done*). `fails_as` is
-declared, checked and planned by both backends, and is written `undecodable`
-until [python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79)
-lets a stage pass a reason's class (*Stage 2 — done short of the file*).
-Upstream issues filed 2026-10-11 (see *What it waits for*). Stage 3 is next.
+declared, checked, planned by both backends, and written with its
+`reason_class` since `zpf` 0.5.2 released
+[python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79)
+(*Stage 2 — done*). Upstream issues filed 2026-10-11 (see *What it waits for*).
+Stage 3 is next.
 
 > **Written 2026-10-11** against `0.5.0`, `zpf` 0.5.1 (spec 0.21), packeteer
 > 0.17.0, `zpfwire` 0.4.0. The prompt: *make a demo that decodes a VPN tunnel,
@@ -111,27 +112,17 @@ ships. The issues close at that release, by packeteer's own rule.
 | [packeteer#200](https://github.com/adamkjonsson/packeteer/issues/200) | Corruption that lands on the payload in a short frame | dev2: found in the dev1 review; the padding is untouched and the checksum fails |
 | [packeteer#202](https://github.com/adamkjonsson/packeteer/issues/202) | A seeded run reproduces as a file; `--start-time` | dev2: two seeded tunnel runs write identical pcaps and key logs |
 
+**Delivered and released: `zpf` 0.5.2** (2026-10-13), and kober's floor now.
+
+| Issue | What it gives | Verified |
+| --- | --- | --- |
+| [python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79) | `DecodeStage.undecoded(reason_class=)`; a refused region no longer counted as covered | On 0.5.2.dev0, unchanged in the release: both drivers write `decrypt-failed` and `inflate-failed` with class `bytes`, conformant and `zpf validate` clean |
+
 **Still open:**
 
 | Issue | What it gives | What it blocks here | Until it lands |
 | --- | --- | --- | --- |
 | [zpfwire#35](https://github.com/adamkjonsson/python-zipline-wire/issues/35) | Sessions from a `.zpf` of IP packets | Stage 5 as designed | Stage 5's fallback |
-| [python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79) | `DecodeStage.undecoded(reason_class=)` | Stage 2's reason reaching the file | Written `undecodable` (Stage 2) |
-
-**python-zipline#79 is implemented in 0.5.2.dev0 and verified (2026-10-13)**:
-with the stage driver passing `reason_class="bytes"`, both drivers write
-`decrypt-failed` and `inflate-failed`, conformant and `zpf validate` clean, and
-a refused region is no longer counted as covered. *Decided:* the follow-up
-waits for 0.5.2's release, since it moves the `zpf` floor. It is four changes,
-one commit:
-
-1. `stage._Writer.flush` passes `reason_class=None if canonical_class(reason)
-   else "bytes"` with the reason as declared; `_writable` goes.
-2. `tests/test_fuzz.py`'s `_Recording` stand-in takes `reason_class`.
-3. `tests/test_fails_as.py`'s `test_the_file_says_undecodable_until…` becomes
-   the test that the file says `inflate-failed` with class `bytes`.
-4. `pyproject.toml` to `zpf>=0.5.2,<0.6`, and the CHANGELOG's `fails_as`
-   entry drops "the file does not carry it yet".
 
 *Corrected in Stage 2:* this said nothing was needed from `python-zipline`.
 #79 was found writing the first reason outside the canonical four: the stage
@@ -355,7 +346,7 @@ Declaration key, `check` against `zpf.blocks.UNDECODED_REASONS`, emission in
 both drivers (`emit.py`, `runtime.py`, `stage.py`), the discontinuity's
 reason, the widened fuzz invariant. CHANGELOG under `Added`.
 
-#### Stage 2 — done short of the file
+#### Stage 2 — done
 
 `fails_as` is declared, loaded, checked, and planned by both backends, a concat
 source's members included, and fuzzed. Four things the design questions did
@@ -365,11 +356,15 @@ not foresee:
   `reason_class`, and a reason outside the canonical four without one is
   refused by the writer as it is written, not at conformance:
   [python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79).
-  Decided 2026-10-11: build everything short of the write. The stage driver's
-  `_writable` is the one place a declared reason becomes `undecodable`, and the
-  one test that pins it, in `tests/test_fails_as.py`, says it is the one to
-  change. When #79 ships, the follow-up passes `reason_class="bytes"` there,
-  moves the `zpf` floor, and flips that test.
+  Decided 2026-10-11: build everything short of the write, with the stage
+  driver's `_writable` the one place a declared reason became `undecodable`.
+  Decided 2026-10-13: land the write only once 0.5.2 was released, not
+  against its dev build, since it moves the `zpf` floor. *Landed 2026-10-13:*
+  `_writable` became `_reason_class`, `None` for a canonical reason and
+  `bytes` for any other; the pinned test became the test that the file says
+  `inflate-failed` with class `bytes`; `tests/zpfcompare.py` compares a
+  region's `reason_class` too, now that one can differ; and the floor is
+  `zpf>=0.5.2,<0.6`. The pipeline moved no output for it.
 - **Q2's "the discontinuity carries it too" was wrong.** A `bytes`-class region
   owes no seam: its bytes existed, and content either side still runs on
   (`stage._seam_for`). The tunnel's first stage is at field granularity,
