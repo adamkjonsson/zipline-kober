@@ -118,6 +118,21 @@ ships. The issues close at that release, by packeteer's own rule.
 | [zpfwire#35](https://github.com/adamkjonsson/python-zipline-wire/issues/35) | Sessions from a `.zpf` of IP packets | Stage 5 as designed | Stage 5's fallback |
 | [python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79) | `DecodeStage.undecoded(reason_class=)` | Stage 2's reason reaching the file | Written `undecodable` (Stage 2) |
 
+**python-zipline#79 is implemented in 0.5.2.dev0 and verified (2026-10-13)**:
+with the stage driver passing `reason_class="bytes"`, both drivers write
+`decrypt-failed` and `inflate-failed`, conformant and `zpf validate` clean, and
+a refused region is no longer counted as covered. *Decided:* the follow-up
+waits for 0.5.2's release, since it moves the `zpf` floor. It is four changes,
+one commit:
+
+1. `stage._Writer.flush` passes `reason_class=None if canonical_class(reason)
+   else "bytes"` with the reason as declared; `_writable` goes.
+2. `tests/test_fuzz.py`'s `_Recording` stand-in takes `reason_class`.
+3. `tests/test_fails_as.py`'s `test_the_file_says_undecodable_until…` becomes
+   the test that the file says `inflate-failed` with class `bytes`.
+4. `pyproject.toml` to `zpf>=0.5.2,<0.6`, and the CHANGELOG's `fails_as`
+   entry drops "the file does not carry it yet".
+
 *Corrected in Stage 2:* this said nothing was needed from `python-zipline`.
 #79 was found writing the first reason outside the canonical four: the stage
 API cannot pass the class one needs, and the writer refuses the region.
