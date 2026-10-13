@@ -125,6 +125,7 @@ ships. The issues close at that release, by packeteer's own rule.
 | Issue | What it gives | What it blocks here | Until it lands |
 | --- | --- | --- | --- |
 | [zpfwire#35](https://github.com/adamkjonsson/python-zipline-wire/issues/35) | Sessions from a `.zpf` of IP packets | Stage 5 as designed | Stage 5's fallback |
+| [packeteer#203](https://github.com/adamkjonsson/packeteer/issues/203) | A `--tunnel-module` that can import the modules beside it | `wg_seal.py` importing `wg_crypto.py` (Stage 4) | Stage 4 waits; no path tricks in the example |
 
 *Corrected in Stage 2:* this said nothing was needed from `python-zipline`.
 #79 was found writing the first reason outside the canonical four: the stage
@@ -431,8 +432,9 @@ them to account. What the plan did not foresee, or decided on the way:
 - **For Stage 4: packeteer's `--tunnel-module` has the same gap.** Checked
   against 0.18.0.dev3: a tunnel module importing a sibling fails with
   `ModuleNotFoundError`, so `wg_seal.py` could not import `wg_crypto.py`. It
-  wants the same rule in `packeteer.generate.udp_tunnel.load_wrapper`, and is
-  an issue to file before Stage 4 starts.
+  wants the same rule in `packeteer.generate.udp_tunnel.load_wrapper`: filed
+  as [packeteer#203](https://github.com/adamkjonsson/packeteer/issues/203),
+  2026-10-13.
 
 ### Stage 4 — generated traffic
 
