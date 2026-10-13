@@ -10,7 +10,8 @@ declared, checked, planned by both backends, and written with its
 (*Stage 2 — done*). `examples/wireguard/` holds the spec, the cipher and the
 transform, decoding datagrams built in the tests (*Stage 3 — done*). Upstream
 issues filed 2026-10-11 (see *What it waits for*). Stage 4 is next, and wants
-one more packeteer change (*Stage 3 — done*, last bullet).
+one more packeteer change (*Stage 3 — done*, last bullet), which 0.18.0.dev4
+delivered.
 
 > **Written 2026-10-11** against `0.5.0`, `zpf` 0.5.1 (spec 0.21), packeteer
 > 0.17.0, `zpfwire` 0.4.0. The prompt: *make a demo that decodes a VPN tunnel,
@@ -113,6 +114,7 @@ ships. The issues close at that release, by packeteer's own rule.
 | [packeteer#197](https://github.com/adamkjonsson/packeteer/issues/197) | A tunnel whose payload is the user's code, in wire order | dev2: see Stage 4 |
 | [packeteer#200](https://github.com/adamkjonsson/packeteer/issues/200) | Corruption that lands on the payload in a short frame | dev2: found in the dev1 review; the padding is untouched and the checksum fails |
 | [packeteer#202](https://github.com/adamkjonsson/packeteer/issues/202) | A seeded run reproduces as a file; `--start-time` | dev2: two seeded tunnel runs write identical pcaps and key logs |
+| [packeteer#203](https://github.com/adamkjonsson/packeteer/issues/203) | A `--tunnel-module` (and `--load-protocol` module) can import the modules beside it, its directory appended to `sys.path` | dev4 (2026-10-13): the issue's repro loads; a decoy `colorsys.py` beside it is never imported; a tunnel module beside the example's `wg_crypto.py` sealed DNS both ways and kober, with the example's `wg_transforms.py`, opened every packet |
 
 **Delivered and released: `zpf` 0.5.2** (2026-10-13), and kober's floor now.
 
@@ -125,7 +127,6 @@ ships. The issues close at that release, by packeteer's own rule.
 | Issue | What it gives | What it blocks here | Until it lands |
 | --- | --- | --- | --- |
 | [zpfwire#35](https://github.com/adamkjonsson/python-zipline-wire/issues/35) | Sessions from a `.zpf` of IP packets | Stage 5 as designed | Stage 5's fallback |
-| [packeteer#203](https://github.com/adamkjonsson/packeteer/issues/203) | A `--tunnel-module` that can import the modules beside it | `wg_seal.py` importing `wg_crypto.py` (Stage 4) | Stage 4 waits; no path tricks in the example |
 
 *Corrected in Stage 2:* this said nothing was needed from `python-zipline`.
 #79 was found writing the first reason outside the canonical four: the stage
@@ -279,7 +280,11 @@ The assertions are shape first (`CLAUDE.md`: *assert the shape*):
 
 - the plaintext records are, as a multiset, the inner packets of the truth
   lines whose sealed payloads reached the wire unchanged, once per arrival.
-  That one assertion covers loss, reordering and duplication together;
+  That one assertion covers loss, reordering and duplication together. It
+  must be a multiset even with no impairment at all: `zpfwire` writes each
+  direction as a participant of its own, and kober decodes one stream after
+  the other, so the output holds every client-to-server packet before any
+  server-to-client one (seen in the dev4 check);
 - every other transport datagram on the wire, a duplicated corrupt one
   included, is exactly one `decrypt-failed` region;
 - a handshake message decodes as structure, and its corruption is not
@@ -434,7 +439,7 @@ them to account. What the plan did not foresee, or decided on the way:
   `ModuleNotFoundError`, so `wg_seal.py` could not import `wg_crypto.py`. It
   wants the same rule in `packeteer.generate.udp_tunnel.load_wrapper`: filed
   as [packeteer#203](https://github.com/adamkjonsson/packeteer/issues/203),
-  2026-10-13.
+  2026-10-13, and implemented in 0.18.0.dev4, verified the same day.
 
 ### Stage 4 — generated traffic
 
