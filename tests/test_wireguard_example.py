@@ -1,7 +1,11 @@
-"""The WireGuard example: its cipher, its spec, and a decode of datagrams built here.
+"""The WireGuard example: its cipher, handshake and spec, and the traffic it seals.
 
-Stage 3 of ``plans/WIREGUARD-EXAMPLE-PLAN.md``: the kober half, which needs no
-other project. Generated traffic is Stage 4's.
+Stages 3 and 4 of ``plans/WIREGUARD-EXAMPLE-PLAN.md``. Most of this needs no
+other project. Two tests reach outside, and skip where what they need is not
+there: one has Wireshark open what the example seals, the WireGuard
+implementation that is not this one, and one runs the whole chain, packeteer
+generating impaired traffic through ``wg_seal.py``, ``zpfwire`` converting it,
+and kober decoding it.
 
 **The cipher is checked against RFC 8439's own vectors**, not against itself.
 The tunnel wrapper that generates traffic and the transform that opens it share
@@ -15,11 +19,16 @@ product may not.
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import random
+import re
+import shutil
 import struct
+import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from types import ModuleType
 
@@ -57,6 +66,8 @@ def _load(name: str) -> ModuleType:
 
 
 crypto = _load("wg_crypto")
+handshake = _load("wg_handshake")
+sealing = _load("wg_seal")
 
 
 @pytest.fixture
@@ -224,6 +235,347 @@ def test_the_cipher_agrees_with_a_reviewed_library():
         theirs = aead.ChaCha20Poly1305(key).encrypt(nonce, plaintext, aad)
         assert crypto.seal(key, nonce, plaintext, aad) == theirs
         assert crypto.open_sealed(key, nonce, theirs, aad) == plaintext
+
+
+#: RFC 7748 §5.2: X25519, two single steps: (scalar, u, result).
+X25519_STEPS = [
+    (
+        bytes.fromhex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4"),
+        bytes.fromhex("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c"),
+        bytes.fromhex("c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552"),
+    ),
+    (
+        bytes.fromhex("4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d"),
+        bytes.fromhex("e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493"),
+        bytes.fromhex("95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957"),
+    ),
+]
+
+#: RFC 7748 §5.2: X25519 iterated from k = u = 9, after 1 and 1,000 steps.
+X25519_ONE = bytes.fromhex("422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079")
+X25519_THOUSAND = bytes.fromhex("684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51")
+
+#: RFC 7748 §6.1: Alice and Bob agree a key.
+X25519_DH = {
+    "a": bytes.fromhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"),
+    "A": bytes.fromhex("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"),
+    "b": bytes.fromhex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb"),
+    "B": bytes.fromhex("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"),
+    "K": bytes.fromhex("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"),
+}
+
+
+def test_x25519_takes_the_rfcs_steps():
+    for scalar, u, result in X25519_STEPS:
+        assert crypto.x25519(scalar, u) == result
+
+
+def test_x25519_iterated_from_nine():
+    k = u = crypto.X25519_BASE
+    for step in range(1000):
+        k, u = crypto.x25519(k, u), k
+        if step == 0:
+            assert k == X25519_ONE
+    assert k == X25519_THOUSAND
+
+
+def test_x25519_agrees_alice_and_bobs_key():
+    alice, bob = X25519_DH["a"], X25519_DH["b"]
+    assert crypto.x25519_public(alice) == X25519_DH["A"]
+    assert crypto.x25519_public(bob) == X25519_DH["B"]
+    assert crypto.x25519(alice, X25519_DH["B"]) == X25519_DH["K"]
+    assert crypto.x25519(bob, X25519_DH["A"]) == X25519_DH["K"]
+
+
+# --- the handshake -----------------------------------------------------------------------------
+
+
+def keypair(byte: int) -> object:
+    return handshake.Keypair.from_private(bytes([byte]) * 32)
+
+
+def run_handshake() -> tuple[bytes, bytes, object, object, object]:
+    """Return both messages, what the responder read, and each side's session."""
+    initiator, responder = keypair(1), keypair(2)
+    initiation, initiated = handshake.create_initiation(
+        initiator, responder.public, keypair(3), 0x1111, 1_700_000_000.0
+    )
+    received = handshake.consume_initiation(responder, initiation)
+    response, responders = handshake.create_response(received, keypair(4), 0x2222)
+    initiators = handshake.consume_response(initiated, response)
+    return initiation, response, received, responders, initiators
+
+
+def test_both_sides_of_the_handshake_derive_the_same_session():
+    initiation, response, received, responders, initiators = run_handshake()
+    assert (len(initiation), len(response)) == (148, 92)
+    assert received.initiator_public == keypair(1).public
+    assert initiators == responders
+    assert (initiators.initiator_index, initiators.responder_index) == (0x1111, 0x2222)
+    assert initiators.initiator_to_responder != initiators.responder_to_initiator
+
+
+@pytest.mark.parametrize("at", [8, 40, 100, 120], ids=["ephemeral", "static", "stamp", "mac1"])
+def test_a_tampered_initiation_is_refused(at: int):
+    initiation, *_ = run_handshake()
+    tampered = bytearray(initiation)
+    tampered[at] ^= 1
+    with pytest.raises(handshake.HandshakeError):
+        handshake.consume_initiation(keypair(2), bytes(tampered))
+
+
+def test_an_initiation_for_another_responder_is_refused():
+    initiation, *_ = run_handshake()
+    with pytest.raises(handshake.HandshakeError, match="mac1"):
+        handshake.consume_initiation(keypair(9), initiation)
+
+
+def test_a_response_to_another_initiation_is_refused():
+    initiator, responder = keypair(1), keypair(2)
+    _, initiated = handshake.create_initiation(
+        initiator, responder.public, keypair(5), 0x3333, 1_700_000_000.0
+    )
+    _, response, *_ = run_handshake()
+    with pytest.raises(handshake.HandshakeError):
+        handshake.consume_response(initiated, response)
+
+
+def test_the_timestamp_is_tai64n():
+    """2^62 plus ten seconds of TAI ahead of UTC in 1970, then nanoseconds, big-endian."""
+    assert handshake.tai64n(0.5) == struct.pack(">QI", 0x400000000000000A, 500_000_000)
+
+
+# --- the tunnel module -------------------------------------------------------------------------
+
+
+def tunnel(tmp_path: Path, **args: str) -> object:
+    return sealing.make_wrapper(
+        {"keylog": str(tmp_path / "keys.json"), "truth": str(tmp_path / "truth.jsonl"), **args}
+    )
+
+
+def truth(tmp_path: Path) -> list[dict[str, object]]:
+    lines = (tmp_path / "truth.jsonl").read_text().splitlines()
+    return [json.loads(line) for line in lines]
+
+
+def test_the_first_packet_follows_a_handshake_and_a_rekey_starts_another(tmp_path: Path):
+    wrapper = tunnel(tmp_path, rekey_after="2")
+    sent = [wrapper.wrap(f"p{n}".encode(), "c2s" if n % 2 else "s2c", 1.0 + n) for n in range(5)]
+    assert [[(d, m[0]) for d, m in out] for out in sent] == [
+        [("c2s", 1), ("s2c", 2), ("s2c", 4)],
+        [("c2s", 4)],
+        [("c2s", 1), ("s2c", 2), ("s2c", 4)],
+        [("c2s", 4)],
+        [("c2s", 1), ("s2c", 2), ("s2c", 4)],
+    ]
+    lines = truth(tmp_path)
+    assert [line["session"] for line in lines] == [1, 1, 2, 2, 3]
+    assert [line["counter"] for line in lines] == [0, 0, 0, 0, 0]
+
+
+def test_the_key_log_holds_every_receivers_key(tmp_path: Path):
+    wrapper = tunnel(tmp_path, rekey_after="1")
+    for n in range(3):
+        wrapper.wrap(b"x", "c2s", float(n))
+    logged = json.loads((tmp_path / "keys.json").read_text())
+    assert len(logged) == 6, "two receivers per session"
+    for line in truth(tmp_path):
+        assert str(line["receiver"]) in logged
+
+
+def test_a_seed_reproduces_the_tunnel(tmp_path: Path):
+    first, second = tmp_path / "a", tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    outs = []
+    for folder in (first, second):
+        wrapper = tunnel(folder, seed="5", rekey_after="3")
+        outs.append([wrapper.wrap(bytes([n]) * 20, "c2s", 1.0) for n in range(7)])
+    assert outs[0] == outs[1]
+    assert (first / "keys.json").read_text() == (second / "keys.json").read_text()
+
+
+def test_known_static_keys_are_used(tmp_path: Path):
+    key = bytes([7]) * 32
+    wrapper = tunnel(tmp_path, initiator_key=f"hex:{key.hex()}")
+    assert wrapper.initiator == handshake.Keypair.from_private(key)
+    with pytest.raises(ValueError, match="hex"):
+        tunnel(tmp_path, responder_key="0707")
+
+
+def test_kober_opens_what_the_tunnel_module_seals(tmp_path: Path, registry: Registry):
+    """Without packeteer: the wrapper's datagrams, decoded by both drivers."""
+    wrapper = tunnel(tmp_path, rekey_after="3")
+    wire = [
+        payload
+        for n in range(8)
+        for _, payload in wrapper.wrap(f"inner packet {n}".encode(), "c2s" if n % 2 else "s2c", 1.0)
+    ]
+    source = tmp_path / "in.zpf"
+    datagrams(source, wire)
+    keys = json.loads((tmp_path / "keys.json").read_text())
+    table = {int(index): bytes.fromhex(value[4:]) for index, value in keys.items()}
+    written = decode(spec(), source, tmp_path, params={"keys": table}, transforms=registry)
+    assert plaintexts(written) == [bytes.fromhex(line["plaintext"]) for line in truth(tmp_path)]
+    assert regions(written) == []
+
+
+# --- the outside check: Wireshark opens what the example seals -----------------------------------
+
+
+def _ip_checksum(header: bytes) -> int:
+    total = sum(struct.unpack(f">{len(header) // 2}H", header))
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+    return ~total & 0xFFFF
+
+
+def write_pcap(path: Path, datagrams_both_ways: list[tuple[str, bytes]]) -> None:
+    """Write UDP datagrams between two tunnel endpoints as a pcap, from first principles."""
+    ends = {"c2s": ("198.51.100.7", "203.0.113.9"), "s2c": ("203.0.113.9", "198.51.100.7")}
+    out = bytearray(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
+    for n, (direction, payload) in enumerate(datagrams_both_ways):
+        src, dst = (bytes(int(part) for part in ip.split(".")) for ip in ends[direction])
+        udp = struct.pack(">HHHH", 51820, 51820, 8 + len(payload), 0) + payload
+        ip = struct.pack(">BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), n, 0x4000, 64, 17, 0, src, dst)
+        ip = ip[:10] + struct.pack(">H", _ip_checksum(ip)) + ip[12:]
+        frame = b"\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\x01\x08\x00" + ip + udp
+        out += struct.pack("<IIII", 1_700_000_000 + n, 0, len(frame), len(frame)) + frame
+    path.write_bytes(out)
+
+
+def decrypted_by_wireshark(pcap: Path, keylog: Path) -> list[bytes]:
+    """Return each packet tshark decrypted, from its ``Decrypted Packet`` hex dump."""
+    dump = subprocess.run(
+        ["tshark", "-r", str(pcap), "-o", f"wg.keylog_file:{keylog}", "-x"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    packets = []
+    for block in re.split(r"^Decrypted Packet \(\d+ bytes\):\n", dump, flags=re.M)[1:]:
+        dumped = block.split("\n\n", 1)[0]
+        rows = re.findall(r"^[0-9a-f]{4}  ((?:[0-9a-f]{2} ?)+)", dumped, flags=re.M)
+        packets.append(bytes.fromhex("".join(rows).replace(" ", "")))
+    return packets
+
+
+@pytest.mark.skipif(shutil.which("tshark") is None, reason="needs Wireshark's tshark")
+def test_wireshark_opens_what_the_example_seals(tmp_path: Path):
+    """An implementation that is not this one: the handshake, the keys, every packet.
+
+    Inner packets are real IPv4 here, since Wireshark strips WireGuard's padding
+    by the IP header's own length, and compares what it decrypts with what the
+    tunnel module says it sealed, byte for byte.
+    """
+    wrapper = tunnel(tmp_path, rekey_after="3", wireshark_keylog=str(tmp_path / "wireshark.keys"))
+    inner = []
+    for n in range(7):
+        body = f"query {n}".encode()
+        udp = struct.pack(">HHHH", 40000 + n, 53, 8 + len(body), 0) + body
+        ip = struct.pack(
+            ">BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), n, 0, 64, 17, 0,
+            bytes([10, 8, 0, 2]), bytes([10, 8, 0, 1]),
+        )
+        inner.append(ip[:10] + struct.pack(">H", _ip_checksum(ip)) + ip[12:] + udp)
+    sent = [
+        pair
+        for n, packet in enumerate(inner)
+        for pair in wrapper.wrap(packet, "c2s" if n % 2 else "s2c", 1.0 + n)
+    ]
+    pcap = tmp_path / "wg.pcap"
+    write_pcap(pcap, sent)
+    assert decrypted_by_wireshark(pcap, tmp_path / "wireshark.keys") == inner
+    fields = subprocess.run(
+        [
+            "tshark", "-r", str(pcap), "-o", f"wg.keylog_file:{tmp_path / 'wireshark.keys'}",
+            "-Y", "wg.type == 1 || wg.type == 2",
+            "-T", "fields", "-e", "wg.static", "-e", "wg.handshake_ok",
+        ],
+        capture_output=True, text=True, check=True,
+    ).stdout.split("\n")
+    statics = {line.split("\t")[0] for line in fields[0::2] if line}
+    assert statics == {base64.b64encode(wrapper.initiator.public).decode()}
+    assert {line.split("\t")[1] for line in fields[1::2] if line} == {"True"}
+
+
+# --- the whole chain: packeteer, zpfwire, kober --------------------------------------------------
+
+#: The sibling checkouts ``tools/pipeline.py`` uses, with their own venvs.
+PACKETEER = Path(__file__).resolve().parents[2] / "packeteer" / ".venv" / "bin" / "packeteer"
+ZPFWIRE = (
+    Path(__file__).resolve().parents[2] / "python-zipline-wire" / ".venv" / "bin" / "zpfwire"
+)
+
+#: A DNS query and its answer, raw: what travels inside the tunnel, both ways.
+DNS_EXCHANGE = [
+    {"dns": {"raw": "abcd01000001000000000000076578616d706c6503636f6d0000010001"},
+     "direction": "c2s"},
+    {"dns": {"raw": "abcd81800001000100000000076578616d706c6503636f6d0000010001"
+                    "c00c000100010000003c00045db8d822"},
+     "direction": "s2c"},
+]
+
+
+def _has_tunnel(binary: Path) -> bool:
+    if not binary.exists():
+        return False
+    out = subprocess.run(
+        [str(binary), "stream", "--help"], capture_output=True, text=True, check=False
+    )
+    return "--udp-tunnel" in out.stdout
+
+
+@pytest.mark.skipif(
+    not (_has_tunnel(PACKETEER) and ZPFWIRE.exists()),
+    reason="needs sibling packeteer (0.18.0, --udp-tunnel) and python-zipline-wire checkouts",
+)
+def test_generated_impaired_traffic_decodes_to_exactly_what_arrived(
+    tmp_path: Path, registry: Registry
+):
+    """The plan's Q7, the whole chain: every intact arrival opens, and nothing else does.
+
+    packeteer generates DNS both ways and loses, corrupts, reorders and
+    duplicates the sealed datagrams. What reached the wire unchanged must open,
+    once per arrival, and every other transport datagram must be one
+    ``decrypt-failed`` region. A multiset: ``zpfwire`` writes each direction as
+    a participant of its own, so the decode's order is not the wire's.
+    """
+    messages = tmp_path / "dns.json"
+    messages.write_text(json.dumps(DNS_EXCHANGE))
+    pcap, outer = tmp_path / "wg.pcap", tmp_path / "outer.zpf"
+    subprocess.run(
+        [
+            str(PACKETEER), "stream", "--protocol", "udp", "--payload", "dns",
+            "--protocol-messages", str(messages),
+            "--client-ip", "10.8.0.2", "--server-ip", "10.8.0.1", "--server-port", "53",
+            "--packets", "40",
+            "--udp-tunnel", "198.51.100.7", "203.0.113.9", "--tunnel-port", "51820",
+            "--tunnel-module", str(EXAMPLE / "wg_seal.py"),
+            "--tunnel-arg", f"keylog={tmp_path / 'keys.json'}",
+            "--tunnel-arg", f"truth={tmp_path / 'truth.jsonl'}",
+            "--tunnel-arg", "rekey_after=10",
+            "--tunnel-packet-loss", "0.1", "--tunnel-corruption", "0.15",
+            "--tunnel-reorder", "0.3", "--tunnel-duplicate", "0.1",
+            "--seed", "7", "--pcap", str(pcap),
+        ],
+        check=True, capture_output=True,
+    )
+    subprocess.run([str(ZPFWIRE), "convert", "-q", str(pcap), "-o", str(outer)], check=True)
+    on_wire = Counter(
+        block[3] for block in blocks(outer) if block[0] == "record" and block[3][:1] == b"\x04"
+    )
+    keys = json.loads((tmp_path / "keys.json").read_text())
+    table = {int(index): bytes.fromhex(value[4:]) for index, value in keys.items()}
+    written = decode(spec(), outer, tmp_path, params={"keys": table}, transforms=registry)
+    expected: Counter[bytes] = Counter()
+    for line in truth(tmp_path):
+        arrivals = on_wire.pop(bytes.fromhex(line["outer"]), 0)
+        expected[bytes.fromhex(line["plaintext"])] += arrivals
+    assert Counter(plaintexts(written)) == expected
+    failed = [region for region in regions(written) if region[2] == "decrypt-failed"]
+    assert len(failed) == sum(on_wire.values()), "every other transport datagram failed, once"
+    assert sum(expected.values()) > 0
+    assert failed, "the corpus reaches a corrupted datagram"
 
 
 # --- the spec --------------------------------------------------------------------------------

@@ -64,7 +64,16 @@ minor bump here too.
   the standard library, checked against the RFC's own test vectors; and
   `wg_transforms.py`, which registers it. Its README says how they fit
   together and what a decode cannot do: open the handshake, strip WireGuard's
-  padding, or detect a replay.
+  padding, or detect a replay. It also generates traffic:
+  `wg_handshake.py` is WireGuard's Noise IK handshake, both peers' sides,
+  over X25519 (RFC 7748) added to `wg_crypto.py`, and `wg_seal.py` is a
+  tunnel module for packeteer 0.18.0's `stream --udp-tunnel`, which seals
+  what packeteer generates with a real handshake and rekeys, and writes the
+  key log kober reads, a line per sealed packet to check a decode against,
+  and optionally the keys Wireshark needs to open the same capture. The
+  example's tests check it against RFC 7748's vectors and against Wireshark,
+  and run the whole chain where packeteer and `zpfwire` are checked out
+  beside it.
 - **A module `--load-transforms` loads by path can import the modules beside
   it**, as a script run by `python` can: a cipher kept in a file of its own,
   shared with the code that generates traffic. Its directory is appended to

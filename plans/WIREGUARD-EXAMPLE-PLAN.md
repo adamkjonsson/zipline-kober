@@ -1,6 +1,6 @@
 # Phase plan: a WireGuard tunnel, as the worked example of bringing your own code
 
-**State: Stages 0 to 3 done (2026-10-13).** `0.6.0.dev0`, with the
+**State: Stages 0 to 4 done (2026-10-13).** `0.6.0.dev0`, with the
 pipeline baseline taken on the unchanged `0.5.0` code in
 `../kober-baselines/v0.5.0`, outside the repository. Map parameters and
 `keys[receiver]` landed in both backends (*Stage 1 — done*). `fails_as` is
@@ -8,10 +8,11 @@ declared, checked, planned by both backends, and written with its
 `reason_class` since `zpf` 0.5.2 released
 [python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79)
 (*Stage 2 — done*). `examples/wireguard/` holds the spec, the cipher and the
-transform, decoding datagrams built in the tests (*Stage 3 — done*). Upstream
-issues filed 2026-10-11 (see *What it waits for*). Stage 4 is next, and wants
-one more packeteer change (*Stage 3 — done*, last bullet), which 0.18.0.dev4
-delivered.
+transform, decoding datagrams built in the tests (*Stage 3 — done*), and
+`wg_seal.py` seals packeteer's generated traffic with a real handshake, which
+Wireshark opens (*Stage 4 — done*). Upstream issues filed 2026-10-11 (see
+*What it waits for*). Stage 5 is next, and waits on zpfwire#35 for its design
+or takes its fallback.
 
 > **Written 2026-10-11** against `0.5.0`, `zpf` 0.5.1 (spec 0.21), packeteer
 > 0.17.0, `zpfwire` 0.4.0. The prompt: *make a demo that decodes a VPN tunnel,
@@ -218,7 +219,8 @@ what a user copies:
 | File | What it is |
 | --- | --- |
 | `wireguard.yaml` | The spec. |
-| `wg_crypto.py` | ChaCha20-Poly1305, and for Q5 X25519, BLAKE2s-based HKDF and the Noise IK steps, stdlib only. |
+| `wg_crypto.py` | ChaCha20-Poly1305, and for Q5 X25519, stdlib only. |
+| `wg_handshake.py` | *Added in Stage 4:* the Noise IK handshake, both peers' sides, kept out of `wg_crypto.py` because it is protocol rather than primitive. |
 | `wg_transforms.py` | Registers `wg-transport`. It is what `--load-transforms` loads, and it is ten lines, which is the point. |
 | `wg_seal.py` | The packeteer tunnel wrapper (#197): handshake, counters, `keys.json`, `truth.jsonl`. |
 | `README.md` | How to run it, and what each file teaches. |
@@ -493,6 +495,45 @@ What is left for this stage is the real Noise IK handshake (Q5), the tests:
 the pipeline corpus of Stage 6, and a suite test that runs one small seeded
 capture through `stream` if a packeteer is on the path, skipped if not. There
 is no interim script: #197 shipped before this stage started.
+
+#### Stage 4 — done
+
+`wg_crypto.py` gained X25519, `wg_handshake.py` is new, and `wg_seal.py` is
+the tunnel module. What was decided or found:
+
+- **The handshake is real, both sides of it (Q5).** Written step for step
+  against https://www.wireguard.com/protocol/. `wg_seal.py` plays both peers,
+  and each reads the other's message as it would on the wire rather than being
+  handed the keys, so the two halves check each other where they can.
+- **Q4's WireGuard known answer is Wireshark, not a fixed capture.** `tshark`
+  is installed here, and given the keys `wg_seal.py` logs for it
+  (`wireshark_keylog`), it opens the capture: the initiator's static key out of
+  the initiation, `handshake_ok` on every response, and every transport
+  message, byte for byte against what was sealed. That is an implementation
+  that is not this one checking X25519, the KDF chain, the handshake and the
+  AEAD at once, and it is better than a capture of someone else's, which would
+  check only the opening half. The test writes its own pcap, so it needs no
+  packeteer, and skips without `tshark`. **Shown to matter:** swapping the two
+  transport keys inside the shared derivation passes every other test,
+  kober's decode included, and fails this one. RFC 7748's vectors (§5.2 single
+  and iterated to 1000, §6.1's key agreement) were extracted from the RFC as
+  RFC 8439's were.
+- **The whole chain is a suite test**, skipped without the sibling checkouts:
+  packeteer generates DNS both ways through `wg_seal.py` with loss,
+  corruption, reordering and duplication, `zpfwire` converts it, and both
+  drivers decode it. Q7's rule holds exactly: what reached the wire unchanged
+  opens once per arrival, and every other transport datagram is one
+  `decrypt-failed` region.
+- **Two things a decode shows that the plan did not say.** A corrupted
+  datagram also fails its UDP checksum, since packeteer#200, and `zpfwire`
+  keeps it by default; `--checksum drop` turns it into a loss. And Wireshark
+  strips WireGuard's padding by the inner IP header's length, where kober's
+  record keeps it, which the README already says.
+- **Not done, deliberately:** cookies (`mac2` is always zero), a pre-shared
+  key, and WireGuard's timers: the responder sends as soon as the handshake
+  ends, where a real one waits for the initiator's first packet. Nothing that
+  reads the capture can tell.
+- The README's commands were run as written, from the repository root.
 
 ### Stage 5 — the inner traffic
 

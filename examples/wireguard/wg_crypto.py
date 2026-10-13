@@ -1,4 +1,4 @@
-"""ChaCha20-Poly1305 (RFC 8439) in the standard library, for the WireGuard example.
+"""ChaCha20-Poly1305 (RFC 8439) and X25519 (RFC 7748), for the WireGuard example.
 
 **This is the example's cipher, not kober's.** kober ships no cryptography and
 never will: a cipher is always the code of whoever runs the spec, registered as
@@ -7,8 +7,10 @@ looks like, and it is shared by the two things that need it: the transform
 that opens a transport message (``wg_transforms.py``) and the tunnel wrapper
 that seals one when traffic is generated.
 
-It is written to be read against the RFC, section by section, and checked
-against the RFC's own test vectors (``tests/test_wireguard_example.py``). It is
+Standard library only. It is written to be read against the RFCs, section by
+section, and checked against their own test vectors
+(``tests/test_wireguard_example.py``). X25519 is what the handshake
+(``wg_handshake.py``) agrees keys with. It is
 not written to be fast, about 6 ms for a full-size packet, and it is not
 hardened against timing: use a reviewed library for anything that protects
 data. A test decoding a few hundred packets does not care.
@@ -201,6 +203,66 @@ def open_sealed(key: bytes, nonce: bytes, sealed: bytes, aad: bytes = b"") -> by
         msg = "the tag does not verify"
         raise AuthenticationError(msg)
     return chacha20(key, 1, nonce, ciphertext)
+
+
+#: The field X25519 works in, 2^255 - 19 (RFC 7748 §4.1), and the constant
+#: (A - 2) / 4 its ladder uses (§5).
+_P25519 = (1 << 255) - 19
+_A24 = 121665
+#: The base point's u-coordinate: what a public key is the multiple of.
+X25519_BASE = (9).to_bytes(32, "little")
+
+
+def x25519(scalar: bytes, u: bytes) -> bytes:
+    """Return X25519(scalar, u), the Montgomery ladder of RFC 7748 §5.
+
+    Args:
+        scalar: 32 bytes, clamped here as §5 says, so any 32 bytes are a
+            private key.
+        u: 32 bytes, a u-coordinate. Its top bit is ignored, as §5 says.
+
+    Returns:
+        32 bytes: the u-coordinate of ``scalar`` times ``u``.
+
+    """
+    k = bytearray(scalar)
+    k[0] &= 248
+    k[31] &= 127
+    k[31] |= 64
+    n = int.from_bytes(k, "little")
+    x1 = int.from_bytes(u, "little") & ((1 << 255) - 1)
+    x2, z2, x3, z3, swap = 1, 0, x1, 1, 0
+    for bit in reversed(range(255)):
+        k_t = (n >> bit) & 1
+        swap ^= k_t
+        if swap:
+            x2, x3, z2, z3 = x3, x2, z3, z2
+        swap = k_t
+        a, b = (x2 + z2) % _P25519, (x2 - z2) % _P25519
+        aa, bb = a * a % _P25519, b * b % _P25519
+        e = (aa - bb) % _P25519
+        c, d = (x3 + z3) % _P25519, (x3 - z3) % _P25519
+        da, cb = d * a % _P25519, c * b % _P25519
+        x3 = (da + cb) ** 2 % _P25519
+        z3 = x1 * (da - cb) ** 2 % _P25519
+        x2 = aa * bb % _P25519
+        z2 = e * (aa + _A24 * e) % _P25519
+    if swap:
+        x2, z2 = x3, z3
+    return (x2 * pow(z2, _P25519 - 2, _P25519) % _P25519).to_bytes(32, "little")
+
+
+def x25519_public(private: bytes) -> bytes:
+    """Return the public key of an X25519 private key.
+
+    Args:
+        private: 32 bytes.
+
+    Returns:
+        32 bytes.
+
+    """
+    return x25519(private, X25519_BASE)
 
 
 def transport_nonce(counter: int) -> bytes:
