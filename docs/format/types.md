@@ -454,9 +454,13 @@ binds what the Python standard library can run, and a program adds the rest
 with {func}`kober.transforms.register`, or a {class}`kober.transforms.Registry`
 of its own, or from the command line in a module `--load-transforms` runs: a
 cipher, which the standard library has none of, or `br` from a Brotli package.
+A module loaded by path can import the modules beside it, as a script can.
+`examples/wireguard/` is a complete one: a spec, a cipher, and the module that
+registers it.
 A transform is a callable taking the source's bytes, `limit`, and the spec's
 `args` by name, and returning at most `limit` bytes. What it
-raises makes the source `undecodable`, and its message is never written out: a
+raises makes the source `undecodable`, or the transform's `fails_as`, and its
+message is never written out: a
 cipher's error text can hold a key. A name a spec uses that nothing binds is
 refused before any input is read, saying whether it is a well-known name this
 backend does not bind or a name of the spec's own that nothing registered.

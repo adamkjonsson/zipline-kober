@@ -56,6 +56,21 @@ minor bump here too.
   `TransformDecl.fails_as`, `TransformPlan.fails_as`, `take_over(fails_as=)`,
   `kober.emit.failure_reason` and `kober.stage.canonical_class`.
 
+- **`examples/wireguard/`**, the worked example of a protocol that needs the
+  caller's own code: `wireguard.yaml`, which decodes the handshake as
+  structure and opens each transport message with a declared `wg-transport`
+  transform, choosing the key per message with `keys[receiver]` and naming a
+  failure `decrypt-failed`; `wg_crypto.py`, ChaCha20-Poly1305 (RFC 8439) in
+  the standard library, checked against the RFC's own test vectors; and
+  `wg_transforms.py`, which registers it. Its README says how they fit
+  together and what a decode cannot do: open the handshake, strip WireGuard's
+  padding, or detect a replay.
+- **A module `--load-transforms` loads by path can import the modules beside
+  it**, as a script run by `python` can: a cipher kept in a file of its own,
+  shared with the code that generates traffic. Its directory is appended to
+  `sys.path`, never put first, so a file beside it cannot stand in for the
+  standard library or an installed package.
+
 ### Changed
 
 - Requires `zpf` 0.5.2 or later, still below 0.6: its

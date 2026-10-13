@@ -30,6 +30,7 @@ itself came from the second kind, and none of them needed a clever test.
 | `test_stage_transforms.py` | What a stage writes for a transform, through both drivers: take-over, a failure that neither confirms nor declines, the digest, and a tunnel feeding a second stage. |
 | `test_map_params.py` | Map parameters and `keys[receiver]`: loaded, checked, decoded by both drivers, read from a JSON key log, and in the digest, with no value ever written. |
 | `test_fails_as.py` | A transform's declared `fails_as`: loaded, checked against the format's classes, planned alike by both backends, and written with its `reason_class`. |
+| `test_wireguard_example.py` | `examples/wireguard/`: its cipher against RFC 8439's own vectors (and `cryptography`, where installed), its spec, a tunnel built here decoded by both drivers, and `kober run` with a key log. |
 | `test_cli.py` | All five verbs, driving `main()` directly. |
 | `test_examples.py` | The shipped `examples/` specs — they must check clean, carry documentation, and still decode. |
 | `test_packeteer.py` | packeteer's shipped specs, vendored under `tests/packeteer/` at a stated version: they load, decode, and have every key kober has no meaning for declined by name. |

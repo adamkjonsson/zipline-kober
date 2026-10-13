@@ -186,8 +186,9 @@ def _add_loads(verb: argparse.ArgumentParser) -> None:
         metavar="MODULE",
         help=(
             "a Python module to run before decoding, which registers transforms "
-            "with kober.transforms.register: a cipher, or br. A path ending .py, or "
-            "an importable name; repeatable. A module is code and is run as code"
+            "with kober.transforms.register: a cipher, or br. A path ending .py, "
+            "which may import the modules beside it, or an importable name; "
+            "repeatable. A module is code and is run as code"
         ),
     )
 
@@ -198,11 +199,20 @@ def _load_transforms(modules: Sequence[str]) -> None:
     A path is loaded from its file and anything else is imported by name, which
     is packeteer's ``--load-protocol`` rule. Whatever a module raises is
     reported as a failure to load it, since it happened before any decode.
+
+    A module loaded from a path can import the modules beside it, as a script
+    run by ``python`` can: a cipher kept in its own file, shared with the code
+    that generates the traffic, is the usual reason. Its directory is
+    **appended** to :data:`sys.path`, not put first, so a file beside it can
+    never stand in for the standard library or an installed package.
     """
     for index, module in enumerate(modules):
         try:
             if module.endswith(".py") or "/" in module:
                 path = Path(module)
+                folder = str(path.resolve().parent)
+                if folder not in sys.path:
+                    sys.path.append(folder)
                 spec = importlib.util.spec_from_file_location(
                     f"kober_transforms_{index}_{path.stem}", path
                 )

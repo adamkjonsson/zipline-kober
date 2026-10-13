@@ -738,6 +738,57 @@ def test_load_transforms_runs_a_module_that_registers_a_cipher(
     assert fresh_registry.lookup("xor") is not None
 
 
+def sibling_modules(tmp_path: Path) -> Path:
+    """Write a transforms module that imports a module beside it, and a decoy.
+
+    The decoy is named like a standard-library module the transforms module
+    imports, and refuses to be imported: what loading by path must never pick
+    up in place of the real one.
+    """
+    folder = tmp_path / "mine"
+    folder.mkdir()
+    (folder / "my_cipher.py").write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
+        "from cipher import xor_open\n"
+    )
+    (folder / "colorsys.py").write_text("raise RuntimeError('a sibling shadowed the stdlib')\n")
+    module = folder / "ciphers.py"
+    module.write_text(
+        "import colorsys\n"
+        "from my_cipher import xor_open\n"
+        "from kober.transforms import register\n"
+        "register('xor', xor_open)\n"
+    )
+    return module
+
+
+def test_a_module_loaded_by_path_imports_the_modules_beside_it(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    fresh_registry: Registry,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """As a script run by ``python`` can: a cipher kept in a file of its own."""
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    for name in ("my_cipher", "colorsys"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    module = sibling_modules(tmp_path)
+    key = bytes(range(16))
+    datagram = b"nonce-01" + seal(b"inner", key=key, nonce=b"nonce-01")
+    code = main(
+        [
+            "try", write(tmp_path, TUNNEL_SPEC), "--hex", datagram.hex(),
+            "--param", f"key=hex:{key.hex()}", "--load-transforms", str(module),
+        ]
+    )
+    out = capsys.readouterr()
+    assert code == OK, out
+    assert "inner = b'inner'" in out.out
+    assert str(module.parent) == sys.path[-1], "appended, never put first"
+    assert Path(sys.modules["colorsys"].__file__ or "").parent != module.parent
+
+
 def test_without_the_module_the_spec_says_what_is_missing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], fresh_registry: Registry
 ):

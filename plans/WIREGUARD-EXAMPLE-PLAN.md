@@ -1,14 +1,16 @@
 # Phase plan: a WireGuard tunnel, as the worked example of bringing your own code
 
-**State: Stages 0, 1 and 2 done (2026-10-13).** `0.6.0.dev0`, with the
+**State: Stages 0 to 3 done (2026-10-13).** `0.6.0.dev0`, with the
 pipeline baseline taken on the unchanged `0.5.0` code in
 `../kober-baselines/v0.5.0`, outside the repository. Map parameters and
 `keys[receiver]` landed in both backends (*Stage 1 — done*). `fails_as` is
 declared, checked, planned by both backends, and written with its
 `reason_class` since `zpf` 0.5.2 released
 [python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79)
-(*Stage 2 — done*). Upstream issues filed 2026-10-11 (see *What it waits for*).
-Stage 3 is next.
+(*Stage 2 — done*). `examples/wireguard/` holds the spec, the cipher and the
+transform, decoding datagrams built in the tests (*Stage 3 — done*). Upstream
+issues filed 2026-10-11 (see *What it waits for*). Stage 4 is next, and wants
+one more packeteer change (*Stage 3 — done*, last bullet).
 
 > **Written 2026-10-11** against `0.5.0`, `zpf` 0.5.1 (spec 0.21), packeteer
 > 0.17.0, `zpfwire` 0.4.0. The prompt: *make a demo that decodes a VPN tunnel,
@@ -390,6 +392,47 @@ stage. The pipeline differs from the baseline in 0 of 80 outputs.
 known-answer tests of Q4. A stage test builds datagrams in Python, both
 directions and a rekey, through both drivers, with the `tests/cipher.py` tests
 as the template. **This proves the kober half without any upstream issue.**
+
+#### Stage 3 — done
+
+`examples/wireguard/` holds `wireguard.yaml`, `wg_crypto.py`,
+`wg_transforms.py` and a README, and `tests/test_wireguard_example.py` holds
+them to account. What the plan did not foresee, or decided on the way:
+
+- **A subdirectory sidesteps Q3's worry.** Every loader of `examples/` globs
+  `*.yaml` at the top level, so nothing reads `wireguard.yaml` or the `.py`
+  files as a shipped spec by accident. In exchange, the example's own tests
+  hold the spec to what `test_examples.py` asks of the others: it checks with
+  no error and the one warning it means (a switch with no default: a type
+  outside the four is not WireGuard), it is documented, and it is fuzzed, with
+  the corpus shown to reach a packet that opens, one that fails, a handshake,
+  a truncation and an unknown type.
+- **The RFC's vectors were extracted, not typed.** A script read RFC 8439's
+  text and pulled §2.4.2, §2.5.2, §2.6.2, §2.8.2 and A.5 out of its hex dumps,
+  so the test constants are the RFC's bytes. All five pass, and every change to
+  a sealed message (ciphertext, tag, AAD, key, nonce, length) fails the tag.
+  The cross-check against `cryptography` is in place and skips where it is not
+  installed, as here. **Still open from Q4: a WireGuard known answer**, which
+  needs the handshake and its key derivation, so it moves to Stage 4 with
+  them, as does X25519 against RFC 7748.
+- **`--load-transforms` now lets a module import the modules beside it**, so
+  `wg_transforms.py` imports `wg_crypto.py` with a plain `import` and no path
+  tricks for a user to copy. Its directory is appended to `sys.path`, never
+  put first: a test puts a decoy `colorsys.py` beside the module and fails if
+  it is ever imported. That is a kober change (CHANGELOG, `types.md`), and
+  the one the example needed that no stage named.
+- **The spec confirms `reserved == 0`**, and a keepalive's empty plaintext is
+  written as a conformant zero-length record. The plaintext stays padded; the
+  README says so, with what else a decode cannot do (open the handshake,
+  detect a replay).
+- **Datagrams carry both directions in one participant** here, since kober
+  chooses a key by the receiver index a message carries, not by direction.
+  Two participants come with Stage 4's generated captures.
+- **For Stage 4: packeteer's `--tunnel-module` has the same gap.** Checked
+  against 0.18.0.dev3: a tunnel module importing a sibling fails with
+  `ModuleNotFoundError`, so `wg_seal.py` could not import `wg_crypto.py`. It
+  wants the same rule in `packeteer.generate.udp_tunnel.load_wrapper`, and is
+  an issue to file before Stage 4 starts.
 
 ### Stage 4 — generated traffic
 
