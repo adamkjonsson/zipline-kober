@@ -688,6 +688,19 @@ Four parts, in order, with D allowed to revise A–C, since it is what tests the
   following A's checklist and B's kit, with every place they did not fit
   recorded and fed back into them.
 
+#### Stage 7, A — done (2026-10-16)
+
+The README gains *Adapting this to your own protocol*: a row per file
+(`wg_crypto.py` replace, `wg_handshake.py` delete unless the protocol agrees
+keys, `wg_seal.py` replace or delete, the test file's shape to copy) and
+*Conventions*, the three contracts a new example keeps. The truth file's
+contract is the three fields every check reads, `inner`, `outer` and
+`direction`; WireGuard's others are for a reader. The guide gains *Which steps
+your protocol needs*, by shape, with the two shortcuts: a codec kober already
+knows needs no code, and the check against something that is not your code is
+never optional. The test and pipeline rows describe them as they are; B and C
+rewrite those rows when they change.
+
 #### Q-D — which protocol is the second example?
 
 **Leaning: a tunnel of PackBits-compressed datagrams.** It has to differ from

@@ -20,6 +20,32 @@ sealed. This page walks through it in the order you would build your own.
 | `wg_crypto.py` | The algorithm, in a file of its own, because two things share it. |
 | `wg_handshake.py`, `wg_seal.py` | What generates traffic you know the answer to. |
 
+The folder is meant to be copied: its README says, file by file, what to
+replace, keep or delete, and the conventions a new example keeps.
+
+## Which steps your protocol needs
+
+The eight steps below are WireGuard's, and WireGuard needs all of them. Most
+protocols need fewer. Three shapes cover most of what a transform is for:
+
+| Your protocol | Like | Steps it needs |
+| --- | --- | --- |
+| **A tunnel whose messages need a key**: each datagram one sealed packet, opened with key material the run supplies | WireGuard, ESP, an OpenVPN data channel | All eight. |
+| **A tunnel without keys**: each datagram one packet, compressed or encoded by an algorithm of its own | A compressed or obfuscated tunnel | All but 2: nothing to supply when a decode is set up, so no `params:`, no key log, and no failure for a missing key. |
+| **A transformed field inside a protocol**: a body, a payload, a blob, opened in place | HTTP's `Content-Encoding: gzip` | 1, 3, 4 and 7. There is no tunnel module (5): generate the messages with their fields already encoded, as `tools/gzip_http.py` does for the pipeline. And the output can be decoded where it stands, with a `type:` on the transform, rather than in a stage after it (8). |
+
+Two shortcuts before writing any code:
+
+- **A codec kober already knows needs no code at all.** `gzip`, `deflate` and
+  `deflate-raw` are core: name one in `with:` and step 3 is done. `bzip2`, `xz`
+  and `zstd` are bound from the standard library where it has them, once the
+  spec declares them under `transforms:` with no parameters
+  ([transform names](../format/types.md#transform)).
+- **Step 6 is never optional.** If the algorithm is your code, check it against
+  something that is not: a specification's own examples, or another
+  implementation. If it is a library's, the library is the outside check, and
+  what is left to check is the framing around it.
+
 ## 1. Declare the transform
 
 A transform field reads bytes already decoded, never the position, and names

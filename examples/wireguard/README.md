@@ -16,6 +16,48 @@ bytes.
 | [`wg_seal.py`](wg_seal.py) | A tunnel module for `packeteer stream`: it seals the traffic packeteer generates, with a real handshake, and writes the key log and what it sealed. |
 | [`dns.json`](dns.json) | A DNS query and its answer, the traffic the commands below send through the tunnel, one each way. |
 
+## Adapting this to your own protocol
+
+This folder is meant to be copied. Most of it is WireGuard's own cryptography,
+which your protocol will not reuse; the pattern is in the smaller files. For a
+protocol of yours in `examples/<yours>/`:
+
+| File | What to do |
+| --- | --- |
+| `wireguard.yaml` | **Replace**, keeping the pattern: the `transforms:` declaration naming your transform's arguments and `fails_as`, the `transform:` field reading bytes already decoded with a `limit`, `emit: none` on the fields the output speaks for, and `params:` only if a run needs something a spec cannot hold. |
+| `wg_transforms.py` | **Replace the body, keep the shape**: one function from `(data, *, limit, **args)` to bytes, doing what your protocol's own receiver does, and one `register` call. Raise on anything wrong; the message never reaches the file. |
+| `wg_crypto.py` | **Replace** with your algorithm, in a file of its own whenever two things use it (the transform, and what generates traffic). Standard library only, like the rest of this repository. |
+| `wg_handshake.py` | **Delete**, unless your protocol agrees keys in messages of its own. Even then, kober decodes those as structure only (see *What it does not do*). |
+| `wg_seal.py` | **Replace** if your protocol is a tunnel: a packeteer tunnel module that turns each inner packet into what carries it, writing the files below. **Delete** if it is not. |
+| `dns.json` | **Keep or replace**: the traffic sent through the tunnel. Any packeteer payload works. |
+| `README.md` | **Rewrite**, keeping the order: generate, decode, go inside, and what it cannot do. |
+| `tests/test_wireguard_example.py` | **Copy the shape**, outside this folder: your algorithm against outside known answers, and against another implementation where there is one; your spec over messages built in the test; the whole chain where packeteer and `zpfwire` are checked out beside it; seeded fuzzing; and `kober run` as the README runs it. |
+
+Which of these your protocol needs depends on its shape, which the guide
+covers: [Bringing your own code](../../docs/guides/your-own-code.md), *Which
+steps your protocol needs*.
+
+### Conventions
+
+What the example's tests and `tools/pipeline.py` rely on, and a new example
+should provide in the same form:
+
+- **The key log**, when the spec takes a map parameter: a JSON object, each key
+  the map's key written as `--param` writes it (an `int` in decimal, a `str` as
+  it is) and each value `hex:…`. It is exactly what `--param NAME=file:PATH`
+  reads, so whatever writes it, kober reads it unchanged. A protocol with no
+  keys writes none.
+- **The truth file**, `truth.jsonl`: one JSON object per sealed packet, in the
+  order sealed, with at least `inner` (the packet that went in, as hex),
+  `outer` (the datagram it became, as hex) and `direction` (`c2s` or `s2c`).
+  What a decode is checked against is computed from those three; anything else
+  on the line, such as WireGuard's `session` and `counter`, is for a reader.
+- **The tunnel module**: `make_wrapper(args)` returning an object whose
+  `wrap(inner, direction, timestamp)` returns `(direction, bytes)` pairs, as
+  packeteer's `--tunnel-module` requires. `args` are the `--tunnel-arg` pairs,
+  and the example takes `truth`, `keylog` (if it has keys) and `seed`, and
+  derives everything random from the seed so a run reproduces.
+
 ## Generating traffic
 
 [packeteer](https://github.com/adamkjonsson/packeteer) 0.18.0 or later

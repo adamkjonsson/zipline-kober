@@ -134,6 +134,12 @@ minor bump here too.
   `types.md#transform`.
 - `examples/wireguard/dns.json`, the traffic the README's commands send through
   the tunnel, which the README named and did not ship.
+- **The WireGuard example as a template.** Its README says, file by file, what a
+  writer of another protocol replaces, keeps or deletes, and writes down the
+  conventions a new example keeps: the key log, the truth file, and the tunnel
+  module's arguments. The guide gains *Which steps your protocol needs*, by
+  shape: a tunnel with keys, a tunnel without, and a transformed field inside a
+  protocol.
 
 ## [0.5.0] - 2026-09-28
 
