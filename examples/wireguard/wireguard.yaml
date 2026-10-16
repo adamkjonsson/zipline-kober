@@ -17,11 +17,14 @@
 # or whose tag does not verify, is one `decrypt-failed` region and the next
 # message is decoded as usual.
 #
-# What a decode cannot do, and says nothing about:
-# - The plaintext is padded to a multiple of 16 bytes, as WireGuard pads it.
-#   The IP header's own length says where the packet ends.
-# - A replayed or duplicated message decodes again. WireGuard's replay window
-#   is state across messages too.
+# A packet comes out without the padding WireGuard seals it with: the
+# transform cuts it where its own IP header says it ends, as a receiver does.
+# A keepalive, which seals nothing, is told apart by its size and labelled as
+# one, and its tag is checked all the same.
+#
+# What a decode cannot do, and says nothing about: a replayed or duplicated
+# message decodes again. WireGuard's replay window is state across messages
+# too.
 name: wireguard
 version: "0.1"
 entry: message
@@ -105,11 +108,26 @@ units:
       - {name: receiver, bits: 32, emit: none, doc: "Which session, and which direction."}
       - {name: counter, bits: 64, emit: none, doc: "Per session and direction: the nonce."}
       - {name: sealed, bytes: {size: {remaining: true}}, doc: "The packet, encrypted, and its tag."}
+      # A keepalive seals nothing, so its 16 bytes are its tag alone. Both kinds
+      # are opened, so every tag is checked; only what the record says differs.
       - name: packet
-        doc: The IP packet, padded to 16 bytes; nothing for a keepalive.
-        transform:
-          from: sealed
-          with: wg-transport
-          limit: 65535
-          args: {key: "keys[receiver]", counter: counter}
-          content_type: "dec:ip-packet"
+        doc: >-
+          The IP packet, without WireGuard's padding; for a keepalive, nothing,
+          labelled as one.
+        switch:
+          dispatch: "len(sealed)"
+          cases:
+            16:
+              transform:
+                from: sealed
+                with: wg-transport
+                limit: 1  # what opens is always empty; a limit must be positive
+                args: {key: "keys[receiver]", counter: counter}
+                content_type: "dec:wireguard-keepalive"
+          default:
+            transform:
+              from: sealed
+              with: wg-transport
+              limit: 65535
+              args: {key: "keys[receiver]", counter: counter}
+              content_type: "dec:ip-packet"

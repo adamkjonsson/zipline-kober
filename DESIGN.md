@@ -149,7 +149,8 @@ Revision 13, for `0.6.0`, begins the WireGuard example
 document parameter may be a **map**, and an expression reads one entry of it,
 `keys[receiver]`: a tunnel's key is chosen per message by a field, from a table
 the run supplies. §3.3 says what indexing is and is not, §3.2's refused keyed
-repeat says why this does not reopen it, and §6 how a map is supplied. A
+repeat says why this does not reopen it, and §6 how a map is supplied. The
+expression language gains a sixth function, `len`, for a keepalive (§3.3). A
 transform's declaration may say what its failure is called, `fails_as:
 decrypt-failed`, a reason of the `bytes` class the source's bytes are named
 with in place of `undecodable`. Both backends write it, with the
@@ -972,6 +973,13 @@ index, an ESP SPI, a TLS key log's client random. A message whose key is not
 in the table is an expression that cannot be answered, so it fails the way a
 division by zero does, and the message goes on. The failure names the key and
 never a value, which may be a secret.
+
+**`len(b)`**, the sixth function since revision 13, is the length of a bytes
+value. WireGuard is the use that reopened the table: a keepalive is a transport
+message sealing nothing, its 16 bytes its tag alone, and the spec has to tell it
+from a packet by size to label what it opens, before opening either. A length
+is the smallest thing that says so, and it is useful past WireGuard wherever a
+field's bytes say what they are by how many there are.
 
 This is the "richer expressions" branch of question 5, taken.
 

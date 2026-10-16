@@ -34,7 +34,7 @@ Precedence and associativity are Python's, because the parser is Python's —
 `ast.parse` in expression mode, with a whitelist of node types. That is why "no
 calls, no loops" holds by construction: a construct is refused because it is
 absent from the whitelist, and refused **by name** (`'foo' is not one of the
-expression language's functions; there are only endswith(), lower(),
+expression language's functions; there are only endswith(), len(), lower(),
 startswith(), to_int(), trim()`) rather than by an AST class.
 
 ### Four types, and no coercion
@@ -121,7 +121,7 @@ back.
 
 ## Functions
 
-The language has exactly five, and they are the whole of what it can call:
+The language has exactly six, and they are the whole of what it can call:
 
 | Call | Result | Meaning |
 | --- | --- | --- |
@@ -131,6 +131,7 @@ The language has exactly five, and they are the whole of what it can call:
 | `trim(s)` | str | Text without leading or trailing whitespace. |
 | `startswith(s, prefix)` | bool | Whether `s` begins with `prefix`, case and all. |
 | `endswith(s, suffix)` | bool | Whether `s` ends with `suffix`, case and all. |
+| `len(b)` | int | How many bytes a bytes value holds. |
 
 ```yaml
 size: {expr: "to_int(length_header)"}          # Content-Length: 1234
@@ -146,8 +147,9 @@ varies and which carries whatever whitespace followed the colon. A prefix and
 a suffix say what a start line looks like, which is how a spec refuses a guess
 after a gap, and that `chunked` is the *last* transfer coding in a list such
 as `gzip, chunked`. Both compare exactly; for a case-insensitive test, lower
-the text first. Those needs
-are the table, and it is meant to stay that size.
+the text first. A length came from WireGuard: a keepalive is a message
+sealing nothing, told from a packet by its size, `len(sealed) == 16`, before it
+is opened. Those needs are the table, and it is meant to stay that size.
 
 **`to_int` is stricter than most languages' equivalent.** Surrounding
 whitespace is allowed, because an HTTP field value carries optional whitespace

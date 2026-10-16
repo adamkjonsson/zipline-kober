@@ -63,9 +63,11 @@ minor bump here too.
   failure `decrypt-failed`; `wg_crypto.py`, ChaCha20-Poly1305 (RFC 8439) in
   the standard library, checked against the RFC's own test vectors; and
   `wg_transforms.py`, which registers it. Its README says how they fit
-  together and what a decode cannot do: open the handshake, strip WireGuard's
-  padding, or detect a replay. It also generates traffic:
-  `wg_handshake.py` is WireGuard's Noise IK handshake, both peers' sides,
+  together and what a decode cannot do: open the handshake, or detect a
+  replay. A packet comes out without WireGuard's padding, cut where its own
+  IP header says it ends, and a keepalive is an empty record labelled
+  `dec:wireguard-keepalive`, its tag checked like any other's. It also
+  generates traffic: `wg_handshake.py` is WireGuard's Noise IK handshake, both peers' sides,
   over X25519 (RFC 7748) added to `wg_crypto.py`, and `wg_seal.py` is a
   tunnel module for packeteer 0.18.0's `stream --udp-tunnel`, which seals
   what packeteer generates with a real handshake and rekeys, and writes the
@@ -74,6 +76,10 @@ minor bump here too.
   example's tests check it against RFC 7748's vectors and against Wireshark,
   and run the whole chain where packeteer and `zpfwire` are checked out
   beside it.
+- **`len(b)`**, the expression language's sixth function: how many bytes a
+  bytes value holds, as an `int`, in both backends. WireGuard needs it to tell
+  a keepalive, which seals nothing, from a packet by size before opening
+  either.
 - **A module `--load-transforms` loads by path can import the modules beside
   it**, as a script run by `python` can: a cipher kept in a file of its own,
   shared with the code that generates traffic. Its directory is appended to
@@ -93,6 +99,19 @@ minor bump here too.
   `EvalError` if it has no maps, to type or evaluate an expression that
   indexes one. `Param.type` may now be a `MapType`, for a document parameter,
   so code that reads it as an `ExprType` must allow for one.
+
+### Fixed
+
+- **A compiled decode could raise on a field named like what it calls.** A
+  field or parameter is a local of its unit's generated function, so one named
+  `to_int`, `present`, `len` or any other runtime helper or Python built-in hid
+  that name from the code calling it there, and the compiled module raised
+  where the interpreter answered. Where a function has such a local, its calls
+  now go through an underscore alias no spec name can take, defined once in
+  the module. A module with no such clash is unchanged, character for
+  character. A local named like something the module defines for its code to
+  read, a unit's class or a constant, cannot be told from the field by where
+  it stands, and `kober compile` refuses it, saying why.
 
 ## [0.5.0] - 2026-09-28
 

@@ -113,7 +113,7 @@ def test_slash_is_integer_division():
 @pytest.mark.parametrize(
     ("source", "fragment"),
     [
-        ("len(x)", "not one of the expression language's functions"),
+        ("abs(x)", "not one of the expression language's functions"),
         ("a ** 2", "'**'"),
         ("a @ b", "'@'"),
         ("a is b", "'is'"),
@@ -144,8 +144,8 @@ def test_refused_constructs(source: str, fragment: str):
 def test_error_carries_source_and_location():
     where = Location("dns.message.size")
     with pytest.raises(ExprError) as caught:
-        parse("len(x)", where=where)
-    assert caught.value.source == "len(x)"
+        parse("abs(x)", where=where)
+    assert caught.value.source == "abs(x)"
     assert caught.value.loc == where
     assert "dns.message.size" in str(caught.value)
 
@@ -154,7 +154,7 @@ def test_the_location_puts_the_line_in_front_of_the_message():
     """An expression fault reads like every other one: file, line, path, why."""
     where = Location("dns.message.size", line=27, source="dns.yaml")
     with pytest.raises(ExprError) as caught:
-        parse("len(x)", where=where)
+        parse("abs(x)", where=where)
     assert str(caught.value).startswith("dns.yaml:27: dns.message.size: ")
 
 
@@ -310,7 +310,7 @@ def test_a_call_is_an_atom_and_needs_no_brackets():
 @pytest.mark.parametrize(
     ("source", "fragment"),
     [
-        ("len(x)", "not one of the expression language's functions"),
+        ("abs(x)", "not one of the expression language's functions"),
         ("s.lower()", "not one of the expression language's functions"),
         ("to_int()", "takes 1 or 2 argument(s), got 0"),
         ("to_int(a, 16, 2)", "takes 1 or 2 argument(s), got 3"),
@@ -515,3 +515,17 @@ def test_a_missing_entry_names_the_key_and_never_a_value():
         map_entry({1: b"secret-key"}, 2, "keys")
     assert str(caught.value) == "'keys' has no entry for 2"
     assert "secret" not in str(caught.value)
+
+
+# --- len ---------------------------------------------------------------------------------------
+
+
+def test_len_is_the_bytes_length_and_an_int():
+    assert typed("len(sealed)", sealed=ExprType.BYTES) is ExprType.INT
+    assert evaluate(parse("len(sealed) == 16"), _Values(sealed=b"\x00" * 16)) is True
+
+
+def test_len_takes_bytes_only():
+    with pytest.raises(ExprError) as caught:
+        typed("len(name)", name=ExprType.STR)
+    assert "argument 1 of len() needs bytes, got str" in str(caught.value)

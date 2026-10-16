@@ -280,8 +280,10 @@ class Builtin:
 #: string, a hexadecimal string, a case-insensitive match, the surrounding
 #: whitespace an HTTP field value is allowed to carry, and (#50) a prefix and a
 #: suffix: what a start line looks like, which is how a spec refuses a guess
-#: after a gap, and ``chunked`` being the *last* transfer coding — and the table
-#: is meant to stay that small. A *transform* (decompression, decryption) is not a
+#: after a gap, and ``chunked`` being the *last* transfer coding — and, from
+#: WireGuard, a length: a keepalive is a sealed message of nothing, told apart
+#: from a packet by its size before it is opened. The table is meant to stay
+#: that small. A *transform* (decompression, decryption) is not a
 #: candidate for it: a builtin maps a value to a value, where a transform maps
 #: bytes to bytes and feeds a sub-decode, and it needs an extension point of its
 #: own rather than another row here.
@@ -316,6 +318,12 @@ BUILTINS: Mapping[str, Builtin] = MappingProxyType(
             required=2,
             returns=ExprType.BOOL,
             doc="Whether text ends with a suffix, case and all.",
+        ),
+        "len": Builtin(
+            params=(ExprType.BYTES,),
+            required=1,
+            returns=ExprType.INT,
+            doc="How many bytes a bytes value holds.",
         ),
     }
 )
@@ -880,6 +888,8 @@ def _eval_call(expr: Call, env: Environment) -> ExprValue:
         return _as_str(values[0], "startswith()").startswith(_as_str(values[1], "startswith()"))
     if expr.name == "endswith":
         return _as_str(values[0], "endswith()").endswith(_as_str(values[1], "endswith()"))
+    if expr.name == "len":
+        return len(_as_bytes(values[0], "len()"))
     base = 10 if len(values) == 1 else _as_int(values[1], "to_int()")
     return to_int(_as_str(values[0], "to_int()"), base)
 
@@ -930,6 +940,14 @@ def _as_str(value: ExprValue, op: str) -> str:
     """Return a text operand, refusing anything else."""
     if not isinstance(value, str):
         msg = f"{op} needs text, got {value!r}"
+        raise EvalError(msg)
+    return value
+
+
+def _as_bytes(value: ExprValue, op: str) -> bytes:
+    """Return a bytes operand, refusing anything else."""
+    if not isinstance(value, bytes):
+        msg = f"{op} needs bytes, got {type(value).__name__}"
         raise EvalError(msg)
     return value
 

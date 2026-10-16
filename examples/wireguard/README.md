@@ -77,9 +77,19 @@ with `zpfwire convert --checksum drop` it is dropped instead, and reads as a
 loss.
 
 `packets.zpf` has one `dec:ip-packet` record per transport message, citing the
-datagram it came from, for the next stage to read. A message that does not
-open, because it was corrupted or its receiver is not in the key log, is one
-`decrypt-failed` region, and the next message is decoded as usual. No key is
+datagram it came from, for the next stage to read: the IP packet, without the
+padding WireGuard sealed it with, cut where its own header says it ends, as a
+WireGuard receiver cuts it. A keepalive, which seals nothing, is an empty
+record labelled `dec:wireguard-keepalive`, so a reader looking for packets
+passes it over and every byte is still accounted for. The spec tells the two
+apart by size before opening either, `len(sealed) == 16`, and opens both, so a
+keepalive's tag is checked too.
+
+A message that does not open, because it was corrupted or its receiver is not
+in the key log, is one `decrypt-failed` region, and the next message is
+decoded as usual. So is one that opens to something that is not an IP packet,
+which WireGuard drops as well: the one case where the name says more than
+happened. No key is
 ever written, and the decoder descriptor's `params_digest` says which key log
 produced the file.
 
@@ -105,8 +115,6 @@ produced the file.
   runs from one message to the next, and a transform keeps nothing between
   messages. The transport keys come from the key log instead, which
   `wg_seal.py` derives by running the handshake.
-- **Strip the padding.** WireGuard pads a packet to 16 bytes before sealing it,
-  and the record holds it padded; the IP header says where the packet ends.
 - **Detect a replay.** A duplicated message opens again. WireGuard's replay
   window is state across messages too.
 

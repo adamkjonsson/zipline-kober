@@ -10,9 +10,10 @@ declared, checked, planned by both backends, and written with its
 (*Stage 2 — done*). `examples/wireguard/` holds the spec, the cipher and the
 transform, decoding datagrams built in the tests (*Stage 3 — done*), and
 `wg_seal.py` seals packeteer's generated traffic with a real handshake, which
-Wireshark opens (*Stage 4 — done*). Upstream issues filed 2026-10-11 (see
-*What it waits for*). Stage 5 is next, and waits on zpfwire#35 for its design
-or takes its fallback.
+Wireshark opens (*Stage 4 — done*). Ready for `net:ip`, with `len` and a
+keepalive label, ahead of the `zpf` 0.6 port (*The port to `zpf` 0.6*).
+Upstream issues filed 2026-10-11 (see *What it waits for*). Stage 5 waits for
+zpfwire#35.
 
 > **Written 2026-10-11** against `0.5.0`, `zpf` 0.5.1 (spec 0.21), packeteer
 > 0.17.0, `zpfwire` 0.4.0. The prompt: *make a demo that decodes a VPN tunnel,
@@ -561,6 +562,62 @@ Stage 5 starts when #35 lands in a `zpfwire` build to verify.
   two commands, and the decisions (Q1, Q2, Q4, Q8). It is linked from
   `types.md#transform`, which today only says a cipher is the caller's.
 - `run` it as a user would, from the README, in a clean venv.
+
+## The port to `zpf` 0.6 and spec 0.23
+
+python-zipline 0.6.0.dev0 implements spec 0.23, reviewed here on 2026-10-15:
+**ready from kober's side.** The suite passes on it unchanged, the pipeline's
+138 checks hold, and against the 0.21 baseline, read with a throwaway `zpf`
+0.5.2, 72 of the 80 outputs are the same block for block; the other 8 are the
+`dns_gen` ones packeteer 0.18.0 made lossy. #84 and #85 do not reach kober,
+which passes `decode_stage` a decoder name and writes the decoded layer.
+
+**`net:ip` is the label the spec's tunnel vector now gives a decrypted packet**,
+and the one a generic sessionization stage recognises. It means *exactly one*
+IP packet, which kober's WireGuard records were not: they kept WireGuard's
+padding, and a keepalive was an empty record under the same label. *Decided
+2026-10-16*, after weighing a length function, a no-record-for-empty-output
+rule, and a separate label: a length function and a separate label, together.
+The rule was refused because a keepalive's bytes were decoded, and with no
+record citing them they would need a region no reason fits.
+
+Done now, since none of it needs the release:
+
+- `len(b)` in the expression language, both backends.
+- `wireguard.yaml` switches on `len(sealed)`: 16 bytes is a keepalive, opened
+  like any message and labelled `dec:wireguard-keepalive`; anything else is a
+  packet. A `switch` of two transforms over the same source works at field
+  granularity, through both drivers, which was the one thing not yet known.
+- `wg_transforms.py` cuts a packet where its IP header says it ends, as a
+  WireGuard receiver does, and refuses a plaintext that is not IP.
+
+Waits for `zpf` 0.6.0's release, as #79's follow-up did:
+
+1. `pyproject.toml` to `zpf>=0.6.0,<0.7`, and the Specification link to v0.23.
+   kober pins one `zpf` minor, so this is kober 0.6.0's.
+2. `kober check` accepts `net:`, with the tokens `zpf.NET_LINK_TYPES` has, read
+   through `kober.stage` as the reason classes are.
+3. `wireguard.yaml`'s packet label from `dec:ip-packet` to `net:ip`; the
+   keepalive keeps `dec:`.
+4. The pipeline says a baseline is in an older format rather than raising,
+   and the baseline is taken again on 0.23.
+5. zpfwire#35 should key on `net:ip`, and `zpf`'s `sessionize_stage` (#76) is
+   the hop it describes.
+
+## Found on the way: a compiled field could hide what its function calls
+
+Found 2026-10-16 adding `len`: a field is a local of its unit's generated
+function, so one named `to_int` (or `present`, `len`, any helper or built-in)
+hid that name from the code calling it, and the compiled decode raised where
+the interpreter answered. *Decided:* rename the calls, not the field. A pass
+over the rendered module renames a helper or built-in to an underscore alias
+wherever a function has a local of that name, and only there, by exact source
+position, since a helper is only ever called, raised, caught or given to
+`isinstance` while a field is only ever a value. A module with no clash is
+unchanged; `tests/compiled_dns.py` pins that. A local named like a class or
+constant the module defines is read as a value, cannot be told apart, and is
+refused. Refusing every name a helper has was weighed and rejected: it would
+have refused `present`, `span` and `decode` where nothing clashed.
 
 ## Found on the way: a `gzip` transfer-coding is framed but not inflated
 

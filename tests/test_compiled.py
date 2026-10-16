@@ -58,7 +58,7 @@ from kober.cli import main
 from kober.decoder import Decoder
 from kober.emit import Emission, Unclaimed, plan, root_emit
 from kober.errors import CompileError, EvalError, Refused, TruncatedRead, Undecodable
-from kober.loader import from_dict
+from kober.loader import from_dict, from_yaml
 from kober.node import Node, NodeStatus
 from kober.ops import Plan
 from kober.pygen import Names, render, render_spec
@@ -2419,3 +2419,69 @@ def test_a_long_expression_is_wrapped_and_means_the_same():
     for data in (bytes([1, 2, 3, 4, 5, 7, 8]), bytes([1, 2, 3, 4, 5, 6, 8]), bytes([9] * 7)):
         writes(spec, data, Emit.FIELD)
         compare(spec, data)
+
+
+# --- a field named like what the generated code calls ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "kind", "expr", "data"),
+    [
+        ("to_int", "string: {size: 2}", "to_int(to_int) + 1", b"41"),
+        ("len", "bytes: 3", "len(len)", b"abc"),
+        ("present", "bits: 8", "present + 1", b"\x05"),
+        ("bytes", "bytes: 2", "len(bytes)", b"xy"),
+        ("isinstance", "bits: 8", "isinstance * 2", b"\x03"),
+    ],
+)
+def test_a_field_named_like_a_helper_does_not_hide_it(
+    field: str, kind: str, expr: str, data: bytes
+):
+    """A field is a local of its unit's function: one named ``to_int`` hid the helper.
+
+    The compiled decode raised where the interpreter answered. The calls in that
+    function now go through an underscore alias no spec name can take.
+    """
+    spec = from_yaml(
+        f"""
+name: t
+version: "1"
+entry: m
+units:
+  m:
+    fields:
+      - {{name: {field}, {kind}}}
+      - {{name: n, computed: "{expr}"}}
+"""
+    )
+    for emit in (Emit.MESSAGE, Emit.FIELD):
+        writes(spec, data, emit)
+    module = compiled(spec)
+    assert module.decode(data).n == Decoder(spec).decode_bytes(data).find("n").value
+
+
+def test_a_module_without_a_clash_has_no_aliases():
+    """So every module that compiled before is what it was: ``compiled_dns.py`` pins that."""
+    source = render(Plan.from_spec(Spec.from_file(EXAMPLES / "dns.yaml")), emit=Emit.FIELD)
+    assert "#: Aliases for names a field of the spec shares" not in source
+
+
+def test_a_field_named_like_a_units_class_is_refused():
+    """Read as a value, the class cannot be told from the field: say so instead."""
+    spec = from_yaml(
+        """
+name: t
+version: "1"
+entry: m
+units:
+  m:
+    fields:
+      - {name: Inner, bits: 8}
+      - {name: x, unit: inner}
+  inner:
+    fields:
+      - {name: b, bits: 8}
+"""
+    )
+    with pytest.raises(CompileError, match="'Inner' is both a field or parameter"):
+        render(Plan.from_spec(spec))

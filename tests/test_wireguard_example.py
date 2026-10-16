@@ -68,6 +68,24 @@ def _load(name: str) -> ModuleType:
 crypto = _load("wg_crypto")
 handshake = _load("wg_handshake")
 sealing = _load("wg_seal")
+opening = _load("wg_transforms")
+
+
+def _ip_checksum(header: bytes) -> int:
+    total = sum(struct.unpack(f">{len(header) // 2}H", header))
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+    return ~total & 0xFFFF
+
+
+def ipv4(body: bytes, ident: int = 0) -> bytes:
+    """Return a real IPv4 packet carrying ``body`` in a UDP datagram to port 53."""
+    udp = struct.pack(">HHHH", 40000 + ident % 1000, 53, 8 + len(body), 0) + body
+    header = struct.pack(
+        ">BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), ident, 0, 64, 17, 0,
+        bytes([10, 8, 0, 2]), bytes([10, 8, 0, 1]),
+    )
+    return header[:10] + struct.pack(">H", _ip_checksum(header)) + header[12:] + udp
 
 
 @pytest.fixture
@@ -410,25 +428,20 @@ def test_kober_opens_what_the_tunnel_module_seals(tmp_path: Path, registry: Regi
     wire = [
         payload
         for n in range(8)
-        for _, payload in wrapper.wrap(f"inner packet {n}".encode(), "c2s" if n % 2 else "s2c", 1.0)
+        for _, payload in wrapper.wrap(
+            ipv4(f"packet {n}".encode(), n), "c2s" if n % 2 else "s2c", 1.0
+        )
     ]
     source = tmp_path / "in.zpf"
     datagrams(source, wire)
     keys = json.loads((tmp_path / "keys.json").read_text())
     table = {int(index): bytes.fromhex(value[4:]) for index, value in keys.items()}
     written = decode(spec(), source, tmp_path, params={"keys": table}, transforms=registry)
-    assert plaintexts(written) == [bytes.fromhex(line["plaintext"]) for line in truth(tmp_path)]
+    assert plaintexts(written) == [bytes.fromhex(line["inner"]) for line in truth(tmp_path)]
     assert regions(written) == []
 
 
 # --- the outside check: Wireshark opens what the example seals -----------------------------------
-
-
-def _ip_checksum(header: bytes) -> int:
-    total = sum(struct.unpack(f">{len(header) // 2}H", header))
-    while total >> 16:
-        total = (total & 0xFFFF) + (total >> 16)
-    return ~total & 0xFFFF
 
 
 def write_pcap(path: Path, datagrams_both_ways: list[tuple[str, bytes]]) -> None:
@@ -468,15 +481,7 @@ def test_wireshark_opens_what_the_example_seals(tmp_path: Path):
     tunnel module says it sealed, byte for byte.
     """
     wrapper = tunnel(tmp_path, rekey_after="3", wireshark_keylog=str(tmp_path / "wireshark.keys"))
-    inner = []
-    for n in range(7):
-        body = f"query {n}".encode()
-        udp = struct.pack(">HHHH", 40000 + n, 53, 8 + len(body), 0) + body
-        ip = struct.pack(
-            ">BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), n, 0, 64, 17, 0,
-            bytes([10, 8, 0, 2]), bytes([10, 8, 0, 1]),
-        )
-        inner.append(ip[:10] + struct.pack(">H", _ip_checksum(ip)) + ip[12:] + udp)
+    inner = [ipv4(f"query {n}".encode(), n) for n in range(7)]
     sent = [
         pair
         for n, packet in enumerate(inner)
@@ -570,7 +575,7 @@ def test_generated_impaired_traffic_decodes_to_exactly_what_arrived(
     expected: Counter[bytes] = Counter()
     for line in truth(tmp_path):
         arrivals = on_wire.pop(bytes.fromhex(line["outer"]), 0)
-        expected[bytes.fromhex(line["plaintext"])] += arrivals
+        expected[bytes.fromhex(line["inner"])] += arrivals
     assert Counter(plaintexts(written)) == expected
     failed = [region for region in regions(written) if region[2] == "decrypt-failed"]
     assert len(failed) == sum(on_wire.values()), "every other transport datagram failed, once"
@@ -648,7 +653,7 @@ def test_wireguards_message_sizes():
 
 def conversation() -> tuple[list[bytes], list[bytes]]:
     """Return a tunnel's datagrams, and the plaintexts a decode must recover from them."""
-    a, b, c, d = (f"inner packet {n}".encode() for n in "abcd")
+    a, b, c, d = (ipv4(f"inner packet {n}".encode(), i) for i, n in enumerate("abcd"))
     wire = [
         initiation(INITIATOR),
         response(RESPONDER, INITIATOR),
@@ -661,7 +666,7 @@ def conversation() -> tuple[list[bytes], list[bytes]]:
         transport(RESPONDER_2, 0, c),
         transport(INITIATOR_2, 0, d),
     ]
-    return wire, [padded(a), padded(b), b"", padded(c), padded(d)]
+    return wire, [a, b, b"", c, d]
 
 
 def plaintexts(written: list[tuple[object, ...]]) -> list[object]:
@@ -677,6 +682,8 @@ def test_every_transport_message_opens_under_its_receivers_key(
     datagrams(source, wire)
     written = decode(spec(), source, tmp_path, params={"keys": KEYS}, transforms=registry)
     assert plaintexts(written) == expected
+    labels = [b[1] for b in written if b[0] == "record" and b[2] == "wireguard.body.packet"]
+    assert labels == ["dec:ip-packet"] * 2 + ["dec:wireguard-keepalive"] + ["dec:ip-packet"] * 2
     assert regions(written) == []
     for key in KEYS.values():
         assert key.hex() not in repr(written)
@@ -686,7 +693,7 @@ def test_a_transport_message_is_one_record_citing_its_datagram(
     tmp_path: Path, registry: Registry
 ):
     """The receiver and counter are spoken for: one record per datagram, for a second stage."""
-    message = transport(RESPONDER, 7, b"one packet")
+    message = transport(RESPONDER, 7, ipv4(b"one packet"))
     source = tmp_path / "in.zpf"
     datagrams(source, [message])
     written = decode(spec(), source, tmp_path, params={"keys": KEYS}, transforms=registry)
@@ -712,7 +719,7 @@ def test_the_handshake_decodes_as_structure(tmp_path: Path, registry: Registry):
 def test_a_message_that_does_not_open_is_decrypt_failed_and_the_next_one_opens(
     tmp_path: Path, registry: Registry, fault: str
 ):
-    good = transport(RESPONDER, 0, b"before")
+    good = transport(RESPONDER, 0, ipv4(b"before"))
     if fault == "tampered":
         bad = bytearray(transport(RESPONDER, 1, b"payload"))
         bad[-1] ^= 0x01
@@ -721,16 +728,55 @@ def test_a_message_that_does_not_open_is_decrypt_failed_and_the_next_one_opens(
         bad = transport(RESPONDER, 1, b"payload", key=KEYS[INITIATOR])
     else:
         bad = transport(0x99999999, 1, b"payload", key=bytes(32))
-    after = transport(RESPONDER, 2, b"after")
+    after = transport(RESPONDER, 2, ipv4(b"after", 2))
     source = tmp_path / "in.zpf"
     datagrams(source, [good, bad, after])
     written = decode(spec(), source, tmp_path, params={"keys": KEYS}, transforms=registry)
-    assert plaintexts(written) == [padded(b"before"), padded(b"after")]
+    assert plaintexts(written) == [ipv4(b"before"), ipv4(b"after", 2)]
     start = len(good)
     assert regions(written) == [
         (start + 4, start + 16, "skipped", None),
         (start + 16, start + len(bad), "decrypt-failed", None),
     ]
+
+
+def test_the_padding_is_dropped_by_the_ip_headers_own_length():
+    packet = ipv4(b"odd")
+    assert len(padded(packet)) > len(packet)
+    assert opening.ip_length(padded(packet)) == len(packet)
+    v6 = bytes([0x60, 0, 0, 0]) + (5).to_bytes(2, "big") + bytes([17, 64]) + bytes(32) + b"hello"
+    assert opening.ip_length(padded(v6)) == 45
+
+
+@pytest.mark.parametrize(
+    "plaintext",
+    [b"not an ip packet", bytes([0x45]) + bytes(10), ipv4(b"x")[:2] + (999).to_bytes(2, "big")],
+    ids=["no version", "too short", "longer than it is"],
+)
+def test_what_is_not_an_ip_packet_is_refused(plaintext: bytes):
+    with pytest.raises(ValueError, match="IP"):
+        opening.ip_length(padded(plaintext))
+
+
+def test_a_message_that_opens_to_something_not_ip_is_decrypt_failed(
+    tmp_path: Path, registry: Registry
+):
+    """As WireGuard drops it; the one case where the name says more than happened.
+
+    Between two that open, since a stream in which every message's transform
+    failed is not WireGuard at all, and is declined as such.
+    """
+    first, last = ipv4(b"first"), ipv4(b"last", 2)
+    wire = [
+        transport(RESPONDER, 0, first),
+        transport(RESPONDER, 1, b"opens, but is not IP"),
+        transport(RESPONDER, 2, last),
+    ]
+    source = tmp_path / "in.zpf"
+    datagrams(source, wire)
+    written = decode(spec(), source, tmp_path, params={"keys": KEYS}, transforms=registry)
+    assert plaintexts(written) == [first, last]
+    assert [reason for _, _, reason, _ in regions(written)] == ["skipped", "decrypt-failed"]
 
 
 def test_a_type_wireguard_does_not_have_is_not_wireguard(tmp_path: Path, registry: Registry):
