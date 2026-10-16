@@ -80,6 +80,10 @@ The [spec format reference](docs/format/index.md) documents every key;
 [`examples/dns.yaml`](examples/dns.yaml) and
 [`examples/http.yaml`](examples/http.yaml) are complete specs for real
 protocols, exercised by the test suite against real captures.
+[`examples/wireguard/`](examples/wireguard/README.md) and
+[`examples/packbits/`](examples/packbits/README.md) are protocols that need
+code of your own, a cipher and a codec, each with the traffic generator and
+tests that check its decode exactly.
 
 `show` prints the field tree a spec describes, expanding nested units in place:
 
@@ -304,7 +308,8 @@ It needs two sibling checkouts with their own venvs,
 [`python-zipline-wire`](https://github.com/adamkjonsson/python-zipline-wire)
 (`--packeteer` and `--wire` if they are not at `../`). It fuzzes and generates
 DNS and chunked HTTP, builds HTTP responses with gzip and deflate bodies,
-converts them and four real captures to `.zpf`, and runs both example specs
+generates traffic through each example's own tunnel module, converts them and
+four real captures to `.zpf`, and runs every example spec
 through the interpreter and a freshly compiled module at both granularities. Every output must be conformant and account for every byte; each
 interpreter/compiled pair must be identical block for block; and the decoded
 **shape** must be right — counted against an independent reader where the

@@ -32,6 +32,7 @@ itself came from the second kind, and none of them needed a clever test.
 | `test_fails_as.py` | A transform's declared `fails_as`: loaded, checked against the format's classes, planned alike by both backends, and written with its `reason_class`. |
 | `examplekit.py` | Not tests: what every bring-your-own-code example's tests need, described once by an `Example` read from the example's `example.json` — loading its modules by path, its key log read as `--param` reads it, the oracle that checks a decode against what its tunnel module sealed, the whole chain, fuzz invariants, and `kober run`. No pytest import, so `tools/pipeline.py` can use it too. |
 | `test_examplekit.py` | Every `example.json`: the files it names exist, its failure and key parameter are its spec's, and a key the kit does not know is refused. |
+| `test_packbits_example.py` | `examples/packbits/`, the second example, written from the first's template: its codec against TN1023's worked example and TIFF 6.0's rules, its tunnel module, its spec over datagrams built here, the whole chain, fuzzing, and `kober run` with no `--param`. Most of it is the kit's. |
 | `test_wireguard_example.py` | `examples/wireguard/`: its cipher against RFC 8439's and RFC 7748's own vectors (and `cryptography`, where installed), its handshake, its spec, its tunnel module, a tunnel decoded by both drivers, and `kober run` with a key log. Some tests reach outside and skip without it: Wireshark opening what the example seals (needs `tshark`), and the whole chain through packeteer, `zpfwire`, the tunnel, `zpfwire` again and `dns.yaml` or `http.yaml` (needs the sibling checkouts, `zpfwire` 0.5.0 for the inner hop). |
 | `test_cli.py` | All five verbs, driving `main()` directly. |
 | `test_examples.py` | The shipped `examples/` specs — they must check clean, carry documentation, and still decode. |
@@ -194,7 +195,7 @@ this project — `../packeteer` and `../python-zipline-wire`, or wherever
 `--packeteer` and `--wire` say: packeteer 0.18.0 or later, for its UDP tunnel,
 and `zpfwire` 0.5.0 or later, for a `.zpf` of packets. It builds ten inputs of
 its own, and those of every example that describes itself in an `example.json`
-(`tests/examplekit.py`); WireGuard's five make fifteen:
+(`tests/examplekit.py`); WireGuard's five and PackBits' two make seventeen:
 
 | Input | What it is for |
 | --- | --- |
@@ -206,6 +207,7 @@ its own, and those of every example that describes itself in an `example.json`
 | `gzip_clean` | The same traffic with no loss, checked exactly against the reference reader. |
 | `packet_loss`, `tcp_lossy_ts`, `tcp_reorder_ts` | Real captures kept for their loss and reordering. They are not DNS or HTTP; they are driver structure. |
 | `http_stream_1` | A real HTTP capture, 2000 messages, lossless. |
+| `pb_clean`, `pb_impaired` | From `examples/packbits/example.json`. DNS both ways through `examples/packbits/pb_tunnel.py`, clean, and under every tunnel impairment at once. |
 | `wg_clean`, `wg_loss`, `wg_corrupt`, `wg_reorder`, `wg_duplicate` | From `examples/wireguard/example.json`. DNS both ways through `examples/wireguard/wg_seal.py`: a real handshake, a rekey every ten packets, and one tunnel impairment each, or none, so a count that moves says which impairment moved it. The key log and what was sealed are written beside the capture. |
 
 Each is converted with `zpfwire convert` and run through **every** example

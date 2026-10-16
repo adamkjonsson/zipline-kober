@@ -143,6 +143,11 @@ minor bump here too.
   `tests/examplekit.py` does what every example's tests need, and
   `tools/pipeline.py` runs the example's spec and generated inputs with no
   edit of its own.
+- **A second example of bringing your own code, `examples/packbits/`**: a
+  made-up tunnel of PackBits-compressed packets, the shape with no keys and no
+  parameters. Its codec is checked against Apple TN1023's worked example and
+  TIFF 6.0's rules; it was written from the WireGuard example's template, and
+  the guide points to it for a tunnel without keys.
 
 ## [0.5.0] - 2026-09-28
 

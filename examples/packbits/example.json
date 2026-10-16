@@ -1,0 +1,21 @@
+{
+  "spec": "packbits.yaml",
+  "transforms": "pb_transforms.py",
+  "packet_role": "packbits.packet",
+  "packet_label": "dec:ip-packet",
+  "failure": "unpack-failed",
+  "tunnel": "pb_tunnel.py",
+  "port": 9999,
+  "inside": "../dns.yaml",
+  "traffic": [
+    "--protocol", "udp", "--payload", "dns", "--protocol-messages", "{folder}/dns.json",
+    "--server-port", "53", "--packets", "40"
+  ],
+  "inputs": {
+    "pb_clean": [],
+    "pb_impaired": [
+      "--tunnel-packet-loss", "0.1", "--tunnel-corruption", "0.15",
+      "--tunnel-reorder", "0.3", "--tunnel-duplicate", "0.1"
+    ]
+  }
+}

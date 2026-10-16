@@ -32,6 +32,8 @@ def test_a_description_says_what_the_spec_says(example: Example):
     assert example.failure in {decl.fails_as for decl in spec.transforms.values()}
     if example.keys is not None:
         assert example.keys in [param.name for param in spec.params]
+    if example.tunnel is not None:
+        assert example.port is not None, "a tunnel needs a port"
     if example.inputs:
         assert example.tunnel is not None, "the pipeline generates inputs through a tunnel"
 

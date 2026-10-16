@@ -42,7 +42,7 @@ from kober.spec import Spec
 from kober.transforms import Registry
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
     from types import ModuleType
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -96,7 +96,8 @@ class Example:
         keys: The map parameter a key log supplies, or ``None`` for an example
             with nothing to supply.
         tunnel: The packeteer tunnel module's file name, or ``None``.
-        port: The tunnel's UDP port.
+        port: The tunnel's UDP port, which a tunnel must have: no default
+            could be every protocol's.
         tunnel_args: ``--tunnel-arg`` values every run passes, beyond the truth
             file and the key log, such as ``rekey_after=10``.
         packet_prefix: The bytes an outer datagram that carries a packet starts
@@ -122,7 +123,7 @@ class Example:
     failure: str
     keys: str | None = None
     tunnel: str | None = None
-    port: int = 51820
+    port: int | None = None
     tunnel_args: tuple[str, ...] = ()
     packet_prefix: bytes = b""
     inside: str | None = None
@@ -221,28 +222,62 @@ def read_truth(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
-def payloads(path: Path) -> list[bytes]:
-    """Return every record's payload in a ``.zpf``, in file order."""
+def by_side(path: Path, first: str) -> Iterator[tuple[str, Record]]:
+    """Yield each record of a ``.zpf``, with ``c2s`` if ``first`` sent it, else ``s2c``."""
+    endpoints: dict[tuple[int, int], str] = {}
     with zpf.open(path) as handle:
-        return [bytes(b.payload) for b in handle.blocks() if isinstance(b, Record)]
+        for block in handle.blocks():
+            if isinstance(block, Participant):
+                endpoint = block.endpoint
+                endpoints[block.session_id, block.participant_id] = (
+                    endpoint if isinstance(endpoint, str) else endpoint[0]
+                )
+            elif isinstance(block, Record):
+                sender = endpoints[block.session_id, block.sender_pid]
+                yield ("c2s" if sender.startswith(f"{first}:") else "s2c"), block
+
+
+def on_the_wire(example: Example, outer: Path) -> Counter[tuple[str, bytes]]:
+    """Return the datagrams that carry a packet, by direction and bytes, as a multiset."""
+    return Counter(
+        (side, bytes(record.payload))
+        for side, record in by_side(outer, TUNNEL_ENDS[0])
+        if example.carries_packet(bytes(record.payload))
+    )
+
+
+def _arrived(
+    example: Example, truth: Sequence[dict[str, object]], outer: Path
+) -> tuple[list[tuple[dict[str, object], int]], Counter[tuple[str, bytes]]]:
+    """Return each truth line with how often its datagram arrived, and what is left.
+
+    A transform with no nonce, a codec, sends the same packet as the same bytes
+    every time, so one datagram can stand for several lines. The first such line
+    takes every arrival of it: the same bytes decode to the same packet, so
+    which line counts them does not change what must decode.
+    """
+    on_wire = on_the_wire(example, outer)
+    counted = [
+        (line, on_wire.pop((str(line["direction"]), bytes.fromhex(str(line["outer"]))), 0))
+        for line in truth
+    ]
+    return counted, on_wire
 
 
 def arrivals(
     example: Example, truth: Sequence[dict[str, object]], outer: Path
-) -> tuple[Counter[bytes], Counter[bytes]]:
+) -> tuple[Counter[bytes], Counter[tuple[str, bytes]]]:
     """Return what must open, and the packet-carrying datagrams nothing sealed as they are.
 
     A sealed packet whose datagram reached the wire unchanged opens once per
     arrival, which covers loss, reordering and duplication in one count. What is
     left on the wire, a corrupted datagram or a copy of one, must fail, once each.
     """
-    on_wire = Counter(p for p in payloads(outer) if example.carries_packet(p))
+    counted, left = _arrived(example, truth, outer)
     expected: Counter[bytes] = Counter()
-    for line in truth:
-        expected[bytes.fromhex(str(line["inner"]))] += on_wire.pop(
-            bytes.fromhex(str(line["outer"])), 0
-        )
-    return expected, on_wire
+    for line, times in counted:
+        expected[bytes.fromhex(str(line["inner"]))] += times
+    return expected, left
 
 
 def opened_in(example: Example, path: Path) -> Counter[bytes]:
@@ -288,19 +323,9 @@ def tunnel_problems(
 
 def messages_by_direction(path: Path) -> dict[str, list[bytes]]:
     """Return a decoded conversation's records, by the inner client's side or the server's."""
-    endpoints: dict[tuple[int, int], str] = {}
     found: dict[str, list[bytes]] = {"c2s": [], "s2c": []}
-    with zpf.open(path) as handle:
-        for block in handle.blocks():
-            if isinstance(block, Participant):
-                endpoint = block.endpoint
-                endpoints[block.session_id, block.participant_id] = (
-                    endpoint if isinstance(endpoint, str) else endpoint[0]
-                )
-            elif isinstance(block, Record):
-                sender = endpoints[block.session_id, block.sender_pid]
-                side = "c2s" if sender.startswith(f"{CLIENT}:") else "s2c"
-                found[side].append(bytes(block.payload))
+    for side, record in by_side(path, CLIENT):
+        found[side].append(bytes(record.payload))
     return found
 
 
@@ -318,14 +343,13 @@ def expected_inside(
 ) -> dict[str, Counter[bytes]]:
     """Return the datagram payloads inside what arrived intact, by direction, as multisets.
 
-    Counted by each sealed packet's own datagram, since the traffic inside can
-    repeat itself exactly where the datagrams never do.
+    Counted by each sealed packet's own datagram, as :func:`arrivals` counts:
+    the traffic inside can repeat itself, and so can the datagrams.
     """
-    on_wire = Counter(p for p in payloads(outer) if example.carries_packet(p))
     found: dict[str, Counter[bytes]] = {"c2s": Counter(), "s2c": Counter()}
-    for line in truth:
+    for line, times in _arrived(example, truth, outer)[0]:
         payload = inner_payload(bytes.fromhex(str(line["inner"])))[1]
-        found[str(line["direction"])][payload] += on_wire[bytes.fromhex(str(line["outer"]))]
+        found[str(line["direction"])][payload] += times
     return found
 
 
@@ -451,8 +475,8 @@ def stream_args(
         Everything after the ``packeteer`` executable.
 
     """
-    if example.tunnel is None:
-        msg = f"{example.name} has no tunnel module"
+    if example.tunnel is None or example.port is None:
+        msg = f"{example.name} has no tunnel module, or no port for it"
         raise ValueError(msg)
     args = [f"truth={truth}", *example.tunnel_args]
     if example.keys is not None:

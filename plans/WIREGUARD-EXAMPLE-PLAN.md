@@ -779,6 +779,53 @@ makes this an example of *your own code*:
   tunnel module, so the template's overhead is visible rather than hidden
   behind cryptography.
 
+#### Stage 7, D — done (2026-10-16)
+
+`examples/packbits/`: a made-up tunnel, one IP packet per datagram, PackBits-
+packed, behind a header of version, unpacked length and CRC-32. A codec of 109
+lines, a transform of 49, a tunnel module of 65, a spec of 50, and
+`tests/test_packbits_example.py` at 304 lines, of which the chain, the oracle,
+the fuzzing and the command line are a few lines each, calling the kit. It
+reached the pipeline as `pb_clean` and `pb_impaired` with no edit to
+`tools/pipeline.py`: 383 checks hold, and against C's run the 60 outputs that
+differ are all new, none changed.
+
+**Where A–C did not fit, and what changed:**
+
+- **The oracle assumed every datagram is unique**, as a cipher's nonce makes
+  it. A codec sends the same packet as the same bytes, so `expected_inside`
+  credited each of twenty identical DNS queries with every arrival of all
+  twenty (361 too many). Now the kit counts what is on the wire by direction
+  and bytes, read from which tunnel end sent it, and each truth line consumes
+  its datagram's count once; the first line for a datagram takes every
+  arrival, which is sound because the same bytes decode to the same packet.
+  WireGuard's results are unchanged. The test failed before the fix.
+- **The oracle assumes a corrupted datagram fails.** That is the Q7 rule, and
+  a cipher's tag guarantees it; PackBits checks nothing, and a flipped literal
+  byte unpacks to a wrong packet of the right length. Not a kit change but a
+  protocol one: the datagram carries a CRC-32, and the guide's *tunnel without
+  keys* row now says an algorithm that checks nothing needs a check of its own.
+- **The kit's tunnel port defaulted to WireGuard's 51820.** No default could
+  be every protocol's, so a tunnel's `port` is required, and
+  `tests/test_examplekit.py` checks it.
+- **The plan's outside known answer was wrong.** TIFF 6.0 §9 defines PackBits
+  by its unpacking rules and has no worked example (found by extracting the
+  section from the specification's PDF: RC4-encrypted, LZW-compressed content
+  streams, decoded with the standard library). The worked example is Apple's
+  Technical Note TN1023's, extracted from its HTML. The tests take both: TN1023's
+  example both ways, and TIFF's rules one at a time. No second implementation
+  is in the standard library, so there is no equivalent of the Wireshark check.
+  Proven to matter: a replicate count off by one in both `pack` and `unpack`
+  passes every round trip and the whole chain, and fails exactly those four.
+- **packeteer's DNS payload needs a messages file**, so the example ships its
+  own `dns.json`, a copy of WireGuard's: an example is copied whole, and one
+  that reached into another's folder would not survive that.
+
+**What fit unchanged:** `example.json` and `Example.load`; `params` returning
+`None` and `run_cli` with no `--param`; `registry` and `module`; the chain
+helpers; the fuzz invariants with no secrets; the README's truth convention;
+and the pipeline, which needed nothing.
+
 #### Acceptance for Stage 7
 
 1. A writer can tell, from the README alone, which of the example's files to

@@ -37,7 +37,9 @@ protocol of yours in `examples/<yours>/`:
 
 Which of these your protocol needs depends on its shape, which the guide
 covers: [Bringing your own code](../../docs/guides/your-own-code.md), *Which
-steps your protocol needs*.
+steps your protocol needs*. [`examples/packbits/`](../packbits/README.md) was
+written from this table, for the shape with no keys: start there if yours has
+none.
 
 ### Conventions
 

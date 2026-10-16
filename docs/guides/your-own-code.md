@@ -31,7 +31,7 @@ protocols need fewer. Three shapes cover most of what a transform is for:
 | Your protocol | Like | Steps it needs |
 | --- | --- | --- |
 | **A tunnel whose messages need a key**: each datagram one sealed packet, opened with key material the run supplies | WireGuard, ESP, an OpenVPN data channel | All eight. |
-| **A tunnel without keys**: each datagram one packet, compressed or encoded by an algorithm of its own | A compressed or obfuscated tunnel | All but 2: nothing to supply when a decode is set up, so no `params:`, no key log, and no failure for a missing key. |
+| **A tunnel without keys**: each datagram one packet, compressed or encoded by an algorithm of its own | A compressed or obfuscated tunnel; [`examples/packbits/`](https://github.com/adamkjonsson/zipline-kober/tree/main/examples/packbits) | All but 2: nothing to supply when a decode is set up, so no `params:`, no key log, and no failure for a missing key. If the algorithm checks nothing, as a codec seldom does, the protocol needs a check of its own, or a corrupted datagram decodes to a wrong packet that nothing can tell from a right one: PackBits' carries a CRC-32. |
 | **A transformed field inside a protocol**: a body, a payload, a blob, opened in place | HTTP's `Content-Encoding: gzip` | 1, 3, 4 and 7. There is no tunnel module (5): generate the messages with their fields already encoded, as `tools/gzip_http.py` does for the pipeline. And the output can be decoded where it stands, with a `type:` on the transform, rather than in a stage after it (8). |
 
 Two shortcuts before writing any code:
