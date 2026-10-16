@@ -31,7 +31,7 @@ protocol of yours in `examples/<yours>/`:
 | `wg_seal.py` | **Replace** if your protocol is a tunnel: a packeteer tunnel module that turns each inner packet into what carries it, writing the files below. **Delete** if it is not. |
 | `dns.json` | **Keep or replace**: the traffic sent through the tunnel. Any packeteer payload works. |
 | `README.md` | **Rewrite**, keeping the order: generate, decode, go inside, and what it cannot do. |
-| `tests/test_wireguard_example.py` | **Copy the shape**, outside this folder: your algorithm against outside known answers, and against another implementation where there is one; your spec over messages built in the test; the whole chain where packeteer and `zpfwire` are checked out beside it; seeded fuzzing; and `kober run` as the README runs it. |
+| `tests/test_wireguard_example.py` | **Copy the shape**, outside this folder. Describe your example once as an `Example` from `tests/examplekit.py`, and the kit does what every example's tests need: load your modules by path, read your key log as `--param` does, check a decode against your truth file exactly, run the whole chain where packeteer and `zpfwire` are checked out beside it, hold a fuzzed decode to every shipped spec's promises, and run `kober run` as the README does. What is left is your own: your algorithm against outside known answers, and against another implementation where there is one, and your spec over messages built in the test. |
 
 Which of these your protocol needs depends on its shape, which the guide
 covers: [Bringing your own code](../../docs/guides/your-own-code.md), *Which

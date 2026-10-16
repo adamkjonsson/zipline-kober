@@ -139,7 +139,8 @@ minor bump here too.
   conventions a new example keeps: the key log, the truth file, and the tunnel
   module's arguments. The guide gains *Which steps your protocol needs*, by
   shape: a tunnel with keys, a tunnel without, and a transformed field inside a
-  protocol.
+  protocol. A new example's tests start from `tests/examplekit.py`, which does
+  what every example's tests need once the example is described.
 
 ## [0.5.0] - 2026-09-28
 

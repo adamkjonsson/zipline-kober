@@ -7,6 +7,11 @@ implementation that is not this one, and one runs the whole chain, packeteer
 generating impaired traffic through ``wg_seal.py``, ``zpfwire`` converting it,
 and kober decoding it.
 
+What any example's tests need, loading its modules, reading its key log,
+checking a decode against what was sealed, the chain, fuzzing and the command
+line, is ``examplekit``'s, described once by :data:`WIREGUARD`. What is here is
+WireGuard's own.
+
 **The cipher is checked against RFC 8439's own vectors**, not against itself.
 The tunnel wrapper that generates traffic and the transform that opens it share
 ``wg_crypto.py``, so a fault in it would seal and open consistently, and a
@@ -20,88 +25,76 @@ product may not.
 from __future__ import annotations
 
 import base64
-import importlib.util
 import json
 import random
 import re
 import shutil
 import struct
 import subprocess
-import sys
 from collections import Counter
 from pathlib import Path
-from types import ModuleType
 
 import pytest
-import zpf
+from examplekit import (
+    HAS_PACKETS_INPUT,
+    HAS_TUNNEL,
+    ZPFWIRE,
+    Example,
+    Run,
+    arrivals,
+    assert_compiled_never_breaks,
+    assert_never_breaks,
+    decode_inside,
+    expected_inside,
+    generate,
+    ipv4,
+    messages_by_direction,
+    open_tunnel,
+    read_truth,
+    run_cli,
+    sealed_streams,
+    sessionize,
+    tunnel_problems,
+    write_pcap,
+)
 from fuzzing import variants
 from test_compiled_transforms import imported
 from test_stage import datagrams
 from test_stage_transforms import decode, records, regions
-from zpf.blocks import Participant, Record
 from zpfcompare import blocks
 
-from kober import transforms as transforms_module
 from kober.check import Severity, check
-from kober.cli import FAILED, OK, main
+from kober.cli import FAILED, OK
 from kober.decoder import Decoder
-from kober.emit import Emit, plan
-from kober.node import NodeStatus
+from kober.emit import Emit
 from kober.spec import Spec
 from kober.transforms import Registry
 
-EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
-EXAMPLE = EXAMPLES / "wireguard"
-SPEC = EXAMPLE / "wireguard.yaml"
+#: The example, as every shared test reads it.
+WIREGUARD = Example(
+    name="wireguard",
+    spec="wireguard.yaml",
+    transforms="wg_transforms.py",
+    packet_role="wireguard.body.packet",
+    # Until the zpf 0.6 port makes it net:ip, zpfwire's default: the plan's port list, item 3.
+    packet_label="dec:ip-packet",
+    failure="decrypt-failed",
+    keys="keys",
+    tunnel="wg_seal.py",
+    carries_packet=lambda payload: payload[:1] == b"\x04",
+)
+EXAMPLES = WIREGUARD.folder.parent
 
-
-def _load(name: str) -> ModuleType:
-    """Import one of the example's modules by path, as a user's process would."""
-    if str(EXAMPLE) not in sys.path:
-        sys.path.append(str(EXAMPLE))
-    spec = importlib.util.spec_from_file_location(name, EXAMPLE / f"{name}.py")
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-crypto = _load("wg_crypto")
-handshake = _load("wg_handshake")
-sealing = _load("wg_seal")
-opening = _load("wg_transforms")
-
-
-def _ip_checksum(header: bytes) -> int:
-    total = sum(struct.unpack(f">{len(header) // 2}H", header))
-    while total >> 16:
-        total = (total & 0xFFFF) + (total >> 16)
-    return ~total & 0xFFFF
-
-
-def ipv4(body: bytes, ident: int = 0) -> bytes:
-    """Return a real IPv4 packet carrying ``body`` in a UDP datagram to port 53."""
-    udp = struct.pack(">HHHH", 40000 + ident % 1000, 53, 8 + len(body), 0) + body
-    header = struct.pack(
-        ">BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), ident, 0, 64, 17, 0,
-        bytes([10, 8, 0, 2]), bytes([10, 8, 0, 1]),
-    )
-    return header[:10] + struct.pack(">H", _ip_checksum(header)) + header[12:] + udp
+crypto = WIREGUARD.module("wg_crypto")
+handshake = WIREGUARD.module("wg_handshake")
+sealing = WIREGUARD.module("wg_seal")
+opening = WIREGUARD.module("wg_transforms")
 
 
 @pytest.fixture
 def registry(monkeypatch: pytest.MonkeyPatch) -> Registry:
-    """Load ``wg_transforms.py`` into a registry of the test's own.
-
-    The module registers into kober's default registry when it runs, as a user's
-    does, so the default is swapped for the test's while it runs.
-    """
-    fresh = Registry.standard()
-    monkeypatch.setattr(transforms_module, "DEFAULT", fresh)
-    _load("wg_transforms")
-    return fresh
+    """``wg_transforms.py``, loaded into a registry of the test's own."""
+    return WIREGUARD.registry(monkeypatch)
 
 
 # --- RFC 8439's vectors ------------------------------------------------------------------------
@@ -376,8 +369,7 @@ def tunnel(tmp_path: Path, **args: str) -> object:
 
 
 def truth(tmp_path: Path) -> list[dict[str, object]]:
-    lines = (tmp_path / "truth.jsonl").read_text().splitlines()
-    return [json.loads(line) for line in lines]
+    return read_truth(tmp_path / "truth.jsonl")
 
 
 def test_the_first_packet_follows_a_handshake_and_a_rekey_starts_another(tmp_path: Path):
@@ -437,28 +429,13 @@ def test_kober_opens_what_the_tunnel_module_seals(tmp_path: Path, registry: Regi
     ]
     source = tmp_path / "in.zpf"
     datagrams(source, wire)
-    keys = json.loads((tmp_path / "keys.json").read_text())
-    table = {int(index): bytes.fromhex(value[4:]) for index, value in keys.items()}
-    written = decode(spec(), source, tmp_path, params={"keys": table}, transforms=registry)
+    params = WIREGUARD.params(tmp_path / "keys.json")
+    written = decode(spec(), source, tmp_path, params=params, transforms=registry)
     assert plaintexts(written) == [bytes.fromhex(line["inner"]) for line in truth(tmp_path)]
     assert regions(written) == []
 
 
 # --- the outside check: Wireshark opens what the example seals -----------------------------------
-
-
-def write_pcap(path: Path, datagrams_both_ways: list[tuple[str, bytes]]) -> None:
-    """Write UDP datagrams between two tunnel endpoints as a pcap, from first principles."""
-    ends = {"c2s": ("198.51.100.7", "203.0.113.9"), "s2c": ("203.0.113.9", "198.51.100.7")}
-    out = bytearray(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
-    for n, (direction, payload) in enumerate(datagrams_both_ways):
-        src, dst = (bytes(int(part) for part in ip.split(".")) for ip in ends[direction])
-        udp = struct.pack(">HHHH", 51820, 51820, 8 + len(payload), 0) + payload
-        ip = struct.pack(">BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), n, 0x4000, 64, 17, 0, src, dst)
-        ip = ip[:10] + struct.pack(">H", _ip_checksum(ip)) + ip[12:]
-        frame = b"\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\x01\x08\x00" + ip + udp
-        out += struct.pack("<IIII", 1_700_000_000 + n, 0, len(frame), len(frame)) + frame
-    path.write_bytes(out)
 
 
 def decrypted_by_wireshark(pcap: Path, keylog: Path) -> list[bytes]:
@@ -491,7 +468,7 @@ def test_wireshark_opens_what_the_example_seals(tmp_path: Path):
         for pair in wrapper.wrap(packet, "c2s" if n % 2 else "s2c", 1.0 + n)
     ]
     pcap = tmp_path / "wg.pcap"
-    write_pcap(pcap, sent)
+    write_pcap(pcap, sent, port=51820)
     assert decrypted_by_wireshark(pcap, tmp_path / "wireshark.keys") == inner
     fields = subprocess.run(
         [
@@ -506,17 +483,15 @@ def test_wireshark_opens_what_the_example_seals(tmp_path: Path):
     assert {line.split("\t")[1] for line in fields[1::2] if line} == {"True"}
 
 
+
 # --- the whole chain: packeteer, zpfwire, kober, zpfwire, kober ---------------------------------
 
-#: The sibling checkouts ``tools/pipeline.py`` uses, with their own venvs.
-PACKETEER = Path(__file__).resolve().parents[2] / "packeteer" / ".venv" / "bin" / "packeteer"
-ZPFWIRE = (
-    Path(__file__).resolve().parents[2] / "python-zipline-wire" / ".venv" / "bin" / "zpfwire"
-)
-
-#: A DNS query and its answer, raw: what travels inside the tunnel, both ways.
-#: The file the README's commands send.
-DNS_EXCHANGE = json.loads((EXAMPLE / "dns.json").read_text())
+#: DNS inside the tunnel, both ways: the query and answer the README's commands send.
+DNS_INSIDE = [
+    "--protocol", "udp", "--payload", "dns",
+    "--protocol-messages", str(WIREGUARD.path("dns.json")),
+    "--server-port", "53", "--packets", "40",
+]
 
 #: What the tunnel's own datagrams suffer, every impairment at once.
 TUNNEL_IMPAIRED = [
@@ -524,22 +499,8 @@ TUNNEL_IMPAIRED = [
     "--tunnel-reorder", "0.3", "--tunnel-duplicate", "0.1",
 ]
 
-#: The label kober's WireGuard decode gives a packet until the ``zpf`` 0.6 port
-#: makes it ``net:ip``, ``zpfwire``'s default. The plan's port list, item 3.
-PACKET_LABEL = "dec:ip-packet"
-
-
-def _help(binary: Path, *verb: str) -> str:
-    if not binary.exists():
-        return ""
-    return subprocess.run(
-        [str(binary), *verb, "--help"], capture_output=True, text=True, check=False
-    ).stdout
-
-
-#: packeteer 0.18.0's ``--udp-tunnel``, and zpfwire 0.5.0's ``.zpf`` input (#35).
-HAS_TUNNEL = "--udp-tunnel" in _help(PACKETEER, "stream")
-HAS_PACKETS_INPUT = "--content-type" in _help(ZPFWIRE, "convert")
+#: Rekey every ten packets, so a run crosses sessions.
+REKEYS = ["rekey_after=10"]
 
 needs_the_chain = pytest.mark.skipif(
     not (HAS_TUNNEL and ZPFWIRE.exists()),
@@ -551,74 +512,12 @@ needs_the_inner_hop = pytest.mark.skipif(
 )
 
 
-def tunnelled(tmp_path: Path, inner: list[str], tunnel: list[str]) -> Path:
-    """Generate ``inner`` traffic through ``wg_seal.py``, and convert it: ``outer.zpf``."""
-    pcap, outer = tmp_path / "wg.pcap", tmp_path / "outer.zpf"
-    subprocess.run(
-        [
-            str(PACKETEER), "stream", *inner,
-            "--client-ip", "10.8.0.2", "--server-ip", "10.8.0.1",
-            "--udp-tunnel", "198.51.100.7", "203.0.113.9", "--tunnel-port", "51820",
-            "--tunnel-module", str(EXAMPLE / "wg_seal.py"),
-            "--tunnel-arg", f"keylog={tmp_path / 'keys.json'}",
-            "--tunnel-arg", f"truth={tmp_path / 'truth.jsonl'}",
-            "--tunnel-arg", "rekey_after=10",
-            *tunnel, "--seed", "7", "--pcap", str(pcap),
-        ],
-        check=True, capture_output=True,
-    )
-    subprocess.run([str(ZPFWIRE), "convert", "-q", str(pcap), "-o", str(outer)], check=True)
-    return outer
+def tunnelled(tmp_path: Path, inner: list[str], impairments: list[str]) -> Run:
+    return generate(WIREGUARD, tmp_path, inner, impairments, REKEYS)
 
 
-def opened(tmp_path: Path, outer: Path, registry: Registry) -> list[tuple[object, ...]]:
-    """Open the tunnel with the key log, by both drivers; the file is ``out.field.zpf``."""
-    keys = json.loads((tmp_path / "keys.json").read_text())
-    table = {int(index): bytes.fromhex(value[4:]) for index, value in keys.items()}
-    return decode(spec(), outer, tmp_path, params={"keys": table}, transforms=registry)
-
-
-def sessionized(tmp_path: Path) -> Path:
-    """Turn the decrypted packets into the conversations inside the tunnel: ``inner.zpf``."""
-    inner = tmp_path / "inner.zpf"
-    subprocess.run(
-        [
-            str(ZPFWIRE), "convert", "-q", str(tmp_path / "out.field.zpf"), "-o", str(inner),
-            "--content-type", PACKET_LABEL,
-        ],
-        check=True,
-    )
-    return inner
-
-
-def messages_by_direction(path: Path) -> dict[str, list[bytes]]:
-    """Return a message-granularity file's records, by the inner client's or server's side."""
-    endpoints: dict[tuple[int, int], str] = {}
-    found: dict[str, list[bytes]] = {"c2s": [], "s2c": []}
-    with zpf.open(path) as handle:
-        for block in handle.blocks():
-            if isinstance(block, Participant):
-                endpoint = block.endpoint
-                endpoints[block.session_id, block.participant_id] = (
-                    endpoint if isinstance(endpoint, str) else endpoint[0]
-                )
-            elif isinstance(block, Record):
-                sender = endpoints[block.session_id, block.sender_pid]
-                found["c2s" if sender.startswith("10.8.0.2:") else "s2c"].append(block.payload)
-    return found
-
-
-#: IPv4's protocol number for UDP.
-UDP = 17
-
-
-def inner_payload(packet: bytes) -> tuple[int | None, bytes]:
-    """Return an inner IPv4 packet's TCP sequence number (``None`` for UDP), and payload."""
-    header = (packet[0] & 15) * 4
-    if packet[9] == UDP:
-        return None, packet[header + 8 :]
-    tcp = packet[header:]
-    return struct.unpack(">I", tcp[4:8])[0], tcp[(tcp[12] >> 4) * 4 :]
+def opened(run: Run, registry: Registry) -> list[tuple[object, ...]]:
+    return open_tunnel(WIREGUARD, run, registry)
 
 
 @needs_the_chain
@@ -633,24 +532,12 @@ def test_generated_impaired_traffic_decodes_to_exactly_what_arrived(
     ``decrypt-failed`` region. A multiset: ``zpfwire`` writes each direction as
     a participant of its own, so the decode's order is not the wire's.
     """
-    messages = tmp_path / "dns.json"
-    messages.write_text(json.dumps(DNS_EXCHANGE))
-    inner = ["--protocol", "udp", "--payload", "dns", "--protocol-messages", str(messages),
-             "--server-port", "53", "--packets", "40"]
-    outer = tunnelled(tmp_path, inner, TUNNEL_IMPAIRED)
-    on_wire = Counter(
-        block[3] for block in blocks(outer) if block[0] == "record" and block[3][:1] == b"\x04"
-    )
-    written = opened(tmp_path, outer, registry)
-    expected: Counter[bytes] = Counter()
-    for line in truth(tmp_path):
-        arrivals = on_wire.pop(bytes.fromhex(line["outer"]), 0)
-        expected[bytes.fromhex(line["inner"])] += arrivals
-    assert Counter(plaintexts(written)) == expected
-    failed = [region for region in regions(written) if region[2] == "decrypt-failed"]
-    assert len(failed) == sum(on_wire.values()), "every other transport datagram failed, once"
+    run = tunnelled(tmp_path, DNS_INSIDE, TUNNEL_IMPAIRED)
+    opened(run, registry)
+    assert tunnel_problems(WIREGUARD, run.truth, run.outer, run.opened) == []
+    expected, left = arrivals(WIREGUARD, run.truth, run.outer)
     assert sum(expected.values()) > 0
-    assert failed, "the corpus reaches a corrupted datagram"
+    assert sum(left.values()) > 0, "the corpus reaches a corrupted datagram"
 
 
 @needs_the_inner_hop
@@ -661,36 +548,14 @@ def test_the_dns_inside_decodes_to_exactly_what_arrived(tmp_path: Path, registry
     DNS inside the sealed datagrams that reached the wire unchanged, each in
     its own direction.
     """
-    messages = tmp_path / "dns.json"
-    messages.write_text(json.dumps(DNS_EXCHANGE))
-    inner = ["--protocol", "udp", "--payload", "dns", "--protocol-messages", str(messages),
-             "--server-port", "53", "--packets", "40"]
-    outer = tunnelled(tmp_path, inner, TUNNEL_IMPAIRED)
-    on_wire = Counter(
-        block[3] for block in blocks(outer) if block[0] == "record" and block[3][:1] == b"\x04"
-    )
-    opened(tmp_path, outer, registry)
-    conversation = sessionized(tmp_path)
-    (tmp_path / "dns").mkdir()
-    decode(Spec.from_file(EXAMPLES / "dns.yaml"), conversation, tmp_path / "dns", Emit.MESSAGE)
+    run = tunnelled(tmp_path, DNS_INSIDE, TUNNEL_IMPAIRED)
+    opened(run, registry)
+    decode_inside(EXAMPLES / "dns.yaml", sessionize(WIREGUARD, run), tmp_path / "dns")
     decoded = messages_by_direction(tmp_path / "dns" / "out.message.zpf")
-    expected: dict[str, Counter[bytes]] = {"c2s": Counter(), "s2c": Counter()}
-    for line in truth(tmp_path):
-        arrivals = on_wire.get(bytes.fromhex(line["outer"]), 0)
-        expected[line["direction"]][inner_payload(bytes.fromhex(line["inner"]))[1]] += arrivals
+    expected = expected_inside(WIREGUARD, run.truth, run.outer)
     for direction in ("c2s", "s2c"):
         assert Counter(decoded[direction]) == expected[direction], direction
     assert sum(len(found) for found in decoded.values()) > 0
-
-
-def sealed_streams(tmp_path: Path) -> dict[str, bytes]:
-    """Return each direction's inner TCP stream, from the segments ``wg_seal.py`` sealed."""
-    segments: dict[str, dict[int, bytes]] = {"c2s": {}, "s2c": {}}
-    for line in truth(tmp_path):
-        seq, payload = inner_payload(bytes.fromhex(line["inner"]))
-        if seq is not None and payload:
-            segments[line["direction"]][seq] = payload  # a retransmission is the same bytes
-    return {d: b"".join(found[at] for at in sorted(found)) for d, found in segments.items()}
 
 
 #: HTTP inside the tunnel, with loss on the inner connection and its recovery.
@@ -708,13 +573,11 @@ def test_the_http_inside_is_the_stream_that_was_sealed(tmp_path: Path, registry:
     packet, so the stream inside is whole, and ``http.yaml``'s messages in each
     direction join to exactly what the inner TCP connection carried.
     """
-    outer = tunnelled(tmp_path, HTTP_INSIDE, [])
-    opened(tmp_path, outer, registry)
-    conversation = sessionized(tmp_path)
-    (tmp_path / "http").mkdir()
-    decode(Spec.from_file(EXAMPLES / "http.yaml"), conversation, tmp_path / "http", Emit.MESSAGE)
+    run = tunnelled(tmp_path, HTTP_INSIDE, [])
+    opened(run, registry)
+    decode_inside(EXAMPLES / "http.yaml", sessionize(WIREGUARD, run), tmp_path / "http")
     decoded = messages_by_direction(tmp_path / "http" / "out.message.zpf")
-    streams = sealed_streams(tmp_path)
+    streams = sealed_streams(run.truth)
     assert (len(decoded["c2s"]), len(decoded["s2c"])) == (12, 12)
     for direction in ("c2s", "s2c"):
         assert b"".join(decoded[direction]) == streams[direction], direction
@@ -730,15 +593,13 @@ def test_a_lost_sealed_segment_is_a_hole_and_nothing_is_invented(
     sealed, no more start lines than transactions, and what did not arrive is
     named, never decoded past.
     """
-    outer = tunnelled(tmp_path, HTTP_INSIDE, TUNNEL_IMPAIRED)
-    opened(tmp_path, outer, registry)
-    conversation = sessionized(tmp_path)
-    (tmp_path / "http").mkdir()
-    written = decode(
-        Spec.from_file(EXAMPLES / "http.yaml"), conversation, tmp_path / "http", Emit.MESSAGE
+    run = tunnelled(tmp_path, HTTP_INSIDE, TUNNEL_IMPAIRED)
+    opened(run, registry)
+    written = decode_inside(
+        EXAMPLES / "http.yaml", sessionize(WIREGUARD, run), tmp_path / "http"
     )
     decoded = messages_by_direction(tmp_path / "http" / "out.message.zpf")
-    streams = sealed_streams(tmp_path)
+    streams = sealed_streams(run.truth)
     for direction in ("c2s", "s2c"):
         assert all(message in streams[direction] for message in decoded[direction]), direction
         assert 0 < len(decoded[direction]) <= 12, direction
@@ -749,16 +610,16 @@ def test_a_lost_sealed_segment_is_a_hole_and_nothing_is_invented(
 
 
 def test_the_spec_checks_with_the_one_warning_it_means():
-    findings = check(Spec.from_file(SPEC))
+    findings = check(spec())
     assert [f for f in findings if f.severity is Severity.ERROR] == []
     (warning,) = findings
     assert "switch has no default" in warning.message
 
 
 def test_the_spec_is_documented():
-    spec = Spec.from_file(SPEC)
-    assert spec.doc
-    assert spec.transforms["wg-transport"].fails_as == "decrypt-failed"
+    built = spec()
+    assert built.doc
+    assert built.transforms["wg-transport"].fails_as == "decrypt-failed"
 
 
 # --- WireGuard messages, built here --------------------------------------------------------------
@@ -777,7 +638,7 @@ KEYS = {
 
 
 def spec() -> Spec:
-    return Spec.from_file(SPEC)
+    return WIREGUARD.model()
 
 
 def header(kind: int) -> bytes:
@@ -832,7 +693,7 @@ def conversation() -> tuple[list[bytes], list[bytes]]:
 
 
 def plaintexts(written: list[tuple[object, ...]]) -> list[object]:
-    return [b[3] for b in written if b[0] == "record" and b[2] == "wireguard.body.packet"]
+    return [b[3] for b in written if b[0] == "record" and b[2] == WIREGUARD.packet_role]
 
 
 def test_every_transport_message_opens_under_its_receivers_key(
@@ -844,7 +705,7 @@ def test_every_transport_message_opens_under_its_receivers_key(
     datagrams(source, wire)
     written = decode(spec(), source, tmp_path, params={"keys": KEYS}, transforms=registry)
     assert plaintexts(written) == expected
-    labels = [b[1] for b in written if b[0] == "record" and b[2] == "wireguard.body.packet"]
+    labels = [b[1] for b in written if b[0] == "record" and b[2] == WIREGUARD.packet_role]
     assert labels == ["dec:ip-packet"] * 2 + ["dec:wireguard-keepalive"] + ["dec:ip-packet"] * 2
     assert regions(written) == []
     for key in KEYS.values():
@@ -961,40 +822,15 @@ def wireguard_cases(seed: int) -> list[bytes]:
 @pytest.mark.parametrize("seed", [1, 2, 3])
 @pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD])
 def test_a_mangled_datagram_never_breaks_a_decode(registry: Registry, seed: int, emit: Emit):
-    """The promises every shipped spec keeps, over what a lossy, hostile link delivers.
-
-    A decode never raises, never cites a byte it also names undecoded, names
-    regions only with reasons the format or the spec's ``fails_as`` has, and
-    never shows a key.
-    """
-    built = spec()
-    decoder = Decoder(built, params={"keys": KEYS}, transforms=registry)
-    allowed = {status.value for status in NodeStatus if status is not NodeStatus.OK}
-    allowed.add("decrypt-failed")
-    for data in wireguard_cases(seed):
-        try:
-            tree = decoder.decode_bytes(data)
-        except Exception as exc:
-            exc.add_note(f"escaped a decode: seed={seed} on {data!r}")
-            raise
-        emissions, unclaimed = plan(built, tree, data, emit=emit)
-        cited = {at for r in emissions for at in range(r.off_start, r.off_end)}
-        named = {at for r in unclaimed for at in range(r.off_start, r.off_end)}
-        assert not cited & named, f"both cited and undecoded on {data!r}"
-        assert {r.reason for r in unclaimed} <= allowed, data
-        shown = tree.render()
-        assert all(key.hex() not in shown for key in KEYS.values()), data
+    """The promises every shipped spec keeps, over what a lossy, hostile link delivers."""
+    decoder = Decoder(spec(), params={"keys": KEYS}, transforms=registry)
+    assert_never_breaks(WIREGUARD, decoder, wireguard_cases(seed), emit, KEYS.values())
 
 
 @pytest.mark.parametrize("seed", [1, 2])
 def test_a_mangled_datagram_never_breaks_a_compiled_decode(registry: Registry, seed: int):
     module = imported(spec(), registry)
-    for data in wireguard_cases(seed):
-        try:
-            module.decode(data, params={"keys": KEYS})
-        except Exception as exc:
-            exc.add_note(f"escaped a compiled decode: seed={seed} on {data!r}")
-            raise
+    assert_compiled_never_breaks(module, wireguard_cases(seed), {"keys": KEYS})
 
 
 # --- the command line, as the README runs it ---------------------------------------------------
@@ -1004,23 +840,13 @@ def test_kober_run_opens_the_tunnel_with_a_key_log(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ):
     """``--load-transforms`` by path, which imports ``wg_crypto`` from beside it."""
-    monkeypatch.setattr(transforms_module, "DEFAULT", Registry.standard())
-    monkeypatch.delitem(sys.modules, "wg_crypto", raising=False)
-    monkeypatch.setattr(sys, "path", [p for p in sys.path if p != str(EXAMPLE)])
     wire, expected = conversation()
     source = tmp_path / "in.zpf"
     datagrams(source, wire)
     log = tmp_path / "keys.json"
     log.write_text(json.dumps({str(index): f"hex:{key.hex()}" for index, key in KEYS.items()}))
     out = tmp_path / "out.zpf"
-    code = main(
-        [
-            "run", str(SPEC), str(source), "-o", str(out), "--emit", "field",
-            "--load-transforms", str(EXAMPLE / "wg_transforms.py"),
-            "--param", f"keys=file:{log}",
-        ]
-    )
-    assert code == OK, capsys.readouterr()
+    assert run_cli(WIREGUARD, source, out, monkeypatch, log) == OK, capsys.readouterr()
     written = [block for block in blocks(out) if block[0] != "participant"]
     assert plaintexts(written) == expected
 
@@ -1028,15 +854,7 @@ def test_kober_run_opens_the_tunnel_with_a_key_log(
 def test_without_the_key_log_the_run_does_not_start(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setattr(transforms_module, "DEFAULT", Registry.standard())
     source = tmp_path / "in.zpf"
     datagrams(source, [transport(RESPONDER, 0, b"x")])
-    code = main(
-        [
-            "run", str(SPEC), str(source), "-o", str(tmp_path / "out.zpf"),
-            "--load-transforms", str(EXAMPLE / "wg_transforms.py"),
-        ]
-    )
-    assert code == FAILED
+    assert run_cli(WIREGUARD, source, tmp_path / "out.zpf", monkeypatch) == FAILED
     assert "needs parameter(s) 'keys'" in capsys.readouterr().err
-

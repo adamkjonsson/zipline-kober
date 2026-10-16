@@ -701,6 +701,34 @@ knows needs no code, and the check against something that is not your code is
 never optional. The test and pipeline rows describe them as they are; B and C
 rewrite those rows when they change.
 
+#### Stage 7, B — done (2026-10-16)
+
+`tests/examplekit.py` holds what any example's tests need, parameterised by an
+`Example`: its folder, spec, transforms module, tunnel module and port, the
+map parameter its key log fills (or none), the role and label of an opened
+packet, its `fails_as`, and which outer datagrams carry a packet (WireGuard's
+type 4; everything, by default). From it: loading by path with the folder
+appended to `sys.path`; the registry swap; `params`, which reads a key log
+through `kober.cli._params` so the convention is exactly the CLI's; the truth
+file; the exact Q7 oracle (`arrivals`, `tunnel_problems`) and the inner one
+(`expected_inside`, `sealed_streams`, `messages_by_direction`); the chain
+(`generate`, `open_tunnel`, `sessionize`, `decode_inside`); the fuzz
+invariants for both drivers; `run_cli`, which also puts the example's already
+imported modules out of reach; and the packet builders `ipv4` and
+`write_pcap`. It imports no pytest, for C.
+
+The test file kept its 59 tests and went from 1042 lines to 860; what is left
+is WireGuard's: the vectors, the handshake, the tunnel module's own tests, the
+Wireshark check, the spec and its messages, and the conversation the fuzzing
+mangles. Mutation-checked through the kit: the padding trim one byte short
+fails the Q7 and inner-DNS tests and the CLI run; `--load-transforms` no longer
+appending its folder fails both CLI tests.
+
+**Found on the way:** counting what must decode inside by *inner* packet
+multiplied the arrivals, since every DNS query in the corpus is the same bytes;
+the oracle counts by each sealed packet's own datagram, as the original did,
+and its docstring says why.
+
 #### Q-D — which protocol is the second example?
 
 **Leaning: a tunnel of PackBits-compressed datagrams.** It has to differ from
