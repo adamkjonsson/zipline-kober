@@ -280,10 +280,10 @@ class Builtin:
 #: string, a hexadecimal string, a case-insensitive match, the surrounding
 #: whitespace an HTTP field value is allowed to carry, and (#50) a prefix and a
 #: suffix: what a start line looks like, which is how a spec refuses a guess
-#: after a gap, and ``chunked`` being the *last* transfer coding — and, from
-#: WireGuard, a length: a keepalive is a sealed message of nothing, told apart
-#: from a packet by its size before it is opened. The table is meant to stay
-#: that small. A *transform* (decompression, decryption) is not a
+#: after a gap, and ``chunked`` being the *last* transfer coding — and a
+#: length: a tunnel's message that seals nothing is told from one carrying a
+#: packet by its size before either is opened (``DESIGN.md`` §3.3). The table
+#: is meant to stay that small. A *transform* (decompression, decryption) is not a
 #: candidate for it: a builtin maps a value to a value, where a transform maps
 #: bytes to bytes and feeds a sub-decode, and it needs an extension point of its
 #: own rather than another row here.

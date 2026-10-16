@@ -444,6 +444,9 @@ class Plan:
         params: The document's parameters, in the spec's order.
         spec_digest: :meth:`kober.spec.Spec.digest`, so a backend without the
             spec model computes the same ``params_digest``.
+        input: The spec's ``input`` shape, ``"datagram"``, ``"stream"`` or
+            ``"either"``: what a driver refuses a generated decoder for, as it
+            refuses the interpreter.
 
     """
 
@@ -456,6 +459,7 @@ class Plan:
     transforms: tuple[str, ...] = ()
     params: tuple[ParamPlan, ...] = ()
     spec_digest: str = ""
+    input: str = "either"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "enums", MappingProxyType(dict(self.enums)))
@@ -519,6 +523,7 @@ class Plan:
             transforms=tuple(sorted(used)),
             params=tuple(_document_param(param) for param in spec.params),
             spec_digest=spec.digest(),
+            input=spec.input.value,
         )
 
     @property

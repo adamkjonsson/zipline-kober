@@ -595,6 +595,28 @@ The tests break on a one-byte cut in the transform's padding trim, all three.
   `types.md#transform`, which today only says a cipher is the caller's.
 - `run` it as a user would, from the README, in a clean venv.
 
+#### Stage 6 — the pipeline: done (2026-10-16)
+
+Five inputs, `wg_clean` and one per tunnel impairment, DNS both ways through
+`wg_seal.py` with a rekey every ten packets. `wireguard.yaml` joins the specs
+run over **every** input, with the input's key log or an empty table, and two
+checks run over the WireGuard inputs, both exact against what was sealed: the
+tunnel (Q7's rule) and the traffic inside (`zpfwire` back to the DNS
+conversation, then `dns.yaml`). 271 checks, up from 138, every one holding.
+A datagram spec over a byte stream is refused, by design, so the check there
+is that both drivers refuse it, which is how the bug below was found.
+
+## Found on the way: the compiled driver decoded a datagram spec over a byte stream
+
+The interpreter refuses a `datagram` spec a byte stream, since it has no framing
+to find messages with there and would write a confident decode of the wrong
+bytes. The compiled driver did not check, and wrote one. Nothing ran a datagram
+spec through the pipeline before `wireguard.yaml`. A generated module now
+carries its spec's `INPUT`, and the compiled driver applies the interpreter's
+check; a module from before `INPUT` is not checked, as one from before
+`SPEC_DIGEST` writes no digest. Every generated module gains the constant,
+`tests/compiled_dns.py` included.
+
 ## The port to `zpf` 0.6 and spec 0.23
 
 python-zipline 0.6.0.dev0 implements spec 0.23, reviewed here on 2026-10-15:

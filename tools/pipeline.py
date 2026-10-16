@@ -8,10 +8,12 @@ where the seam bug lived. This script is the release checklist's requirement
     .venv/bin/python tools/pipeline.py
 
 It needs two sibling checkouts with their own virtual environments, neither a
-dependency of this project: ``packeteer`` (to fuzz and generate traffic) and
-``python-zipline-wire`` (``zpfwire``, to turn captures into ``.zpf``).
+dependency of this project: ``packeteer`` 0.18.0 or later (to fuzz and generate
+traffic, a WireGuard tunnel's included) and ``python-zipline-wire`` 0.5.0 or
+later (``zpfwire``, to turn captures into ``.zpf``, and a tunnel's decrypted
+packets back into conversations).
 
-For each input it builds, it runs both example specs through the interpreter
+For each input it builds, it runs every example spec through the interpreter
 (:func:`kober.stage.run`) and through a module compiled fresh from the same spec
 (:func:`kober.stage.run_compiled`), at message and at field granularity. Every
 output must pass ``zpf`` conformance and account for every byte of its input;
@@ -43,12 +45,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import zpf
-from zpf.blocks import Record, Undecoded
+from zpf.blocks import Participant, Record, Undecoded
 from zpf.reassembly import Gap
 
 from kober.decoder import Decoder
+from kober.errors import SpecError
 from kober.pygen import render_spec
-from kober.spec import Emit, Spec
+from kober.spec import Emit, InputShape, Spec
 from kober.stage import run, run_compiled
 
 if TYPE_CHECKING:
@@ -57,9 +60,18 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parent.parent
 
-#: The specs every input is run through. Both, over every input: a spec meeting
-#: a stream in another protocol is a case the driver has to handle too.
-SPECS = ("dns", "http")
+#: The specs every input is run through, every one over every input: a spec
+#: meeting a stream in another protocol is a case the driver has to handle too.
+#: WireGuard's is given the input's key log, or an empty table where there is
+#: none, so it meets traffic it holds no keys for as well.
+SPECS = {
+    "dns": ROOT / "examples" / "dns.yaml",
+    "http": ROOT / "examples" / "http.yaml",
+    "wireguard": ROOT / "examples" / "wireguard" / "wireguard.yaml",
+}
+
+#: The WireGuard example, whose transform and tunnel module the pipeline loads.
+WIREGUARD = ROOT / "examples" / "wireguard"
 
 #: Requests in the generated HTTP stream, so the shape check knows how many start
 #: lines there can be: one request and one response each.
@@ -120,6 +132,15 @@ class Tools:
     def convert(self, capture: Path, out: Path) -> None:
         """Turn a capture into a transport-level ``.zpf``."""
         _run([str(self.zpfwire_bin), "convert", str(capture), "-o", str(out)])
+
+    def sessionize(self, packets: Path, out: Path, content_type: str) -> None:
+        """Turn a ``.zpf`` of decrypted packets into the conversations inside (zpfwire#35)."""
+        _run(
+            [
+                str(self.zpfwire_bin), "convert", str(packets), "-o", str(out),
+                "--content-type", content_type,
+            ]
+        )
 
 
 def _run(argv: list[str]) -> str:
@@ -244,6 +265,48 @@ def _gzip_http_clean(tools: Tools, out: Path) -> None:
     _gzip_http(tools, out, lossy=False)
 
 
+#: A DNS query and its answer, raw: what travels inside the WireGuard tunnel,
+#: both ways.
+WIREGUARD_DNS = [
+    {"dns": {"raw": "abcd01000001000000000000076578616d706c6503636f6d0000010001"},
+     "direction": "c2s"},
+    {"dns": {"raw": "abcd81800001000100000000076578616d706c6503636f6d0000010001"
+                    "c00c000100010000003c00045db8d822"},
+     "direction": "s2c"},
+]
+
+#: Inner packets per WireGuard input, and sealed packets per session: four
+#: sessions, so every input rekeys.
+WIREGUARD_PACKETS = 40
+WIREGUARD_REKEY = 10
+
+
+def _wireguard(*impairment: str) -> Callable[[Tools, Path], None]:
+    """Return a maker for DNS through ``wg_seal.py``, with one tunnel impairment or none.
+
+    One impairment per input, so a count that moves says which one moved it.
+    The key log and the truth ``wg_seal.py`` writes go beside the capture.
+    """
+
+    def make(tools: Tools, out: Path) -> None:
+        messages = out.with_suffix(".messages.json")
+        messages.write_text(json.dumps(WIREGUARD_DNS))
+        tools.packeteer_cmd(
+            "stream", "--protocol", "udp", "--payload", "dns",
+            "--protocol-messages", str(messages),
+            "--client-ip", "10.8.0.2", "--server-ip", "10.8.0.1", "--server-port", "53",
+            "--packets", str(WIREGUARD_PACKETS),
+            "--udp-tunnel", "198.51.100.7", "203.0.113.9", "--tunnel-port", "51820",
+            "--tunnel-module", str(WIREGUARD / "wg_seal.py"),
+            "--tunnel-arg", f"keylog={out.with_suffix('.keys.json')}",
+            "--tunnel-arg", f"truth={out.with_suffix('.truth.jsonl')}",
+            "--tunnel-arg", f"rekey_after={WIREGUARD_REKEY}",
+            *impairment, "--seed", "7", "--pcap", str(out),
+        )
+
+    return make
+
+
 def _capture(name: str) -> Callable[[Tools, Path], None]:
     """Return a maker that copies one of the real captures."""
 
@@ -265,6 +328,11 @@ INPUTS = (
         Input(name, "http" if name.startswith("http") else None, _capture(name))
         for name in CAPTURES
     ),
+    Input("wg_clean", "wireguard", _wireguard()),
+    Input("wg_loss", "wireguard", _wireguard("--tunnel-packet-loss", "0.15")),
+    Input("wg_corrupt", "wireguard", _wireguard("--tunnel-corruption", "0.15")),
+    Input("wg_reorder", "wireguard", _wireguard("--tunnel-reorder", "0.3")),
+    Input("wg_duplicate", "wireguard", _wireguard("--tunnel-duplicate", "0.15")),
 )
 
 
@@ -458,7 +526,9 @@ def _count_http(data: bytes, counts: Counter[str]) -> None:
 
 def _shape(report: Report, source: Input, path: Path, transport: Path, what: str) -> None:
     """Check that a field-granularity decode of an input has its protocol's shape."""
-    if source.protocol == "dns":
+    if source.protocol == "wireguard":
+        _tunnel(report, path, transport, what)
+    elif source.protocol == "dns":
         followed, through = _pointers(path)
         report.line(
             followed > 0,
@@ -494,6 +564,93 @@ def _shape(report: Report, source: Input, path: Path, transport: Path, what: str
         report.line(ok, f"{what} shape", detail)
         if source.inflates:
             _inflated(report, source, path, transport, what)
+
+
+#: What kober's WireGuard decode labels a packet, until the ``zpf`` 0.6 port
+#: makes it ``net:ip``.
+PACKET_LABEL = "dec:ip-packet"
+
+
+def _records(path: Path) -> list[Record]:
+    with zpf.open(path) as handle:
+        return [block for block in handle.blocks() if isinstance(block, Record)]
+
+
+def _truth(transport: Path) -> list[dict[str, object]]:
+    """Return what ``wg_seal.py`` sealed for an input, a line per packet."""
+    truth = transport.with_suffix(".truth.jsonl")
+    return [json.loads(line) for line in truth.read_text().splitlines()]
+
+
+def _tunnel(report: Report, path: Path, transport: Path, what: str) -> None:
+    """Check a WireGuard decode exactly: what arrived intact opens, and nothing else does.
+
+    The example plan's Q7. A sealed packet whose datagram is on the wire
+    unchanged opens once per arrival; every other transport datagram, a
+    corrupted one or a copy of one, is one ``decrypt-failed`` region.
+    """
+    on_wire = Counter(bytes(r.payload) for r in _records(transport) if r.payload[:1] == b"\x04")
+    expected: Counter[bytes] = Counter()
+    for line in _truth(transport):
+        expected[bytes.fromhex(str(line["inner"]))] += on_wire.pop(
+            bytes.fromhex(str(line["outer"])), 0
+        )
+    opened = Counter(bytes(r.payload) for r in _records(path) if r.content_type == PACKET_LABEL)
+    with zpf.open(path) as handle:
+        failed = sum(
+            1
+            for block in handle.blocks()
+            if isinstance(block, Undecoded) and block.reason == "decrypt-failed"
+        )
+    ok = opened == expected and failed == sum(on_wire.values())
+    detail = (
+        f"{sum(opened.values())} packets opened of {sum(expected.values())} that arrived "
+        f"intact; {failed} decrypt-failed of {sum(on_wire.values())} other datagrams"
+    )
+    report.line(ok, f"{what} tunnel", detail)
+
+
+def _inner(
+    report: Report, tools: Tools, dns: Spec, capture: Path, packets: Path, what: str
+) -> None:
+    """Check the traffic inside the tunnel: the DNS decoded from it is what arrived.
+
+    ``zpfwire`` turns the decrypted packets back into the conversation they
+    carried, and ``dns.yaml`` reads it. Each direction's DNS must be, message for
+    message, the DNS inside the sealed datagrams that reached the wire unchanged.
+    """
+    inner = packets.with_suffix(".inner.zpf")
+    decoded_path = packets.with_suffix(".inner.dns.zpf")
+    tools.sessionize(packets, inner, PACKET_LABEL)
+    run(Decoder(dns), inner, decoded_path, produced_by=PRODUCED_BY, produced_at=PRODUCED_AT)
+    transport = capture.with_suffix(".zpf")
+    on_wire = Counter(bytes(r.payload) for r in _records(transport) if r.payload[:1] == b"\x04")
+    expected: dict[str, Counter[bytes]] = {"c2s": Counter(), "s2c": Counter()}
+    for line in _truth(transport):
+        packet = bytes.fromhex(str(line["inner"]))
+        dns_message = packet[(packet[0] & 15) * 4 + 8 :]
+        expected[str(line["direction"])][dns_message] += on_wire.get(
+            bytes.fromhex(str(line["outer"])), 0
+        )
+    decoded: dict[str, Counter[bytes]] = {"c2s": Counter(), "s2c": Counter()}
+    with zpf.open(decoded_path) as handle:
+        blocks = list(handle.blocks())
+    endpoints = {
+        (b.session_id, b.participant_id): str(b.endpoint)
+        for b in blocks
+        if isinstance(b, Participant)
+    }
+    for block in blocks:
+        if isinstance(block, Record):
+            sender = endpoints[block.session_id, block.sender_pid]
+            decoded["c2s" if "10.8.0.2:" in sender else "s2c"][bytes(block.payload)] += 1
+    problems = _COMPARE.conformance_problems(decoded_path, inner)
+    ok = decoded == expected and not problems
+    total = sum(sum(c.values()) for c in decoded.values())
+    detail = f"{total} DNS messages, each direction the DNS that arrived intact"
+    if problems:
+        detail += f"; {problems[0]}"
+    report.line(ok, f"{what} inner", detail)
 
 
 def _inflated(report: Report, source: Input, path: Path, transport: Path, what: str) -> None:
@@ -547,7 +704,12 @@ def pipeline(tools: Tools, work: Path, baseline: Path | None = None) -> Report:
     print(f"{tools.version(tools.packeteer_bin)}; {tools.version(tools.zpfwire_bin)}")
     print(f"work directory: {work}\n", flush=True)
 
-    specs = {name: Spec.from_file(ROOT / "examples" / f"{name}.yaml") for name in SPECS}
+    # The cipher is the example's, registered as a user's process would, and
+    # before the modules are compiled, since a module binds when it is imported.
+    if str(WIREGUARD) not in sys.path:
+        sys.path.append(str(WIREGUARD))  # as `--load-transforms` does: wg_crypto beside it
+    _load(WIREGUARD / "wg_transforms.py", "wg_transforms")
+    specs = {name: Spec.from_file(path) for name, path in SPECS.items()}
     modules = {
         (name, emit): _compile(spec, name, emit, work)
         for name, spec in specs.items()
@@ -560,26 +722,24 @@ def pipeline(tools: Tools, work: Path, baseline: Path | None = None) -> Report:
         source.make(tools, capture)
         tools.convert(capture, transport)
         for name, spec in specs.items():
+            params = _params(name, capture)
             for emit in (Emit.MESSAGE, Emit.FIELD):
                 what = f"{source.name} {name} {emit.value}"
                 stem = f"{source.name}.{name}.{emit.value}"
                 interpreted = work / "out" / f"{stem}.interpreted.zpf"
                 compiled = work / "out" / f"{stem}.compiled.zpf"
                 started = time.monotonic()
-                run(
-                    Decoder(spec, emit=emit),
-                    transport,
-                    interpreted,
-                    produced_by=PRODUCED_BY,
-                    produced_at=PRODUCED_AT,
+                decoder = Decoder(spec, emit=emit, params=params)
+                refusals = _decode_both(
+                    decoder, modules[name, emit], params, transport, interpreted, compiled
                 )
-                run_compiled(
-                    modules[name, emit],
-                    transport,
-                    compiled,
-                    produced_by=PRODUCED_BY,
-                    produced_at=PRODUCED_AT,
-                )
+                if refusals:
+                    # A datagram spec over a byte stream is refused, by design
+                    # (`docs/format/document.md`, *input*): both drivers must.
+                    ok = len(refusals) == 2 and spec.input is InputShape.DATAGRAM
+                    detail = "both drivers refuse a datagram spec over a byte stream"
+                    report.line(ok, f"{what} refused", detail if ok else refusals[0])
+                    continue
                 elapsed = time.monotonic() - started
                 for driver, path in (("interpreted", interpreted), ("compiled", compiled)):
                     problems = _COMPARE.conformance_problems(path, transport)
@@ -592,7 +752,48 @@ def pipeline(tools: Tools, work: Path, baseline: Path | None = None) -> Report:
                 if emit is Emit.FIELD and name == source.protocol:
                     _shape(report, source, interpreted, transport, f"{what} interpreted")
                     _shape(report, source, compiled, transport, f"{what} compiled")
+                if emit is Emit.FIELD and name == source.protocol == "wireguard":
+                    _inner(report, tools, specs["dns"], capture, interpreted, what)
     return report
+
+
+def _decode_both(
+    decoder: Decoder,
+    module: ModuleType,
+    params: dict[str, object] | None,
+    transport: Path,
+    interpreted: Path,
+    compiled: Path,
+) -> list[str]:
+    """Decode an input with both drivers, and return what either refused it for."""
+    refusals = []
+    try:
+        run(decoder, transport, interpreted, produced_by=PRODUCED_BY, produced_at=PRODUCED_AT)
+    except SpecError as exc:
+        refusals.append(str(exc))
+    try:
+        run_compiled(
+            module,
+            transport,
+            compiled,
+            produced_by=PRODUCED_BY,
+            produced_at=PRODUCED_AT,
+            params=params,
+        )
+    except SpecError as exc:
+        refusals.append(str(exc))
+    return refusals
+
+
+def _params(name: str, capture: Path) -> dict[str, object] | None:
+    """Return the parameters a spec runs with over an input: WireGuard's key log."""
+    if name != "wireguard":
+        return None
+    log = capture.with_suffix(".keys.json")
+    if not log.exists():
+        return {"keys": {}}
+    logged = json.loads(log.read_text())
+    return {"keys": {int(index): bytes.fromhex(value[4:]) for index, value in logged.items()}}
 
 
 def _first_difference(left: Path, right: Path) -> str | None:

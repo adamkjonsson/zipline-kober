@@ -262,8 +262,14 @@ def decode_stream_compiled(
 
     Raises:
         ParameterError: If ``params`` does not match what the module declares.
+        SpecError: If the module's spec reads datagrams and ``stream`` is a
+            byte stream, as for the interpreter. A module generated before
+            ``INPUT`` existed is not checked.
 
     """
+    shape = getattr(module, "INPUT", None)
+    if shape is not None:
+        _check_shape(InputShape(shape), module.NAME, stream)
     _drive(_compiled(module, params), _Writer(stage, stream, module.NAME), stream)
 
 

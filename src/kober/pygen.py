@@ -96,6 +96,7 @@ RESERVED_PREFIX = "_"
 RESERVED_MODULE = frozenset(
     {
         "Cursor",
+        "INPUT",
         "MESSAGE_CONTENT_TYPE",
         "MappingProxyType",
         "Mapping",
@@ -3826,6 +3827,10 @@ def _granularity_constants(plan: Plan, emit: Emit) -> list[str]:
         "#: EMIT and the parameters into the output's ``params_digest``, the one",
         "#: the interpreter writes for the same configuration.",
         f"SPEC_DIGEST = {_literal(plan.spec_digest)}",
+        "",
+        "#: What input the specification declares it reads: the stage driver",
+        "#: refuses a datagram decoder a byte stream, as it refuses the interpreter.",
+        f"INPUT = {_literal(plan.input)}",
         "",
     ]
     if plan.params:

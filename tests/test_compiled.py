@@ -50,6 +50,7 @@ from fuzzing import (
     starved_cases,
     variants,
 )
+from test_stage import write_transport as write_byte_stream
 from zpf.blocks import UNDECODED_REASONS
 from zpfcompare import assert_conformant, blocks
 
@@ -57,14 +58,21 @@ from kober import transforms
 from kober.cli import main
 from kober.decoder import Decoder
 from kober.emit import Emission, Unclaimed, plan, root_emit
-from kober.errors import CompileError, EvalError, Refused, TruncatedRead, Undecodable
+from kober.errors import (
+    CompileError,
+    EvalError,
+    Refused,
+    SpecError,
+    TruncatedRead,
+    Undecodable,
+)
 from kober.loader import from_dict, from_yaml
 from kober.node import Node, NodeStatus
 from kober.ops import Plan
 from kober.pygen import Names, render, render_spec
 from kober.runtime import Cursor, TransformFailed, span
 from kober.spec import Emit, Spec
-from kober.stage import run_compiled
+from kober.stage import run, run_compiled
 from kober.transforms import Registry
 
 if TYPE_CHECKING:
@@ -2485,3 +2493,36 @@ units:
     )
     with pytest.raises(CompileError, match="'Inner' is both a field or parameter"):
         render(Plan.from_spec(spec))
+
+
+# --- what input a module reads --------------------------------------------------------------
+
+
+DATAGRAM_SPEC = """
+name: dgram
+version: "1"
+entry: m
+input: datagram
+units:
+  m:
+    fields:
+      - {name: b, bits: 8}
+"""
+
+
+def test_both_drivers_refuse_a_datagram_spec_a_byte_stream(tmp_path: Path):
+    """The compiled driver wrote a file here, where the interpreter refused.
+
+    A datagram spec has no framing to find message boundaries in a byte stream
+    with, so a decode there is a confident tree over the wrong bytes. The
+    tools/pipeline.py WireGuard inputs found it, the first datagram spec it ran.
+    """
+    source = tmp_path / "in.zpf"
+    write_byte_stream(source, [(1000, b"\x01\x02\x03", 1001)])
+    spec = Spec.from_yaml(DATAGRAM_SPEC)
+    with pytest.raises(SpecError, match="declares input: datagram"):
+        run(Decoder(spec), source, tmp_path / "i.zpf", produced_by="t", produced_at=1)
+    module = compiled(spec)
+    assert module.INPUT == "datagram"
+    with pytest.raises(SpecError, match="declares input: datagram"):
+        run_compiled(module, source, tmp_path / "c.zpf", produced_by="t", produced_at=1)

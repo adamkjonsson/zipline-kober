@@ -189,7 +189,8 @@ It is one command, and **run it before a release, or after touching
 
 It needs two sibling checkouts with their own venvs, neither a dependency of
 this project — `../packeteer` and `../python-zipline-wire`, or wherever
-`--packeteer` and `--wire` say. It builds ten inputs:
+`--packeteer` and `--wire` say: packeteer 0.18.0 or later, for its UDP tunnel,
+and `zpfwire` 0.5.0 or later, for a `.zpf` of packets. It builds fifteen inputs:
 
 | Input | What it is for |
 | --- | --- |
@@ -201,11 +202,17 @@ this project — `../packeteer` and `../python-zipline-wire`, or wherever
 | `gzip_clean` | The same traffic with no loss, checked exactly against the reference reader. |
 | `packet_loss`, `tcp_lossy_ts`, `tcp_reorder_ts` | Real captures kept for their loss and reordering. They are not DNS or HTTP; they are driver structure. |
 | `http_stream_1` | A real HTTP capture, 2000 messages, lossless. |
+| `wg_clean`, `wg_loss`, `wg_corrupt`, `wg_reorder`, `wg_duplicate` | DNS both ways through `examples/wireguard/wg_seal.py`: a real handshake, a rekey every ten packets, and one tunnel impairment each, or none, so a count that moves says which impairment moved it. The key log and what was sealed are written beside the capture. |
 
-Each is converted with `zpfwire convert` and run through **both** example specs
-— a spec meeting a stream in another protocol is a case the driver has to
-handle too — by the interpreter and by a module compiled fresh from the spec, at
-both granularities: 80 files. For each, it checks:
+Each is converted with `zpfwire convert` and run through **every** example
+spec — DNS, HTTP and WireGuard, each over every input, since a spec meeting a
+stream in another protocol is a case the driver has to handle too — by the
+interpreter and by a module compiled fresh from the spec, at both
+granularities. WireGuard's is given the input's key log, or an empty table. A
+`datagram` spec over a byte stream is refused rather than decoded, and the
+check there is that **both** drivers refuse it: the compiled one did not, until
+these inputs ran the first datagram spec the pipeline had. For each file, it
+checks:
 
 - **Conformance and coverage**: `zpf.ConformanceChecker` and
   `zpf.check_coverage`.
@@ -228,6 +235,12 @@ both granularities: 80 files. For each, it checks:
 - **The inflated content**, over the two compressed-body inputs: every
   `http.content` record must be byte for byte a document `tools/gzip_http.py`
   compressed, and over the lossless one every compressed body must be there.
+- **The tunnel**, over the WireGuard inputs, exactly, against what `wg_seal.py`
+  sealed: a packet whose datagram reached the wire unchanged opens once per
+  arrival, and every other transport datagram is one `decrypt-failed` region.
+- **The traffic inside**, over the same: `zpfwire` turns the decrypted packets
+  back into the DNS conversation, `dns.yaml` decodes it, and each direction
+  must be, message for message, the DNS inside what arrived intact.
 
 It prints one line per check and exits non-zero if any failed, keeping the work
 directory. `--work DIR` keeps it anyway, and `--baseline DIR` compares every

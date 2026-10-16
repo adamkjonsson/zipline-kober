@@ -104,6 +104,13 @@ minor bump here too.
 
 ### Fixed
 
+- **The compiled driver decoded a `datagram` spec over a byte stream**, where
+  the interpreter refuses it: a spec with no framing of its own, given a byte
+  stream, writes a confident decode of the wrong bytes. A generated module now
+  carries its spec's `INPUT`, and `run_compiled` and `decode_stream_compiled`
+  refuse that stream as `run` does. A module generated before `INPUT` existed is
+  not checked. Every generated module gains the one constant. Found by the
+  pipeline's WireGuard inputs, the first `datagram` spec it ran.
 - **A compiled decode could raise on a field named like what it calls.** A
   field or parameter is a local of its unit's generated function, so one named
   `to_int`, `present`, `len` or any other runtime helper or Python built-in hid
