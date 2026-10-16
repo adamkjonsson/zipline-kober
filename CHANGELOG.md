@@ -75,7 +75,9 @@ minor bump here too.
   and optionally the keys Wireshark needs to open the same capture. The
   example's tests check it against RFC 7748's vectors and against Wireshark,
   and run the whole chain where packeteer and `zpfwire` are checked out
-  beside it.
+  beside it. The README goes on to the traffic inside: `zpfwire` 0.5.0 turns
+  the decrypted packets back into conversations, and `dns.yaml` and
+  `http.yaml` decode them, checked against what was sealed.
 - **`len(b)`**, the expression language's sixth function: how many bytes a
   bytes value holds, as an `int`, in both backends. WireGuard needs it to tell
   a keepalive, which seals nothing, from a packet by size before opening

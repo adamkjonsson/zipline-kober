@@ -93,6 +93,35 @@ happened. No key is
 ever written, and the decoder descriptor's `params_digest` says which key log
 produced the file.
 
+## The traffic inside
+
+`packets.zpf` holds packets, one per transport message. `zpfwire` 0.5.0 or
+later turns them back into the conversations they carried, UDP split into
+flows and TCP reassembled as it would be from a capture, and kober decodes
+those with any spec:
+
+```console
+zpfwire convert packets.zpf -o inner.zpf --content-type dec:ip-packet
+kober run examples/dns.yaml inner.zpf -o dns.zpf
+```
+
+Every record in `inner.zpf` cites the decrypted packets it came from, and
+those cite the datagrams, so a DNS answer three stages down still says which
+bytes of the capture it was read from. `zpfwire pcap packets.zpf -o inner.pcap
+--content-type dec:ip-packet` writes the decrypted packets as a capture instead,
+for Wireshark.
+
+Losses inside and outside the tunnel are different things, and the files say
+so. A segment the inner connection lost and retransmitted (`--packet-loss
+--retransmit-lost`) arrives whole, since `wg_seal.py` sealed the retransmission
+like any packet. A sealed datagram the tunnel lost (`--tunnel-packet-loss`) is
+a segment the inner connection never knew to resend, so `inner.zpf` has a gap
+there, and what kober decodes after it is named, never guessed.
+
+`--content-type dec:ip-packet` says which records are packets. It goes away
+once kober labels them `net:ip`, the format's own label and `zpfwire`'s
+default, which needs `zpf` 0.6.
+
 ## How the pieces meet
 
 - **The spec declares, your code supplies.** `wireguard.yaml` says the

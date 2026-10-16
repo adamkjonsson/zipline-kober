@@ -1,6 +1,6 @@
 # Phase plan: a WireGuard tunnel, as the worked example of bringing your own code
 
-**State: Stages 0 to 4 done (2026-10-13).** `0.6.0.dev0`, with the
+**State: Stages 0 to 5 done (2026-10-16).** `0.6.0.dev0`, with the
 pipeline baseline taken on the unchanged `0.5.0` code in
 `../kober-baselines/v0.5.0`, outside the repository. Map parameters and
 `keys[receiver]` landed in both backends (*Stage 1 — done*). `fails_as` is
@@ -10,10 +10,10 @@ declared, checked, planned by both backends, and written with its
 (*Stage 2 — done*). `examples/wireguard/` holds the spec, the cipher and the
 transform, decoding datagrams built in the tests (*Stage 3 — done*), and
 `wg_seal.py` seals packeteer's generated traffic with a real handshake, which
-Wireshark opens (*Stage 4 — done*). Ready for `net:ip`, with `len` and a
-keepalive label, ahead of the `zpf` 0.6 port (*The port to `zpf` 0.6*).
-Upstream issues filed 2026-10-11 (see *What it waits for*). Stage 5 waits for
-zpfwire#35.
+Wireshark opens (*Stage 4 — done*). The traffic inside comes back out
+through zpfwire#35 and decodes to exactly what was sealed (*Stage 5 — done*).
+Ready for `net:ip`, with `len` and a keepalive label, ahead of the `zpf` 0.6
+port (*The port to `zpf` 0.6*). Stage 6 is next.
 
 > **Written 2026-10-11** against `0.5.0`, `zpf` 0.5.1 (spec 0.21), packeteer
 > 0.17.0, `zpfwire` 0.4.0. The prompt: *make a demo that decodes a VPN tunnel,
@@ -128,7 +128,7 @@ ships. The issues close at that release, by packeteer's own rule.
 
 | Issue | What it gives | What it blocks here | Until it lands |
 | --- | --- | --- | --- |
-| [zpfwire#35](https://github.com/adamkjonsson/python-zipline-wire/issues/35) | Sessions from a `.zpf` of IP packets | Stage 5 as designed | Stage 5's fallback |
+| [zpfwire#35](https://github.com/adamkjonsson/python-zipline-wire/issues/35) | Sessions from a `.zpf` of IP packets | *Delivered in zpfwire 0.5.0.dev0, verified 2026-10-16 (Stage 5); closes at 0.5.0's release* | — |
 
 *Corrected in Stage 2:* this said nothing was needed from `python-zipline`.
 #79 was found writing the first reason outside the canonical four: the stage
@@ -547,6 +547,38 @@ reassembly. Whether it lives on as an example after #35 is decided then.
 
 *Decided 2026-10-13:* wait for zpfwire#35 rather than take the fallback.
 Stage 5 starts when #35 lands in a `zpfwire` build to verify.
+
+#### Stage 5 — done
+
+zpfwire#35 landed in 0.5.0.dev0 (`zpfwire convert packets.zpf`), and was
+verified here on 2026-10-16 before it is released, which the tests need no
+pin for: `zpfwire` is a sibling checkout, not a dependency, and they skip
+without its `.zpf` input. The fallback spec was never written.
+
+- **The shape check passed.** kober's field-granularity output, a unit
+  sequence with the WireGuard field records beside the packets, is what #35
+  reads: it selects the packets by label, coalesces across the unit
+  sequence's seams, and marks everything else it does not cite `skipped`,
+  with coverage of `packets.zpf` clean. Until the `zpf` 0.6 port relabels the
+  packets `net:ip`, it needs `--content-type dec:ip-packet`.
+- **DNS, under every tunnel impairment, is exact.** The DNS `dns.yaml` decodes
+  from `inner.zpf` is, message for message and in its own direction, the DNS
+  inside the sealed datagrams that reached the wire unchanged.
+- **HTTP, under inner loss with recovery, is exact.** Each direction's messages
+  join to exactly the TCP stream `wg_seal.py` sealed, retransmissions and all:
+  Q6's case, where sealing in wire order pays off.
+- **HTTP under tunnel loss has holes, honestly.** A lost sealed datagram is a
+  segment the inner connection never knew to resend, so `inner.zpf` has a
+  `gap`, and every message decoded is a piece of the sealed stream; none is
+  invented. That is checked by shape, the way the pipeline checks a lossy
+  HTTP corpus.
+- `zpfwire pcap` exports the decrypted packets as a capture, and Wireshark reads
+  them as the DNS inside: the README shows both.
+- **Left as #35 left it:** an IP datagram fragmented inside the tunnel is
+  `undecodable` rather than reassembled (zipline#166). Nothing here generates
+  one.
+
+The tests break on a one-byte cut in the transform's padding trim, all three.
 
 ### Stage 6 — the pipeline and the walkthrough
 

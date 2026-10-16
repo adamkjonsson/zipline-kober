@@ -33,10 +33,12 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+import zpf
 from fuzzing import variants
 from test_compiled_transforms import imported
 from test_stage import datagrams
 from test_stage_transforms import decode, records, regions
+from zpf.blocks import Participant, Record
 from zpfcompare import blocks
 
 from kober import transforms as transforms_module
@@ -48,7 +50,8 @@ from kober.node import NodeStatus
 from kober.spec import Spec
 from kober.transforms import Registry
 
-EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "wireguard"
+EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+EXAMPLE = EXAMPLES / "wireguard"
 SPEC = EXAMPLE / "wireguard.yaml"
 
 
@@ -503,7 +506,7 @@ def test_wireshark_opens_what_the_example_seals(tmp_path: Path):
     assert {line.split("\t")[1] for line in fields[1::2] if line} == {"True"}
 
 
-# --- the whole chain: packeteer, zpfwire, kober --------------------------------------------------
+# --- the whole chain: packeteer, zpfwire, kober, zpfwire, kober ---------------------------------
 
 #: The sibling checkouts ``tools/pipeline.py`` uses, with their own venvs.
 PACKETEER = Path(__file__).resolve().parents[2] / "packeteer" / ".venv" / "bin" / "packeteer"
@@ -520,20 +523,110 @@ DNS_EXCHANGE = [
      "direction": "s2c"},
 ]
 
+#: What the tunnel's own datagrams suffer, every impairment at once.
+TUNNEL_IMPAIRED = [
+    "--tunnel-packet-loss", "0.1", "--tunnel-corruption", "0.15",
+    "--tunnel-reorder", "0.3", "--tunnel-duplicate", "0.1",
+]
 
-def _has_tunnel(binary: Path) -> bool:
+#: The label kober's WireGuard decode gives a packet until the ``zpf`` 0.6 port
+#: makes it ``net:ip``, ``zpfwire``'s default. The plan's port list, item 3.
+PACKET_LABEL = "dec:ip-packet"
+
+
+def _help(binary: Path, *verb: str) -> str:
     if not binary.exists():
-        return False
-    out = subprocess.run(
-        [str(binary), "stream", "--help"], capture_output=True, text=True, check=False
-    )
-    return "--udp-tunnel" in out.stdout
+        return ""
+    return subprocess.run(
+        [str(binary), *verb, "--help"], capture_output=True, text=True, check=False
+    ).stdout
 
 
-@pytest.mark.skipif(
-    not (_has_tunnel(PACKETEER) and ZPFWIRE.exists()),
+#: packeteer 0.18.0's ``--udp-tunnel``, and zpfwire 0.5.0's ``.zpf`` input (#35).
+HAS_TUNNEL = "--udp-tunnel" in _help(PACKETEER, "stream")
+HAS_PACKETS_INPUT = "--content-type" in _help(ZPFWIRE, "convert")
+
+needs_the_chain = pytest.mark.skipif(
+    not (HAS_TUNNEL and ZPFWIRE.exists()),
     reason="needs sibling packeteer (0.18.0, --udp-tunnel) and python-zipline-wire checkouts",
 )
+needs_the_inner_hop = pytest.mark.skipif(
+    not (HAS_TUNNEL and HAS_PACKETS_INPUT),
+    reason="needs sibling packeteer (0.18.0) and python-zipline-wire (0.5.0, a .zpf of packets)",
+)
+
+
+def tunnelled(tmp_path: Path, inner: list[str], tunnel: list[str]) -> Path:
+    """Generate ``inner`` traffic through ``wg_seal.py``, and convert it: ``outer.zpf``."""
+    pcap, outer = tmp_path / "wg.pcap", tmp_path / "outer.zpf"
+    subprocess.run(
+        [
+            str(PACKETEER), "stream", *inner,
+            "--client-ip", "10.8.0.2", "--server-ip", "10.8.0.1",
+            "--udp-tunnel", "198.51.100.7", "203.0.113.9", "--tunnel-port", "51820",
+            "--tunnel-module", str(EXAMPLE / "wg_seal.py"),
+            "--tunnel-arg", f"keylog={tmp_path / 'keys.json'}",
+            "--tunnel-arg", f"truth={tmp_path / 'truth.jsonl'}",
+            "--tunnel-arg", "rekey_after=10",
+            *tunnel, "--seed", "7", "--pcap", str(pcap),
+        ],
+        check=True, capture_output=True,
+    )
+    subprocess.run([str(ZPFWIRE), "convert", "-q", str(pcap), "-o", str(outer)], check=True)
+    return outer
+
+
+def opened(tmp_path: Path, outer: Path, registry: Registry) -> list[tuple[object, ...]]:
+    """Open the tunnel with the key log, by both drivers; the file is ``out.field.zpf``."""
+    keys = json.loads((tmp_path / "keys.json").read_text())
+    table = {int(index): bytes.fromhex(value[4:]) for index, value in keys.items()}
+    return decode(spec(), outer, tmp_path, params={"keys": table}, transforms=registry)
+
+
+def sessionized(tmp_path: Path) -> Path:
+    """Turn the decrypted packets into the conversations inside the tunnel: ``inner.zpf``."""
+    inner = tmp_path / "inner.zpf"
+    subprocess.run(
+        [
+            str(ZPFWIRE), "convert", "-q", str(tmp_path / "out.field.zpf"), "-o", str(inner),
+            "--content-type", PACKET_LABEL,
+        ],
+        check=True,
+    )
+    return inner
+
+
+def messages_by_direction(path: Path) -> dict[str, list[bytes]]:
+    """Return a message-granularity file's records, by the inner client's or server's side."""
+    endpoints: dict[tuple[int, int], str] = {}
+    found: dict[str, list[bytes]] = {"c2s": [], "s2c": []}
+    with zpf.open(path) as handle:
+        for block in handle.blocks():
+            if isinstance(block, Participant):
+                endpoint = block.endpoint
+                endpoints[block.session_id, block.participant_id] = (
+                    endpoint if isinstance(endpoint, str) else endpoint[0]
+                )
+            elif isinstance(block, Record):
+                sender = endpoints[block.session_id, block.sender_pid]
+                found["c2s" if sender.startswith("10.8.0.2:") else "s2c"].append(block.payload)
+    return found
+
+
+#: IPv4's protocol number for UDP.
+UDP = 17
+
+
+def inner_payload(packet: bytes) -> tuple[int | None, bytes]:
+    """Return an inner IPv4 packet's TCP sequence number (``None`` for UDP), and payload."""
+    header = (packet[0] & 15) * 4
+    if packet[9] == UDP:
+        return None, packet[header + 8 :]
+    tcp = packet[header:]
+    return struct.unpack(">I", tcp[4:8])[0], tcp[(tcp[12] >> 4) * 4 :]
+
+
+@needs_the_chain
 def test_generated_impaired_traffic_decodes_to_exactly_what_arrived(
     tmp_path: Path, registry: Registry
 ):
@@ -547,31 +640,13 @@ def test_generated_impaired_traffic_decodes_to_exactly_what_arrived(
     """
     messages = tmp_path / "dns.json"
     messages.write_text(json.dumps(DNS_EXCHANGE))
-    pcap, outer = tmp_path / "wg.pcap", tmp_path / "outer.zpf"
-    subprocess.run(
-        [
-            str(PACKETEER), "stream", "--protocol", "udp", "--payload", "dns",
-            "--protocol-messages", str(messages),
-            "--client-ip", "10.8.0.2", "--server-ip", "10.8.0.1", "--server-port", "53",
-            "--packets", "40",
-            "--udp-tunnel", "198.51.100.7", "203.0.113.9", "--tunnel-port", "51820",
-            "--tunnel-module", str(EXAMPLE / "wg_seal.py"),
-            "--tunnel-arg", f"keylog={tmp_path / 'keys.json'}",
-            "--tunnel-arg", f"truth={tmp_path / 'truth.jsonl'}",
-            "--tunnel-arg", "rekey_after=10",
-            "--tunnel-packet-loss", "0.1", "--tunnel-corruption", "0.15",
-            "--tunnel-reorder", "0.3", "--tunnel-duplicate", "0.1",
-            "--seed", "7", "--pcap", str(pcap),
-        ],
-        check=True, capture_output=True,
-    )
-    subprocess.run([str(ZPFWIRE), "convert", "-q", str(pcap), "-o", str(outer)], check=True)
+    inner = ["--protocol", "udp", "--payload", "dns", "--protocol-messages", str(messages),
+             "--server-port", "53", "--packets", "40"]
+    outer = tunnelled(tmp_path, inner, TUNNEL_IMPAIRED)
     on_wire = Counter(
         block[3] for block in blocks(outer) if block[0] == "record" and block[3][:1] == b"\x04"
     )
-    keys = json.loads((tmp_path / "keys.json").read_text())
-    table = {int(index): bytes.fromhex(value[4:]) for index, value in keys.items()}
-    written = decode(spec(), outer, tmp_path, params={"keys": table}, transforms=registry)
+    written = opened(tmp_path, outer, registry)
     expected: Counter[bytes] = Counter()
     for line in truth(tmp_path):
         arrivals = on_wire.pop(bytes.fromhex(line["outer"]), 0)
@@ -581,6 +656,98 @@ def test_generated_impaired_traffic_decodes_to_exactly_what_arrived(
     assert len(failed) == sum(on_wire.values()), "every other transport datagram failed, once"
     assert sum(expected.values()) > 0
     assert failed, "the corpus reaches a corrupted datagram"
+
+
+@needs_the_inner_hop
+def test_the_dns_inside_decodes_to_exactly_what_arrived(tmp_path: Path, registry: Registry):
+    """Stage 5: the decrypted packets become a conversation, and ``dns.yaml`` reads it.
+
+    The DNS kober decodes from inside the tunnel is, message for message, the
+    DNS inside the sealed datagrams that reached the wire unchanged, each in
+    its own direction.
+    """
+    messages = tmp_path / "dns.json"
+    messages.write_text(json.dumps(DNS_EXCHANGE))
+    inner = ["--protocol", "udp", "--payload", "dns", "--protocol-messages", str(messages),
+             "--server-port", "53", "--packets", "40"]
+    outer = tunnelled(tmp_path, inner, TUNNEL_IMPAIRED)
+    on_wire = Counter(
+        block[3] for block in blocks(outer) if block[0] == "record" and block[3][:1] == b"\x04"
+    )
+    opened(tmp_path, outer, registry)
+    conversation = sessionized(tmp_path)
+    (tmp_path / "dns").mkdir()
+    decode(Spec.from_file(EXAMPLES / "dns.yaml"), conversation, tmp_path / "dns", Emit.MESSAGE)
+    decoded = messages_by_direction(tmp_path / "dns" / "out.message.zpf")
+    expected: dict[str, Counter[bytes]] = {"c2s": Counter(), "s2c": Counter()}
+    for line in truth(tmp_path):
+        arrivals = on_wire.get(bytes.fromhex(line["outer"]), 0)
+        expected[line["direction"]][inner_payload(bytes.fromhex(line["inner"]))[1]] += arrivals
+    for direction in ("c2s", "s2c"):
+        assert Counter(decoded[direction]) == expected[direction], direction
+    assert sum(len(found) for found in decoded.values()) > 0
+
+
+def sealed_streams(tmp_path: Path) -> dict[str, bytes]:
+    """Return each direction's inner TCP stream, from the segments ``wg_seal.py`` sealed."""
+    segments: dict[str, dict[int, bytes]] = {"c2s": {}, "s2c": {}}
+    for line in truth(tmp_path):
+        seq, payload = inner_payload(bytes.fromhex(line["inner"]))
+        if seq is not None and payload:
+            segments[line["direction"]][seq] = payload  # a retransmission is the same bytes
+    return {d: b"".join(found[at] for at in sorted(found)) for d, found in segments.items()}
+
+
+#: HTTP inside the tunnel, with loss on the inner connection and its recovery.
+HTTP_INSIDE = [
+    "--payload", "http", "--requests", "12", "--mss", "300",
+    "--packet-loss", "0.1", "--retransmit-lost",
+]
+
+
+@needs_the_inner_hop
+def test_the_http_inside_is_the_stream_that_was_sealed(tmp_path: Path, registry: Registry):
+    """Inner loss, recovered by the inner connection: every message, byte for byte.
+
+    ``wg_seal.py`` sealed a retransmission with a fresh counter as it would any
+    packet, so the stream inside is whole, and ``http.yaml``'s messages in each
+    direction join to exactly what the inner TCP connection carried.
+    """
+    outer = tunnelled(tmp_path, HTTP_INSIDE, [])
+    opened(tmp_path, outer, registry)
+    conversation = sessionized(tmp_path)
+    (tmp_path / "http").mkdir()
+    decode(Spec.from_file(EXAMPLES / "http.yaml"), conversation, tmp_path / "http", Emit.MESSAGE)
+    decoded = messages_by_direction(tmp_path / "http" / "out.message.zpf")
+    streams = sealed_streams(tmp_path)
+    assert (len(decoded["c2s"]), len(decoded["s2c"])) == (12, 12)
+    for direction in ("c2s", "s2c"):
+        assert b"".join(decoded[direction]) == streams[direction], direction
+
+
+@needs_the_inner_hop
+def test_a_lost_sealed_segment_is_a_hole_and_nothing_is_invented(
+    tmp_path: Path, registry: Registry
+):
+    """Outer loss: a segment the inner connection never retransmits, because it never knew.
+
+    What decodes must be real: every message is a piece of the stream that was
+    sealed, no more start lines than transactions, and what did not arrive is
+    named, never decoded past.
+    """
+    outer = tunnelled(tmp_path, HTTP_INSIDE, TUNNEL_IMPAIRED)
+    opened(tmp_path, outer, registry)
+    conversation = sessionized(tmp_path)
+    (tmp_path / "http").mkdir()
+    written = decode(
+        Spec.from_file(EXAMPLES / "http.yaml"), conversation, tmp_path / "http", Emit.MESSAGE
+    )
+    decoded = messages_by_direction(tmp_path / "http" / "out.message.zpf")
+    streams = sealed_streams(tmp_path)
+    for direction in ("c2s", "s2c"):
+        assert all(message in streams[direction] for message in decoded[direction]), direction
+        assert 0 < len(decoded[direction]) <= 12, direction
+    assert any(region[2] == "gap" for region in regions(written)), "the corpus reaches a hole"
 
 
 # --- the spec --------------------------------------------------------------------------------
