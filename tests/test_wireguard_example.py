@@ -70,19 +70,8 @@ from kober.emit import Emit
 from kober.spec import Spec
 from kober.transforms import Registry
 
-#: The example, as every shared test reads it.
-WIREGUARD = Example(
-    name="wireguard",
-    spec="wireguard.yaml",
-    transforms="wg_transforms.py",
-    packet_role="wireguard.body.packet",
-    # Until the zpf 0.6 port makes it net:ip, zpfwire's default: the plan's port list, item 3.
-    packet_label="dec:ip-packet",
-    failure="decrypt-failed",
-    keys="keys",
-    tunnel="wg_seal.py",
-    carries_packet=lambda payload: payload[:1] == b"\x04",
-)
+#: The example, as it describes itself in ``example.json``, for the pipeline too.
+WIREGUARD = Example.load("wireguard")
 EXAMPLES = WIREGUARD.folder.parent
 
 crypto = WIREGUARD.module("wg_crypto")
@@ -486,21 +475,11 @@ def test_wireshark_opens_what_the_example_seals(tmp_path: Path):
 
 # --- the whole chain: packeteer, zpfwire, kober, zpfwire, kober ---------------------------------
 
-#: DNS inside the tunnel, both ways: the query and answer the README's commands send.
-DNS_INSIDE = [
-    "--protocol", "udp", "--payload", "dns",
-    "--protocol-messages", str(WIREGUARD.path("dns.json")),
-    "--server-port", "53", "--packets", "40",
-]
-
 #: What the tunnel's own datagrams suffer, every impairment at once.
 TUNNEL_IMPAIRED = [
     "--tunnel-packet-loss", "0.1", "--tunnel-corruption", "0.15",
     "--tunnel-reorder", "0.3", "--tunnel-duplicate", "0.1",
 ]
-
-#: Rekey every ten packets, so a run crosses sessions.
-REKEYS = ["rekey_after=10"]
 
 needs_the_chain = pytest.mark.skipif(
     not (HAS_TUNNEL and ZPFWIRE.exists()),
@@ -512,8 +491,9 @@ needs_the_inner_hop = pytest.mark.skipif(
 )
 
 
-def tunnelled(tmp_path: Path, inner: list[str], impairments: list[str]) -> Run:
-    return generate(WIREGUARD, tmp_path, inner, impairments, REKEYS)
+def tunnelled(tmp_path: Path, inner: list[str] | None, impairments: list[str]) -> Run:
+    """Generate through ``wg_seal.py``; ``None`` is the example's own traffic, DNS."""
+    return generate(WIREGUARD, tmp_path, inner, impairments)
 
 
 def opened(run: Run, registry: Registry) -> list[tuple[object, ...]]:
@@ -532,7 +512,7 @@ def test_generated_impaired_traffic_decodes_to_exactly_what_arrived(
     ``decrypt-failed`` region. A multiset: ``zpfwire`` writes each direction as
     a participant of its own, so the decode's order is not the wire's.
     """
-    run = tunnelled(tmp_path, DNS_INSIDE, TUNNEL_IMPAIRED)
+    run = tunnelled(tmp_path, None, TUNNEL_IMPAIRED)
     opened(run, registry)
     assert tunnel_problems(WIREGUARD, run.truth, run.outer, run.opened) == []
     expected, left = arrivals(WIREGUARD, run.truth, run.outer)
@@ -548,9 +528,10 @@ def test_the_dns_inside_decodes_to_exactly_what_arrived(tmp_path: Path, registry
     DNS inside the sealed datagrams that reached the wire unchanged, each in
     its own direction.
     """
-    run = tunnelled(tmp_path, DNS_INSIDE, TUNNEL_IMPAIRED)
+    run = tunnelled(tmp_path, None, TUNNEL_IMPAIRED)
     opened(run, registry)
-    decode_inside(EXAMPLES / "dns.yaml", sessionize(WIREGUARD, run), tmp_path / "dns")
+    assert WIREGUARD.inside is not None
+    decode_inside(WIREGUARD.path(WIREGUARD.inside), sessionize(WIREGUARD, run), tmp_path / "dns")
     decoded = messages_by_direction(tmp_path / "dns" / "out.message.zpf")
     expected = expected_inside(WIREGUARD, run.truth, run.outer)
     for direction in ("c2s", "s2c"):

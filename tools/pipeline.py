@@ -9,9 +9,15 @@ where the seam bug lived. This script is the release checklist's requirement
 
 It needs two sibling checkouts with their own virtual environments, neither a
 dependency of this project: ``packeteer`` 0.18.0 or later (to fuzz and generate
-traffic, a WireGuard tunnel's included) and ``python-zipline-wire`` 0.5.0 or
-later (``zpfwire``, to turn captures into ``.zpf``, and a tunnel's decrypted
-packets back into conversations).
+traffic, through an example's tunnel module included) and
+``python-zipline-wire`` 0.5.0 or later (``zpfwire``, to turn captures into
+``.zpf``, and a tunnel's opened packets back into conversations).
+
+An example that brings its own code (``examples/<name>/``) joins the pipeline
+by describing itself in an ``example.json`` beside its spec
+(``tests/examplekit.py``, :class:`Example`): its spec is run over every input,
+its inputs are generated through its tunnel module, and each is checked
+exactly against what that module says it sealed. Nothing here names one.
 
 For each input it builds, it runs every example spec through the interpreter
 (:func:`kober.stage.run`) and through a module compiled fresh from the same spec
@@ -45,7 +51,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import zpf
-from zpf.blocks import Participant, Record, Undecoded
+from zpf.blocks import Record, Undecoded
 from zpf.reassembly import Gap
 
 from kober.decoder import Decoder
@@ -58,20 +64,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from types import ModuleType
 
+    from examplekit import Example
+
 ROOT = Path(__file__).resolve().parent.parent
 
-#: The specs every input is run through, every one over every input: a spec
-#: meeting a stream in another protocol is a case the driver has to handle too.
-#: WireGuard's is given the input's key log, or an empty table where there is
-#: none, so it meets traffic it holds no keys for as well.
-SPECS = {
-    "dns": ROOT / "examples" / "dns.yaml",
-    "http": ROOT / "examples" / "http.yaml",
-    "wireguard": ROOT / "examples" / "wireguard" / "wireguard.yaml",
-}
-
-#: The WireGuard example, whose transform and tunnel module the pipeline loads.
-WIREGUARD = ROOT / "examples" / "wireguard"
 
 #: Requests in the generated HTTP stream, so the shape check knows how many start
 #: lines there can be: one request and one response each.
@@ -89,6 +85,39 @@ CAPTURES = ("packet_loss", "http_stream_1", "tcp_lossy_ts", "tcp_reorder_ts")
 
 PRODUCED_BY = "kober pipeline"
 PRODUCED_AT = 1_700_000_000
+
+
+def _load(path: Path, name: str) -> ModuleType:
+    """Import a Python file as a module, registered under ``name``.
+
+    Registered in ``sys.modules`` because ``dataclasses`` looks a class's module
+    up there, as it would for a generated module a consumer imports normally.
+    """
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        msg = f"cannot import {path}"
+        raise ImportError(msg)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+#: The shared test kit: the examples' descriptions, and the oracles their tests use.
+examplekit = _load(ROOT / "tests" / "examplekit.py", "examplekit")
+
+#: Every example that describes itself, by name.
+DESCRIBED: dict[str, Example] = {example.name: example for example in examplekit.discover()}
+
+#: The specs every input is run through, every one over every input: a spec
+#: meeting a stream in another protocol is a case the driver has to handle too.
+#: A described example's is given the input's key log, or an empty table where
+#: there is none, so it meets traffic it holds no keys for as well.
+SPECS = {
+    "dns": ROOT / "examples" / "dns.yaml",
+    "http": ROOT / "examples" / "http.yaml",
+    **{name: example.path(example.spec) for name, example in DESCRIBED.items()},
+}
 
 
 # --- the tools --------------------------------------------------------------
@@ -266,31 +295,18 @@ def _gzip_http_clean(tools: Tools, out: Path) -> None:
 
 
 
-#: Inner packets per WireGuard input, and sealed packets per session: four
-#: sessions, so every input rekeys.
-WIREGUARD_PACKETS = 40
-WIREGUARD_REKEY = 10
+def _tunnelled(example: Example, impairments: tuple[str, ...]) -> Callable[[Tools, Path], None]:
+    """Return a maker for an example's own traffic through its tunnel module.
 
-
-def _wireguard(*impairment: str) -> Callable[[Tools, Path], None]:
-    """Return a maker for DNS through ``wg_seal.py``, with one tunnel impairment or none.
-
-    One impairment per input, so a count that moves says which one moved it.
-    The key log and the truth ``wg_seal.py`` writes go beside the capture.
+    The key log and the truth the module writes go beside the capture.
     """
 
     def make(tools: Tools, out: Path) -> None:
         tools.packeteer_cmd(
-            "stream", "--protocol", "udp", "--payload", "dns",
-            "--protocol-messages", str(WIREGUARD / "dns.json"),
-            "--client-ip", "10.8.0.2", "--server-ip", "10.8.0.1", "--server-port", "53",
-            "--packets", str(WIREGUARD_PACKETS),
-            "--udp-tunnel", "198.51.100.7", "203.0.113.9", "--tunnel-port", "51820",
-            "--tunnel-module", str(WIREGUARD / "wg_seal.py"),
-            "--tunnel-arg", f"keylog={out.with_suffix('.keys.json')}",
-            "--tunnel-arg", f"truth={out.with_suffix('.truth.jsonl')}",
-            "--tunnel-arg", f"rekey_after={WIREGUARD_REKEY}",
-            *impairment, "--seed", "7", "--pcap", str(out),
+            *examplekit.stream_args(
+                example, out, out.with_suffix(".truth.jsonl"), out.with_suffix(".keys.json"),
+                impairments=impairments,
+            )
         )
 
     return make
@@ -317,31 +333,17 @@ INPUTS = (
         Input(name, "http" if name.startswith("http") else None, _capture(name))
         for name in CAPTURES
     ),
-    Input("wg_clean", "wireguard", _wireguard()),
-    Input("wg_loss", "wireguard", _wireguard("--tunnel-packet-loss", "0.15")),
-    Input("wg_corrupt", "wireguard", _wireguard("--tunnel-corruption", "0.15")),
-    Input("wg_reorder", "wireguard", _wireguard("--tunnel-reorder", "0.3")),
-    Input("wg_duplicate", "wireguard", _wireguard("--tunnel-duplicate", "0.15")),
+    # One impairment per input, as an example names them, so a count that
+    # moves says which one moved it.
+    *(
+        Input(name, example.name, _tunnelled(example, impairments))
+        for example in DESCRIBED.values()
+        for name, impairments in example.inputs.items()
+    ),
 )
 
 
 # --- checking ---------------------------------------------------------------
-
-
-def _load(path: Path, name: str) -> ModuleType:
-    """Import a Python file as a module, registered under ``name``.
-
-    Registered in ``sys.modules`` because ``dataclasses`` looks a class's module
-    up there, as it would for a generated module a consumer imports normally.
-    """
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        msg = f"cannot import {path}"
-        raise ImportError(msg)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 #: The one definition of "block for block", shared with the suite.
@@ -515,8 +517,8 @@ def _count_http(data: bytes, counts: Counter[str]) -> None:
 
 def _shape(report: Report, source: Input, path: Path, transport: Path, what: str) -> None:
     """Check that a field-granularity decode of an input has its protocol's shape."""
-    if source.protocol == "wireguard":
-        _tunnel(report, path, transport, what)
+    if source.protocol in DESCRIBED:
+        _tunnel(report, DESCRIBED[source.protocol], path, transport, what)
     elif source.protocol == "dns":
         followed, through = _pointers(path)
         report.line(
@@ -555,88 +557,55 @@ def _shape(report: Report, source: Input, path: Path, transport: Path, what: str
             _inflated(report, source, path, transport, what)
 
 
-#: What kober's WireGuard decode labels a packet, until the ``zpf`` 0.6 port
-#: makes it ``net:ip``.
-PACKET_LABEL = "dec:ip-packet"
-
-
-def _records(path: Path) -> list[Record]:
-    with zpf.open(path) as handle:
-        return [block for block in handle.blocks() if isinstance(block, Record)]
-
-
 def _truth(transport: Path) -> list[dict[str, object]]:
-    """Return what ``wg_seal.py`` sealed for an input, a line per packet."""
-    truth = transport.with_suffix(".truth.jsonl")
-    return [json.loads(line) for line in truth.read_text().splitlines()]
+    """Return what an example's tunnel module sealed for an input, a line per packet."""
+    return examplekit.read_truth(transport.with_suffix(".truth.jsonl"))
 
 
-def _tunnel(report: Report, path: Path, transport: Path, what: str) -> None:
-    """Check a WireGuard decode exactly: what arrived intact opens, and nothing else does.
+def _tunnel(report: Report, example: Example, path: Path, transport: Path, what: str) -> None:
+    """Check a tunnel's decode exactly: what arrived intact opens, and nothing else does.
 
-    The example plan's Q7. A sealed packet whose datagram is on the wire
-    unchanged opens once per arrival; every other transport datagram, a
-    corrupted one or a copy of one, is one ``decrypt-failed`` region.
+    The WireGuard plan's Q7. A sealed packet whose datagram is on the wire
+    unchanged opens once per arrival; every other datagram that carries a
+    packet, a corrupted one or a copy of one, is one region named the example's
+    failure.
     """
-    on_wire = Counter(bytes(r.payload) for r in _records(transport) if r.payload[:1] == b"\x04")
-    expected: Counter[bytes] = Counter()
-    for line in _truth(transport):
-        expected[bytes.fromhex(str(line["inner"]))] += on_wire.pop(
-            bytes.fromhex(str(line["outer"])), 0
-        )
-    opened = Counter(bytes(r.payload) for r in _records(path) if r.content_type == PACKET_LABEL)
-    with zpf.open(path) as handle:
-        failed = sum(
-            1
-            for block in handle.blocks()
-            if isinstance(block, Undecoded) and block.reason == "decrypt-failed"
-        )
-    ok = opened == expected and failed == sum(on_wire.values())
+    truth = _truth(transport)
+    expected, left = examplekit.arrivals(example, truth, transport)
+    opened = examplekit.opened_in(example, path)
+    failed = examplekit.failures_in(example, path)
+    problems = examplekit.tunnel_problems(example, truth, transport, path)
     detail = (
         f"{sum(opened.values())} packets opened of {sum(expected.values())} that arrived "
-        f"intact; {failed} decrypt-failed of {sum(on_wire.values())} other datagrams"
+        f"intact; {failed} {example.failure} of {sum(left.values())} other datagrams"
     )
-    report.line(ok, f"{what} tunnel", detail)
+    report.line(not problems, f"{what} tunnel", "; ".join([detail, *problems]))
 
 
 def _inner(
-    report: Report, tools: Tools, dns: Spec, capture: Path, packets: Path, what: str
+    report: Report, tools: Tools, example: Example, capture: Path, packets: Path, what: str
 ) -> None:
-    """Check the traffic inside the tunnel: the DNS decoded from it is what arrived.
+    """Check the traffic inside the tunnel: what decodes from it is what arrived.
 
-    ``zpfwire`` turns the decrypted packets back into the conversation they
-    carried, and ``dns.yaml`` reads it. Each direction's DNS must be, message for
-    message, the DNS inside the sealed datagrams that reached the wire unchanged.
+    ``zpfwire`` turns the opened packets back into the conversation they
+    carried, and the example's ``inside`` spec reads it. Each direction's
+    messages must be, one for one, the payloads of the sealed packets whose
+    datagrams reached the wire unchanged.
     """
+    assert example.inside is not None
     inner = packets.with_suffix(".inner.zpf")
-    decoded_path = packets.with_suffix(".inner.dns.zpf")
-    tools.sessionize(packets, inner, PACKET_LABEL)
-    run(Decoder(dns), inner, decoded_path, produced_by=PRODUCED_BY, produced_at=PRODUCED_AT)
+    decoded_path = packets.with_suffix(".inner.decoded.zpf")
+    tools.sessionize(packets, inner, example.packet_label)
+    decoder = Decoder(Spec.from_file(example.path(example.inside)))
+    run(decoder, inner, decoded_path, produced_by=PRODUCED_BY, produced_at=PRODUCED_AT)
     transport = capture.with_suffix(".zpf")
-    on_wire = Counter(bytes(r.payload) for r in _records(transport) if r.payload[:1] == b"\x04")
-    expected: dict[str, Counter[bytes]] = {"c2s": Counter(), "s2c": Counter()}
-    for line in _truth(transport):
-        packet = bytes.fromhex(str(line["inner"]))
-        dns_message = packet[(packet[0] & 15) * 4 + 8 :]
-        expected[str(line["direction"])][dns_message] += on_wire.get(
-            bytes.fromhex(str(line["outer"])), 0
-        )
-    decoded: dict[str, Counter[bytes]] = {"c2s": Counter(), "s2c": Counter()}
-    with zpf.open(decoded_path) as handle:
-        blocks = list(handle.blocks())
-    endpoints = {
-        (b.session_id, b.participant_id): str(b.endpoint)
-        for b in blocks
-        if isinstance(b, Participant)
-    }
-    for block in blocks:
-        if isinstance(block, Record):
-            sender = endpoints[block.session_id, block.sender_pid]
-            decoded["c2s" if "10.8.0.2:" in sender else "s2c"][bytes(block.payload)] += 1
+    expected = examplekit.expected_inside(example, _truth(transport), transport)
+    found = examplekit.messages_by_direction(decoded_path)
+    decoded = {direction: Counter(messages) for direction, messages in found.items()}
     problems = _COMPARE.conformance_problems(decoded_path, inner)
     ok = decoded == expected and not problems
     total = sum(sum(c.values()) for c in decoded.values())
-    detail = f"{total} DNS messages, each direction the DNS that arrived intact"
+    detail = f"{total} messages, each direction what arrived intact"
     if problems:
         detail += f"; {problems[0]}"
     report.line(ok, f"{what} inner", detail)
@@ -693,11 +662,10 @@ def pipeline(tools: Tools, work: Path, baseline: Path | None = None) -> Report:
     print(f"{tools.version(tools.packeteer_bin)}; {tools.version(tools.zpfwire_bin)}")
     print(f"work directory: {work}\n", flush=True)
 
-    # The cipher is the example's, registered as a user's process would, and
+    # Each example's transforms, registered as a user's process would, and
     # before the modules are compiled, since a module binds when it is imported.
-    if str(WIREGUARD) not in sys.path:
-        sys.path.append(str(WIREGUARD))  # as `--load-transforms` does: wg_crypto beside it
-    _load(WIREGUARD / "wg_transforms.py", "wg_transforms")
+    for example in DESCRIBED.values():
+        example.module(Path(example.transforms).stem)
     specs = {name: Spec.from_file(path) for name, path in SPECS.items()}
     modules = {
         (name, emit): _compile(spec, name, emit, work)
@@ -741,8 +709,10 @@ def pipeline(tools: Tools, work: Path, baseline: Path | None = None) -> Report:
                 if emit is Emit.FIELD and name == source.protocol:
                     _shape(report, source, interpreted, transport, f"{what} interpreted")
                     _shape(report, source, compiled, transport, f"{what} compiled")
-                if emit is Emit.FIELD and name == source.protocol == "wireguard":
-                    _inner(report, tools, specs["dns"], capture, interpreted, what)
+                described = DESCRIBED.get(name)
+                inside = described is not None and described.inside is not None
+                if emit is Emit.FIELD and name == source.protocol and inside:
+                    _inner(report, tools, described, capture, interpreted, what)
     return report
 
 
@@ -775,14 +745,11 @@ def _decode_both(
 
 
 def _params(name: str, capture: Path) -> dict[str, object] | None:
-    """Return the parameters a spec runs with over an input: WireGuard's key log."""
-    if name != "wireguard":
+    """Return the parameters a spec runs with over an input: an example's key log."""
+    if name not in DESCRIBED:
         return None
     log = capture.with_suffix(".keys.json")
-    if not log.exists():
-        return {"keys": {}}
-    logged = json.loads(log.read_text())
-    return {"keys": {int(index): bytes.fromhex(value[4:]) for index, value in logged.items()}}
+    return DESCRIBED[name].params(log if log.exists() else None)
 
 
 def _first_difference(left: Path, right: Path) -> str | None:

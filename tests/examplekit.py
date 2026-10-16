@@ -9,8 +9,11 @@ sealed, run the whole chain through packeteer and ``zpfwire`` and back, fuzz
 it, and run it from the command line. An example's own test file then holds
 what is its own: its algorithm's known answers, its messages, its corner cases.
 
-Nothing here imports pytest, so ``tools/pipeline.py`` can use the oracle too.
-Describe an example once, with :class:`Example`, and pass that.
+An example describes itself once, in ``example.json`` beside its spec, and
+:meth:`Example.load` reads it: the tests and ``tools/pipeline.py`` take the
+same description, so adding an example to the pipeline is that file, not an
+edit to the pipeline. Nothing at this module's top imports pytest, so the
+pipeline can use the oracle too.
 """
 
 from __future__ import annotations
@@ -23,10 +26,10 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol
 
 import zpf
-from test_stage_transforms import decode
 from zpf.blocks import Participant, Record, Undecoded
 
 from kober import transforms as transforms_module
@@ -39,7 +42,7 @@ from kober.spec import Spec
 from kober.transforms import Registry
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
     from types import ModuleType
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,6 +56,10 @@ ZPFWIRE = ROOT.parent / "python-zipline-wire" / ".venv" / "bin" / "zpfwire"
 #: two ends, as the examples' READMEs write them.
 CLIENT, SERVER = "10.8.0.2", "10.8.0.1"
 TUNNEL_ENDS = ("198.51.100.7", "203.0.113.9")
+
+#: What an example's ``example.json`` is called.
+DESCRIPTION = "example.json"
+
 
 class Patcher(Protocol):
     """What the kit undoes after a test: pytest's ``MonkeyPatch`` is one."""
@@ -73,7 +80,9 @@ CANONICAL_REASONS = frozenset(s.value for s in NodeStatus if s is not NodeStatus
 
 @dataclass(frozen=True)
 class Example:
-    """One example, described once for every test that needs it.
+    """One example, described once for every test, and for the pipeline.
+
+    Every attribute but ``name`` is a key of the example's ``example.json``.
 
     Attributes:
         name: Its folder under ``examples/``.
@@ -88,9 +97,20 @@ class Example:
             with nothing to supply.
         tunnel: The packeteer tunnel module's file name, or ``None``.
         port: The tunnel's UDP port.
-        carries_packet: Whether an outer datagram's payload is one that carries
-            a packet, rather than a control message such as a handshake. Only
-            those are checked against what was sealed.
+        tunnel_args: ``--tunnel-arg`` values every run passes, beyond the truth
+            file and the key log, such as ``rekey_after=10``.
+        packet_prefix: The bytes an outer datagram that carries a packet starts
+            with, rather than a control message such as a handshake (hex in
+            the file). Only those are checked against what was sealed; empty,
+            every datagram is.
+        inside: The spec, relative to the folder, that reads the traffic inside
+            the tunnel, or ``None``.
+        traffic: packeteer's arguments for that traffic, after ``stream``;
+            ``{folder}`` in one stands for the example's folder. It is datagrams,
+            each payload one message ``inside`` decodes, so what decodes inside
+            is checked exactly.
+        inputs: The pipeline's inputs: a name for each, and what the tunnel's
+            datagrams suffer in it, as ``--tunnel-*`` flags.
 
     """
 
@@ -103,7 +123,40 @@ class Example:
     keys: str | None = None
     tunnel: str | None = None
     port: int = 51820
-    carries_packet: Callable[[bytes], bool] = field(default=lambda _payload: True)
+    tunnel_args: tuple[str, ...] = ()
+    packet_prefix: bytes = b""
+    inside: str | None = None
+    traffic: tuple[str, ...] = ()
+    inputs: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+
+    @classmethod
+    def load(cls, name: str) -> Example:
+        """Read an example's description from its ``example.json``."""
+        described = json.loads((EXAMPLES / name / DESCRIPTION).read_text())
+        unknown = set(described) - {f for f in cls.__dataclass_fields__ if f != "name"}
+        if unknown:
+            msg = f"{name}/{DESCRIPTION}: unknown keys {sorted(unknown)}"
+            raise ValueError(msg)
+        for key in ("tunnel_args", "traffic"):
+            if key in described:
+                described[key] = tuple(described[key])
+        if "packet_prefix" in described:
+            described["packet_prefix"] = bytes.fromhex(described["packet_prefix"])
+        if "inputs" in described:
+            described["inputs"] = MappingProxyType(
+                {input_name: tuple(flags) for input_name, flags in described["inputs"].items()}
+            )
+        return cls(name=name, **described)
+
+    def carries_packet(self, payload: bytes) -> bool:
+        """Return whether an outer datagram's payload is one that carries a packet."""
+        return payload.startswith(self.packet_prefix)
+
+    def inner_traffic(self) -> list[str]:
+        """Return packeteer's arguments for the traffic inside, ``{folder}`` filled in."""
+        return [arg.replace("{folder}", str(self.folder)) for arg in self.traffic]
 
     @property
     def folder(self) -> Path:
@@ -153,6 +206,11 @@ class Example:
         if key_log is None:
             return {self.keys: {}}
         return dict(read_params(self.model(), [f"{self.keys}=file:{key_log}"]))
+
+
+def discover() -> list[Example]:
+    """Return every example that describes itself, by folder name."""
+    return [Example.load(d.parent.name) for d in sorted(EXAMPLES.glob(f"*/{DESCRIPTION}"))]
 
 
 # --- what was sealed, and what a decode must find ---
@@ -368,49 +426,71 @@ class Run:
         return self.folder / "out.field.zpf"
 
 
+def stream_args(
+    example: Example,
+    pcap: Path,
+    truth: Path,
+    key_log: Path,
+    inner: Sequence[str] | None = None,
+    impairments: Sequence[str] = (),
+    seed: int = 7,
+) -> list[str]:
+    """Return ``packeteer``'s arguments for traffic through the example's tunnel module.
+
+    Args:
+        example: The example.
+        pcap: Where packeteer writes the capture.
+        truth: Where the tunnel module writes what it sealed.
+        key_log: Where it writes its key log, if the example has keys.
+        inner: packeteer's arguments for the traffic inside, after ``stream``;
+            the example's own ``traffic`` when ``None``.
+        impairments: What the tunnel's datagrams suffer, as ``--tunnel-*`` flags.
+        seed: packeteer's seed.
+
+    Returns:
+        Everything after the ``packeteer`` executable.
+
+    """
+    if example.tunnel is None:
+        msg = f"{example.name} has no tunnel module"
+        raise ValueError(msg)
+    args = [f"truth={truth}", *example.tunnel_args]
+    if example.keys is not None:
+        args.append(f"keylog={key_log}")
+    return [
+        "stream", *(example.inner_traffic() if inner is None else inner),
+        "--client-ip", CLIENT, "--server-ip", SERVER,
+        "--udp-tunnel", *TUNNEL_ENDS, "--tunnel-port", str(example.port),
+        "--tunnel-module", str(example.path(example.tunnel)),
+        *(item for arg in args for item in ("--tunnel-arg", arg)),
+        *impairments, "--seed", str(seed), "--pcap", str(pcap),
+    ]
+
+
 def generate(
     example: Example,
     folder: Path,
-    inner: Sequence[str],
+    inner: Sequence[str] | None = None,
     impairments: Sequence[str] = (),
-    tunnel_args: Iterable[str] = (),
     seed: int = 7,
 ) -> Run:
     """Generate traffic through the example's tunnel module, and convert it.
 
-    Args:
-        example: The example.
-        folder: Where to write the capture, the key log and the truth.
-        inner: packeteer's arguments for the traffic inside, after ``stream``.
-        impairments: What the tunnel's datagrams suffer, as ``--tunnel-*`` flags.
-        tunnel_args: Further ``--tunnel-arg`` values, such as ``rekey_after=10``.
-        seed: packeteer's seed.
-
-    Returns:
-        The run.
-
+    The arguments are :func:`stream_args`'s; every file goes in ``folder``.
     """
-    assert example.tunnel is not None, f"{example.name} has no tunnel module"
     pcap, outer = folder / "tunnel.pcap", folder / "outer.zpf"
-    args = [f"truth={folder / 'truth.jsonl'}", *tunnel_args]
-    if example.keys is not None:
-        args.append(f"keylog={folder / 'keys.json'}")
-    subprocess.run(
-        [
-            str(PACKETEER), "stream", *inner, "--client-ip", CLIENT, "--server-ip", SERVER,
-            "--udp-tunnel", *TUNNEL_ENDS, "--tunnel-port", str(example.port),
-            "--tunnel-module", str(example.path(example.tunnel)),
-            *(item for arg in args for item in ("--tunnel-arg", arg)),
-            *impairments, "--seed", str(seed), "--pcap", str(pcap),
-        ],
-        check=True, capture_output=True,
+    argv = stream_args(
+        example, pcap, folder / "truth.jsonl", folder / "keys.json", inner, impairments, seed
     )
+    subprocess.run([str(PACKETEER), *argv], check=True, capture_output=True)
     subprocess.run([str(ZPFWIRE), "convert", "-q", str(pcap), "-o", str(outer)], check=True)
     return Run(folder, outer)
 
 
 def open_tunnel(example: Example, run: Run, registry: Registry) -> list[tuple[object, ...]]:
     """Decode the tunnel with both drivers, which must agree; the file is ``run.opened``."""
+    from test_stage_transforms import decode  # pytest's, so not at the top: see the docstring
+
     return decode(
         example.model(), run.outer, run.folder,
         params=example.params(run.key_log), transforms=registry,
@@ -435,6 +515,8 @@ def decode_inside(spec: Path, inner: Path, folder: Path) -> list[tuple[object, .
 
     The file is ``folder / "out.message.zpf"``.
     """
+    from test_stage_transforms import decode  # pytest's, so not at the top: see the docstring
+
     folder.mkdir(exist_ok=True)
     return decode(Spec.from_file(spec), inner, folder, Emit.MESSAGE)
 

@@ -729,6 +729,35 @@ multiplied the arrivals, since every DNS query in the corpus is the same bytes;
 the oracle counts by each sealed packet's own datagram, as the original did,
 and its docstring says why.
 
+#### Stage 7, C — done (2026-10-16)
+
+An example describes itself once, in `examples/<name>/example.json`, and
+`Example.load` reads it: every attribute of B's `Example`, plus what C needed,
+`tunnel_args`, `packet_prefix` (hex; what was a callable in B could not be
+data), `inside` and `traffic` (the traffic inside, `{folder}` standing for the
+example's folder), and `inputs`, a name and its `--tunnel-*` flags for each. A
+key the kit does not know is refused, since a misspelt one would be a default
+the writer never chose. The WireGuard test file loads it too, so the
+description exists once, and `packet_label` moves to `dec:`/`net:` in one place
+when the zpf 0.6 port comes.
+
+`tools/pipeline.py` names no example: it finds every `example.json`, adds its
+spec to those run over every input, loads its transforms, generates its inputs
+through `stream_args` (the kit's, shared with the tests' `generate`), reads its
+key log through `Example.params`, and checks the tunnel and the traffic inside
+with the kit's oracles. The input names are the description's, so a baseline
+carries over: against the Stage 6 run, 0 outputs differ and every check holds
+(271). Mutation-checked: the padding trim one byte short fails all 15 tunnel
+and inner checks; a failing tunnel line now carries the oracle's own words
+("34 unexpected, 34 missing"), where the counts alone read as a pass.
+`tests/test_examplekit.py` checks every description against its folder and
+spec, so a `failure` that drifts from the spec's `fails_as` fails there.
+
+**What D tests here:** the inside check is exact only for datagram traffic,
+which `traffic` must be; a TCP inside stays a test-file matter, as HTTP is for
+WireGuard. And the tunnel ends, the inner addresses, and seed 7 are the kit's,
+not the description's.
+
 #### Q-D — which protocol is the second example?
 
 **Leaning: a tunnel of PackBits-compressed datagrams.** It has to differ from

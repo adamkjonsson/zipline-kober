@@ -15,6 +15,7 @@ bytes.
 | [`wg_handshake.py`](wg_handshake.py) | WireGuard's handshake, Noise IK, both peers' sides of it. |
 | [`wg_seal.py`](wg_seal.py) | A tunnel module for `packeteer stream`: it seals the traffic packeteer generates, with a real handshake, and writes the key log and what it sealed. |
 | [`dns.json`](dns.json) | A DNS query and its answer, the traffic the commands below send through the tunnel, one each way. |
+| [`example.json`](example.json) | The example, described for its tests and for `tools/pipeline.py`: which file is which, what an opened packet is called, what the traffic inside is, and the pipeline's inputs. |
 
 ## Adapting this to your own protocol
 
@@ -30,8 +31,9 @@ protocol of yours in `examples/<yours>/`:
 | `wg_handshake.py` | **Delete**, unless your protocol agrees keys in messages of its own. Even then, kober decodes those as structure only (see *What it does not do*). |
 | `wg_seal.py` | **Replace** if your protocol is a tunnel: a packeteer tunnel module that turns each inner packet into what carries it, writing the files below. **Delete** if it is not. |
 | `dns.json` | **Keep or replace**: the traffic sent through the tunnel. Any packeteer payload works. |
+| `example.json` | **Rewrite**, key for key; the keys are `Example`'s attributes in `tests/examplekit.py`, and a key it does not know is refused. With it, the deeper pipeline runs your spec over every input and generates your `inputs` through your tunnel module, checking each exactly; nothing in `tools/pipeline.py` changes. |
 | `README.md` | **Rewrite**, keeping the order: generate, decode, go inside, and what it cannot do. |
-| `tests/test_wireguard_example.py` | **Copy the shape**, outside this folder. Describe your example once as an `Example` from `tests/examplekit.py`, and the kit does what every example's tests need: load your modules by path, read your key log as `--param` does, check a decode against your truth file exactly, run the whole chain where packeteer and `zpfwire` are checked out beside it, hold a fuzzed decode to every shipped spec's promises, and run `kober run` as the README does. What is left is your own: your algorithm against outside known answers, and against another implementation where there is one, and your spec over messages built in the test. |
+| `tests/test_wireguard_example.py` | **Copy the shape**, outside this folder. `Example.load("<yours>")` reads your `example.json`, and with it the kit does what every example's tests need: load your modules by path, read your key log as `--param` does, check a decode against your truth file exactly, run the whole chain where packeteer and `zpfwire` are checked out beside it, hold a fuzzed decode to every shipped spec's promises, and run `kober run` as the README does. What is left is your own: your algorithm against outside known answers, and against another implementation where there is one, and your spec over messages built in the test. |
 
 Which of these your protocol needs depends on its shape, which the guide
 covers: [Bringing your own code](../../docs/guides/your-own-code.md), *Which
@@ -57,6 +59,10 @@ should provide in the same form:
   packeteer's `--tunnel-module` requires. `args` are the `--tunnel-arg` pairs,
   and the example takes `truth`, `keylog` (if it has keys) and `seed`, and
   derives everything random from the seed so a run reproduces.
+- **The description**, `example.json`: what the tests and the pipeline read
+  about the example, rather than knowing it by name. Its `traffic` is the
+  traffic inside as datagrams, each payload one message its `inside` spec
+  decodes, so what decodes inside is checked exactly.
 
 ## Generating traffic
 

@@ -30,7 +30,8 @@ itself came from the second kind, and none of them needed a clever test.
 | `test_stage_transforms.py` | What a stage writes for a transform, through both drivers: take-over, a failure that neither confirms nor declines, the digest, and a tunnel feeding a second stage. |
 | `test_map_params.py` | Map parameters and `keys[receiver]`: loaded, checked, decoded by both drivers, read from a JSON key log, and in the digest, with no value ever written. |
 | `test_fails_as.py` | A transform's declared `fails_as`: loaded, checked against the format's classes, planned alike by both backends, and written with its `reason_class`. |
-| `examplekit.py` | Not tests: what every bring-your-own-code example's tests need, described once by an `Example` — loading its modules by path, its key log read as `--param` reads it, the oracle that checks a decode against what its tunnel module sealed, the whole chain, fuzz invariants, and `kober run`. No pytest import, so `tools/pipeline.py` can use it too. |
+| `examplekit.py` | Not tests: what every bring-your-own-code example's tests need, described once by an `Example` read from the example's `example.json` — loading its modules by path, its key log read as `--param` reads it, the oracle that checks a decode against what its tunnel module sealed, the whole chain, fuzz invariants, and `kober run`. No pytest import, so `tools/pipeline.py` can use it too. |
+| `test_examplekit.py` | Every `example.json`: the files it names exist, its failure and key parameter are its spec's, and a key the kit does not know is refused. |
 | `test_wireguard_example.py` | `examples/wireguard/`: its cipher against RFC 8439's and RFC 7748's own vectors (and `cryptography`, where installed), its handshake, its spec, its tunnel module, a tunnel decoded by both drivers, and `kober run` with a key log. Some tests reach outside and skip without it: Wireshark opening what the example seals (needs `tshark`), and the whole chain through packeteer, `zpfwire`, the tunnel, `zpfwire` again and `dns.yaml` or `http.yaml` (needs the sibling checkouts, `zpfwire` 0.5.0 for the inner hop). |
 | `test_cli.py` | All five verbs, driving `main()` directly. |
 | `test_examples.py` | The shipped `examples/` specs — they must check clean, carry documentation, and still decode. |
@@ -191,7 +192,9 @@ It is one command, and **run it before a release, or after touching
 It needs two sibling checkouts with their own venvs, neither a dependency of
 this project — `../packeteer` and `../python-zipline-wire`, or wherever
 `--packeteer` and `--wire` say: packeteer 0.18.0 or later, for its UDP tunnel,
-and `zpfwire` 0.5.0 or later, for a `.zpf` of packets. It builds fifteen inputs:
+and `zpfwire` 0.5.0 or later, for a `.zpf` of packets. It builds ten inputs of
+its own, and those of every example that describes itself in an `example.json`
+(`tests/examplekit.py`); WireGuard's five make fifteen:
 
 | Input | What it is for |
 | --- | --- |
@@ -203,13 +206,14 @@ and `zpfwire` 0.5.0 or later, for a `.zpf` of packets. It builds fifteen inputs:
 | `gzip_clean` | The same traffic with no loss, checked exactly against the reference reader. |
 | `packet_loss`, `tcp_lossy_ts`, `tcp_reorder_ts` | Real captures kept for their loss and reordering. They are not DNS or HTTP; they are driver structure. |
 | `http_stream_1` | A real HTTP capture, 2000 messages, lossless. |
-| `wg_clean`, `wg_loss`, `wg_corrupt`, `wg_reorder`, `wg_duplicate` | DNS both ways through `examples/wireguard/wg_seal.py`: a real handshake, a rekey every ten packets, and one tunnel impairment each, or none, so a count that moves says which impairment moved it. The key log and what was sealed are written beside the capture. |
+| `wg_clean`, `wg_loss`, `wg_corrupt`, `wg_reorder`, `wg_duplicate` | From `examples/wireguard/example.json`. DNS both ways through `examples/wireguard/wg_seal.py`: a real handshake, a rekey every ten packets, and one tunnel impairment each, or none, so a count that moves says which impairment moved it. The key log and what was sealed are written beside the capture. |
 
 Each is converted with `zpfwire convert` and run through **every** example
-spec — DNS, HTTP and WireGuard, each over every input, since a spec meeting a
-stream in another protocol is a case the driver has to handle too — by the
-interpreter and by a module compiled fresh from the spec, at both
-granularities. WireGuard's is given the input's key log, or an empty table. A
+spec — DNS, HTTP and every described example's, each over every input, since
+a spec meeting a stream in another protocol is a case the driver has to handle
+too — by the interpreter and by a module compiled fresh from the spec, at both
+granularities. A described example's is given the input's key log, or an empty
+table. A
 `datagram` spec over a byte stream is refused rather than decoded, and the
 check there is that **both** drivers refuse it: the compiled one did not, until
 these inputs ran the first datagram spec the pipeline had. For each file, it
@@ -236,12 +240,15 @@ checks:
 - **The inflated content**, over the two compressed-body inputs: every
   `http.content` record must be byte for byte a document `tools/gzip_http.py`
   compressed, and over the lossless one every compressed body must be there.
-- **The tunnel**, over the WireGuard inputs, exactly, against what `wg_seal.py`
-  sealed: a packet whose datagram reached the wire unchanged opens once per
-  arrival, and every other transport datagram is one `decrypt-failed` region.
-- **The traffic inside**, over the same: `zpfwire` turns the decrypted packets
-  back into the DNS conversation, `dns.yaml` decodes it, and each direction
-  must be, message for message, the DNS inside what arrived intact.
+- **The tunnel**, over a described example's inputs, exactly, against what
+  its tunnel module sealed, by `examplekit`'s oracle, the one its tests use: a
+  packet whose datagram reached the wire unchanged opens once per arrival, and
+  every other datagram that carries a packet is one region named its failure
+  (`decrypt-failed`, for WireGuard).
+- **The traffic inside**, over the same: `zpfwire` turns the opened packets
+  back into the conversation, the example's `inside` spec decodes it
+  (`dns.yaml`, for WireGuard), and each direction must be, message for
+  message, what was inside what arrived intact.
 
 It prints one line per check and exits non-zero if any failed, keeping the work
 directory. `--work DIR` keeps it anyway, and `--baseline DIR` compares every
