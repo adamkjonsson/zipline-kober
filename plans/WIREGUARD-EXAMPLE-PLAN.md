@@ -1,6 +1,6 @@
 # Phase plan: a WireGuard tunnel, as the worked example of bringing your own code
 
-**State: Stages 0 to 6 done (2026-10-16); acceptance 1 waits on the `zpf` 0.6 port.** `0.6.0.dev0`, with the
+**State: Stages 0 to 6 done (2026-10-16); acceptance 1 waits on the `zpf` 0.6 port; Stage 7 (the example as a template) is next.** `0.6.0.dev0`, with the
 pipeline baseline taken on the unchanged `0.5.0` code in
 `../kober-baselines/v0.5.0`, outside the repository. Map parameters and
 `keys[receiver]` landed in both backends (*Stage 1 — done*). `fails_as` is
@@ -644,6 +644,80 @@ is that both drivers refuse it, which is how the bug below was found.
 7. Written; whether it is the page a user with another protocol would follow is
    a reader's judgement, and the one reader whose judgement settles it is not
    its author.
+
+### Stage 7 — the example as a template
+
+*Added 2026-10-16.* The example is meant to serve as a template for writers of
+other transforms, not only as a worked example of one. Read that way, its parts
+are right and its pattern is buried:
+
+- **WireGuard dominates the folder.** About 600 of its 1,050 lines are
+  WireGuard's own cryptography and handshake, which no other protocol reuses,
+  and nothing tells a writer which files to replace, keep or delete.
+- **The reusable test machinery is written in WireGuard's terms.** The chain
+  runner, the truth oracle, the outside-check pattern, the fuzz invariants and
+  the command-line run are general, but they name `wg_seal.py`,
+  `keys[receiver]` and DNS, so a second example would copy and edit them.
+- **The conventions are implicit**: the key log's shape, `truth.jsonl`'s
+  fields, the tunnel module's arguments.
+- **The pipeline knows it by name**: `_params` tests for `"wireguard"`, and
+  `_tunnel` and `_inner` assume DNS inside.
+- **It is tunnel-shaped**, and nothing says which steps a protocol of another
+  shape needs.
+- **It is one instance.** A template drawn from one example is a guess about
+  what is general.
+
+Four parts, in order, with D allowed to revise A–C, since it is what tests them:
+
+- **A. Adapting this example.** A README section with a checklist per file
+  (replace, keep, delete) and the conventions written down as a contract: the
+  key log, the truth file, the tunnel module's arguments. The guide gains *which
+  steps your protocol needs*, by shape: a tunnel with keys, a tunnel without, a
+  transformed field inside a protocol with no generator of its own.
+- **B. A shared test kit.** The reusable machinery out of
+  `tests/test_wireguard_example.py` into a module of its own, parameterised by
+  an example's description: its spec, its transforms module, its tunnel module,
+  its parameters (if any), what its packets are labelled and what its failure
+  is called, and what is inside. WireGuard's test file then holds only what is
+  WireGuard's, and a new example's starts short.
+- **C. A data-driven pipeline hook.** An example says what inputs it
+  generates and what is inside them, and `tools/pipeline.py` reads that rather
+  than naming the example: adding one is a file in its folder, not an edit to
+  the pipeline.
+- **D. A second, minimal example, built from the template.** Written by
+  following A's checklist and B's kit, with every place they did not fit
+  recorded and fed back into them.
+
+#### Q-D — which protocol is the second example?
+
+**Leaning: a tunnel of PackBits-compressed datagrams.** It has to differ from
+WireGuard where the template might be wrong, and still exercise everything that
+makes this an example of *your own code*:
+
+- **It needs the writer's code.** PackBits, the run-length scheme TIFF uses, is
+  not in the standard library, unlike `deflate`, which a spec names with no code
+  at all and so would test nothing here.
+- **It has no keys and no handshake**, so it takes the parameter-free path
+  WireGuard never does, and a template that assumed a key log shows it.
+- **It still has an outside known answer**: the TIFF 6.0 specification's worked
+  PackBits example, extracted as RFC 8439's vectors were, so the template's
+  *check your code against something that is not your code* step is exercised,
+  not skipped.
+- **Its failure is different**: a run that overruns its declared length, which
+  names a failure (`fails_as`) without any key in it.
+- **It is small**: a codec of a few dozen lines, a spec, a transforms module and a
+  tunnel module, so the template's overhead is visible rather than hidden
+  behind cryptography.
+
+#### Acceptance for Stage 7
+
+1. A writer can tell, from the README alone, which of the example's files to
+   replace, keep or delete, and what each convention requires.
+2. The second example's test file is mostly about its own protocol: the kit
+   carries the chain, the oracle, the fuzz invariants and the command-line run.
+3. The second example reaches the pipeline without an edit to
+   `tools/pipeline.py`'s code.
+4. Every place A–C did not fit D is recorded here, with what was changed.
 
 ## Found on the way: the compiled driver decoded a datagram spec over a byte stream
 
