@@ -93,8 +93,11 @@ This documentation is being written, in the order the work needs it:
   documents every key the loader accepts.
 - **Looking something up?** The [API reference](api/index.md) covers each
   public module.
+- **Decoding a protocol a spec cannot read alone**, because it is encrypted or
+  compressed? [Bringing your own code](guides/your-own-code.md) walks through
+  a WireGuard tunnel, from the spec to traffic you can check it against.
 
-User-facing tutorials and guides come once the API settles. Until then,
+More user-facing guides come once the API settles. Until then,
 [`README.md`](https://github.com/adamkjonsson/zipline-kober) is the short
 version, [`DESIGN.md`](https://github.com/adamkjonsson/zipline-kober/blob/main/DESIGN.md)
 is the reasoning, and `plans/` records how it was built.
@@ -105,5 +108,6 @@ is the reasoning, and `plans/` records how it was built.
 
 dev/index
 format/index
+guides/index
 api/index
 ```

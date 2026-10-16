@@ -456,7 +456,8 @@ of its own, or from the command line in a module `--load-transforms` runs: a
 cipher, which the standard library has none of, or `br` from a Brotli package.
 A module loaded by path can import the modules beside it, as a script can.
 `examples/wireguard/` is a complete one: a spec, a cipher, and the module that
-registers it.
+registers it, walked through in
+[Bringing your own code](../guides/your-own-code.md).
 A transform is a callable taking the source's bytes, `limit`, and the spec's
 `args` by name, and returning at most `limit` bytes. What it
 raises makes the source `undecodable`, or the transform's `fails_as`, and its

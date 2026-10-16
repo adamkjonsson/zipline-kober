@@ -515,13 +515,8 @@ ZPFWIRE = (
 )
 
 #: A DNS query and its answer, raw: what travels inside the tunnel, both ways.
-DNS_EXCHANGE = [
-    {"dns": {"raw": "abcd01000001000000000000076578616d706c6503636f6d0000010001"},
-     "direction": "c2s"},
-    {"dns": {"raw": "abcd81800001000100000000076578616d706c6503636f6d0000010001"
-                    "c00c000100010000003c00045db8d822"},
-     "direction": "s2c"},
-]
+#: The file the README's commands send.
+DNS_EXCHANGE = json.loads((EXAMPLE / "dns.json").read_text())
 
 #: What the tunnel's own datagrams suffer, every impairment at once.
 TUNNEL_IMPAIRED = [

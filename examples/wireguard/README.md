@@ -14,6 +14,7 @@ bytes.
 | [`wg_crypto.py`](wg_crypto.py) | ChaCha20-Poly1305 (RFC 8439) and X25519 (RFC 7748), standard library only. Shared by both sides, which is why it is a file of its own. |
 | [`wg_handshake.py`](wg_handshake.py) | WireGuard's handshake, Noise IK, both peers' sides of it. |
 | [`wg_seal.py`](wg_seal.py) | A tunnel module for `packeteer stream`: it seals the traffic packeteer generates, with a real handshake, and writes the key log and what it sealed. |
+| [`dns.json`](dns.json) | A DNS query and its answer, the traffic the commands below send through the tunnel, one each way. |
 
 ## Generating traffic
 
@@ -22,7 +23,7 @@ generates the traffic inside the tunnel and hands each packet it sends to
 `wg_seal.py`, which returns the WireGuard datagrams that carry it:
 
 ```console
-packeteer stream --protocol udp --payload dns --protocol-messages dns.json \
+packeteer stream --protocol udp --payload dns --protocol-messages examples/wireguard/dns.json \
     --client-ip 10.8.0.2 --server-ip 10.8.0.1 --server-port 53 --packets 40 \
     --udp-tunnel 198.51.100.7 203.0.113.9 --tunnel-port 51820 \
     --tunnel-module examples/wireguard/wg_seal.py \

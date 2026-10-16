@@ -265,15 +265,6 @@ def _gzip_http_clean(tools: Tools, out: Path) -> None:
     _gzip_http(tools, out, lossy=False)
 
 
-#: A DNS query and its answer, raw: what travels inside the WireGuard tunnel,
-#: both ways.
-WIREGUARD_DNS = [
-    {"dns": {"raw": "abcd01000001000000000000076578616d706c6503636f6d0000010001"},
-     "direction": "c2s"},
-    {"dns": {"raw": "abcd81800001000100000000076578616d706c6503636f6d0000010001"
-                    "c00c000100010000003c00045db8d822"},
-     "direction": "s2c"},
-]
 
 #: Inner packets per WireGuard input, and sealed packets per session: four
 #: sessions, so every input rekeys.
@@ -289,11 +280,9 @@ def _wireguard(*impairment: str) -> Callable[[Tools, Path], None]:
     """
 
     def make(tools: Tools, out: Path) -> None:
-        messages = out.with_suffix(".messages.json")
-        messages.write_text(json.dumps(WIREGUARD_DNS))
         tools.packeteer_cmd(
             "stream", "--protocol", "udp", "--payload", "dns",
-            "--protocol-messages", str(messages),
+            "--protocol-messages", str(WIREGUARD / "dns.json"),
             "--client-ip", "10.8.0.2", "--server-ip", "10.8.0.1", "--server-port", "53",
             "--packets", str(WIREGUARD_PACKETS),
             "--udp-tunnel", "198.51.100.7", "203.0.113.9", "--tunnel-port", "51820",

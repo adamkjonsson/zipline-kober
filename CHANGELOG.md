@@ -122,6 +122,19 @@ minor bump here too.
   read, a unit's class or a constant, cannot be told from the field by where
   it stands, and `kober compile` refuses it, saying why.
 
+### Documentation
+
+- **A guides section, and its first guide: *Bringing your own code: a
+  WireGuard tunnel***. For a protocol a spec can frame but not read, because it
+  is encrypted or compressed: what the spec declares and what the caller's
+  code supplies, choosing a key per message, telling apart what decodes
+  differently before opening it, generating traffic to check against with
+  packeteer, checking the caller's own code against something that is not it,
+  and the conversations inside. Linked from the index and from
+  `types.md#transform`.
+- `examples/wireguard/dns.json`, the traffic the README's commands send through
+  the tunnel, which the README named and did not ship.
+
 ## [0.5.0] - 2026-09-28
 
 ### Added

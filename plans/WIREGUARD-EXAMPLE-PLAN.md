@@ -1,6 +1,6 @@
 # Phase plan: a WireGuard tunnel, as the worked example of bringing your own code
 
-**State: Stages 0 to 5 done (2026-10-16).** `0.6.0.dev0`, with the
+**State: Stages 0 to 6 done (2026-10-16); acceptance 1 waits on the `zpf` 0.6 port.** `0.6.0.dev0`, with the
 pipeline baseline taken on the unchanged `0.5.0` code in
 `../kober-baselines/v0.5.0`, outside the repository. Map parameters and
 `keys[receiver]` landed in both backends (*Stage 1 — done*). `fails_as` is
@@ -13,7 +13,8 @@ transform, decoding datagrams built in the tests (*Stage 3 — done*), and
 Wireshark opens (*Stage 4 — done*). The traffic inside comes back out
 through zpfwire#35 and decodes to exactly what was sealed (*Stage 5 — done*).
 Ready for `net:ip`, with `len` and a keepalive label, ahead of the `zpf` 0.6
-port (*The port to `zpf` 0.6*). Stage 6 is next.
+port (*The port to `zpf` 0.6*). The pipeline runs it, a guide walks through it,
+and a fresh venv runs its README (*Stage 6*).
 
 > **Written 2026-10-11** against `0.5.0`, `zpf` 0.5.1 (spec 0.21), packeteer
 > 0.17.0, `zpfwire` 0.4.0. The prompt: *make a demo that decodes a VPN tunnel,
@@ -605,6 +606,44 @@ tunnel (Q7's rule) and the traffic inside (`zpfwire` back to the DNS
 conversation, then `dns.yaml`). 271 checks, up from 138, every one holding.
 A datagram spec over a byte stream is refused, by design, so the check there
 is that both drivers refuse it, which is how the bug below was found.
+
+#### Stage 6 — the walkthrough and the clean run: done (2026-10-16)
+
+- **The walkthrough is `docs/guides/your-own-code.md`**, the first page of a
+  new *Guides* section, since the format pages are reference and pinned by
+  `test_docs.py`. It follows the order a user with another protocol would
+  build theirs in, each step shown in the example: declare the transform,
+  supply the parameters, write the transform, tell apart what decodes
+  differently, generate traffic, check your own code against an outside
+  source, check the decode against what was sealed, and go inside. Linked from
+  the index and from `types.md#transform`.
+- **The clean run found the README's first command could not run**:
+  `--protocol-messages dns.json` named a file the repository did not ship.
+  `examples/wireguard/dns.json` is now that file, and the tests and the
+  pipeline read it rather than each holding a copy.
+- **Acceptance 1 cannot pass until the `zpf` 0.6 port.** In a fresh venv,
+  kober (`zpf>=0.5.2,<0.6`) and `zpfwire` 0.5.0 (`zpf>=0.6.0.dev0`) do not
+  resolve, and separate venvs would not help: `zpfwire` 0.5.0 writes format
+  0.23, which kober on `zpf` 0.5 refuses to read. With kober installed past its
+  pin and nothing else changed, every README command runs as written, from
+  generation to the DNS inside and the pcap for Wireshark. The port's first
+  item clears it.
+
+#### Acceptance, as it stands
+
+1. Waits on the `zpf` 0.6 port (above).
+2. Met: the pipeline's five WireGuard inputs decode exactly to what was sealed,
+   under each impairment, both directions and four sessions each.
+3. Met: one `decrypt-failed` region per corrupted datagram, class `bytes`, and
+   the next decodes.
+4. Met: no key in any output (tested); the digest moves with any key.
+5. Met: nothing under `src/kober` names WireGuard, and no upstream project
+   gained WireGuard code; what they gained is general (packeteer#194–#197,
+   #200, #202, #203; python-zipline#79; zpfwire#35).
+6. Met: RFC 8439's and RFC 7748's vectors, and Wireshark.
+7. Written; whether it is the page a user with another protocol would follow is
+   a reader's judgement, and the one reader whose judgement settles it is not
+   its author.
 
 ## Found on the way: the compiled driver decoded a datagram spec over a byte stream
 
