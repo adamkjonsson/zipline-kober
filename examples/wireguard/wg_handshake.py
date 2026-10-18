@@ -14,8 +14,11 @@ same fault in the other. Wireshark, given the same keys, opens what this
 produces; that is the check from outside (``tests/test_wireguard_example.py``).
 
 What it leaves out, being an example: cookies (``mac2`` is always zero, as
-when a responder is not under load), a pre-shared key other than none, and
-every timer. Like ``wg_crypto.py``, it is not hardened and protects nothing.
+when a responder is not under load) and every timer. Like ``wg_crypto.py``, it
+is not hardened and protects nothing.
+
+``wg_keylog.py`` uses it a third way: given one side's keys, it replays a
+handshake a capture holds, to derive the transport keys kober needs.
 """
 
 from __future__ import annotations
@@ -199,6 +202,53 @@ def create_initiation(
     return message, Initiated(state, static, ephemeral, responder_public, sender_index)
 
 
+def own_initiation(
+    static: Keypair, responder_public: bytes, ephemeral: Keypair, message: bytes
+) -> Initiated:
+    """Rebuild the initiator's state from an initiation it sent, as from its own keys.
+
+    What :func:`create_initiation` kept, recovered afterwards: the same steps,
+    over the message's own encrypted fields, each checked to open.
+
+    Args:
+        static: The initiator's static key pair.
+        responder_public: The responder's static public key.
+        ephemeral: The ephemeral key pair the initiation was sent with.
+        message: The initiation.
+
+    Returns:
+        The state to read the response with.
+
+    Raises:
+        HandshakeError: If these keys did not send this initiation.
+
+    """
+    if len(message) != INITIATION_SIZE or message[0] != 1 or message[8:40] != ephemeral.public:
+        msg = "not an initiation sent with this ephemeral key"
+        raise HandshakeError(msg)
+    (sender_index,) = struct.unpack_from("<I", message, 4)
+    encrypted_static, encrypted_timestamp = message[40:88], message[88:116]
+    state = _start(responder_public)
+    state.mix_hash(ephemeral.public)
+    state.mix_key(ephemeral.public)
+    temp = state.mix_key(x25519(ephemeral.private, responder_public))
+    key = hmac_blake2s(temp, state.chaining_key + b"\x02")
+    try:
+        sent_static = open_sealed(key, transport_nonce(0), encrypted_static, state.hash)
+        state.mix_hash(encrypted_static)
+        temp = state.mix_key(x25519(static.private, responder_public))
+        key = hmac_blake2s(temp, state.chaining_key + b"\x02")
+        open_sealed(key, transport_nonce(0), encrypted_timestamp, state.hash)
+    except ValueError as exc:
+        msg = "the initiation does not decrypt with these keys"
+        raise HandshakeError(msg) from exc
+    if sent_static != static.public:
+        msg = "the initiation names another initiator"
+        raise HandshakeError(msg)
+    state.mix_hash(encrypted_timestamp)
+    return Initiated(state, static, ephemeral, responder_public, sender_index)
+
+
 def consume_initiation(static: Keypair, message: bytes) -> Received:
     """Read the first message as the responder, the same steps in reverse.
 
@@ -252,7 +302,10 @@ def _transport_keys(chaining_key: bytes) -> tuple[bytes, bytes]:
 
 
 def create_response(
-    received: Received, ephemeral: Keypair, sender_index: int
+    received: Received,
+    ephemeral: Keypair,
+    sender_index: int,
+    preshared_key: bytes = NO_PRESHARED_KEY,
 ) -> tuple[bytes, Session]:
     """Build the second message, responder to initiator.
 
@@ -260,6 +313,7 @@ def create_response(
         received: What :func:`consume_initiation` read.
         ephemeral: The responder's ephemeral key pair.
         sender_index: The index the responder chooses for this session.
+        preshared_key: The peers' pre-shared key, or none.
 
     Returns:
         The 92-byte message, and the session as the responder holds it.
@@ -270,7 +324,7 @@ def create_response(
     state.mix_key(ephemeral.public)
     state.mix_key(x25519(ephemeral.private, received.initiator_ephemeral))
     state.mix_key(x25519(ephemeral.private, received.initiator_public))
-    temp = hmac_blake2s(state.chaining_key, NO_PRESHARED_KEY)
+    temp = hmac_blake2s(state.chaining_key, preshared_key)
     state.chaining_key = hmac_blake2s(temp, b"\x01")
     temp2 = hmac_blake2s(temp, state.chaining_key + b"\x02")
     key = hmac_blake2s(temp, temp2 + b"\x03")
@@ -287,12 +341,15 @@ def create_response(
     return message, Session(received.initiator_index, sender_index, to_responder, to_initiator)
 
 
-def consume_response(initiated: Initiated, message: bytes) -> Session:
+def consume_response(
+    initiated: Initiated, message: bytes, preshared_key: bytes = NO_PRESHARED_KEY
+) -> Session:
     """Read the second message as the initiator, and derive the session.
 
     Args:
         initiated: What :func:`create_initiation` kept.
         message: The response.
+        preshared_key: The peers' pre-shared key, or none.
 
     Returns:
         The session as the initiator holds it.
@@ -321,7 +378,7 @@ def consume_response(initiated: Initiated, message: bytes) -> Session:
     state.mix_key(ephemeral)
     state.mix_key(x25519(initiated.ephemeral.private, ephemeral))
     state.mix_key(x25519(initiated.static.private, ephemeral))
-    temp = hmac_blake2s(state.chaining_key, NO_PRESHARED_KEY)
+    temp = hmac_blake2s(state.chaining_key, preshared_key)
     state.chaining_key = hmac_blake2s(temp, b"\x01")
     temp2 = hmac_blake2s(temp, state.chaining_key + b"\x02")
     key = hmac_blake2s(temp, temp2 + b"\x03")

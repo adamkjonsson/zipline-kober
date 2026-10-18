@@ -78,6 +78,7 @@ crypto = WIREGUARD.module("wg_crypto")
 handshake = WIREGUARD.module("wg_handshake")
 sealing = WIREGUARD.module("wg_seal")
 opening = WIREGUARD.module("wg_transforms")
+converting = WIREGUARD.module("wg_keylog")
 
 
 @pytest.fixture
@@ -422,6 +423,116 @@ def test_kober_opens_what_the_tunnel_module_seals(tmp_path: Path, registry: Regi
     written = decode(spec(), source, tmp_path, params=params, transforms=registry)
     assert plaintexts(written) == [bytes.fromhex(line["inner"]) for line in truth(tmp_path)]
     assert regions(written) == []
+
+
+# --- the key-log converter: keys from a real endpoint ------------------------------------------
+
+
+def logged_run(tmp_path: Path) -> tuple[Path, list[str], dict[str, str]]:
+    """Return a capture of four sessions, Wireshark's key log for it, and the keys sealed."""
+    wrapper = tunnel(tmp_path, rekey_after="3", wireshark_keylog=str(tmp_path / "ws.keys"))
+    wire = [
+        payload
+        for n in range(10)
+        for _, payload in wrapper.wrap(ipv4(b"x" * n, n), "c2s" if n % 2 else "s2c", 1.0 + n)
+    ]
+    capture = tmp_path / "wg.zpf"
+    datagrams(capture, wire)
+    sealed = json.loads((tmp_path / "keys.json").read_text())
+    return capture, (tmp_path / "ws.keys").read_text().splitlines(), sealed
+
+
+def one_side(lines: list[str], side: int) -> list[str]:
+    """Keep one peer's lines: ``wg_seal.py`` writes three for each side, initiator first."""
+    return [line for at, line in enumerate(lines) if at // 3 % 2 == side]
+
+
+@pytest.mark.parametrize("side", ["both", "initiator", "responder"])
+def test_one_sides_keys_derive_every_session_as_it_was_sealed(tmp_path: Path, side: str):
+    """What ``extract-handshakes`` gives is one endpoint's keys; either endpoint's will do."""
+    capture, lines, sealed = logged_run(tmp_path)
+    if side != "both":
+        lines = one_side(lines, ["initiator", "responder"].index(side))
+    logged = converting.read_wireshark_keylog(lines)
+    derived = converting.derive(logged, *converting.handshake_messages(capture))
+    assert derived.unopened == []
+    assert derived.key_log() == sealed
+
+
+def test_without_the_keys_a_handshake_is_reported_not_guessed(tmp_path: Path):
+    capture, lines, _ = logged_run(tmp_path)
+    stranger = handshake.Keypair.from_private(bytes([9]) * 32)
+    wrong = [line for line in lines if line.startswith("REMOTE")] + [
+        f"LOCAL_STATIC_PRIVATE_KEY = {base64.b64encode(stranger.private).decode()}"
+    ]
+    logged = converting.read_wireshark_keylog(wrong)
+    derived = converting.derive(logged, *converting.handshake_messages(capture))
+    assert derived.sessions == []
+    assert len(derived.unopened) == 4
+
+
+def test_extract_handshakes_output_reads_as_it_is(tmp_path: Path):
+    """wireguard-tools' format: a heading per session, indented lines, a pre-shared key."""
+    _, lines, _ = logged_run(tmp_path)
+    log = []
+    for at, line in enumerate(lines):
+        if at % 3 == 0:
+            log.append("New handshake session:")
+        log.append(f"  {line}")
+        if at % 3 == 2:
+            log.append(f"  PRESHARED_KEY = {base64.b64encode(bytes(32)).decode()}")
+    logged = converting.read_wireshark_keylog(log)
+    assert len(logged.statics) == 2
+    assert len(logged.ephemerals) == 8
+    assert logged.preshared == [handshake.NO_PRESHARED_KEY]
+    with pytest.raises(ValueError, match="line 1: PRESHARED_KEY"):
+        converting.read_wireshark_keylog(["PRESHARED_KEY = not base64"])
+
+
+@pytest.mark.parametrize("side", ["initiator", "responder"])
+def test_a_preshared_key_is_needed_where_the_peers_have_one(side: str):
+    """Without it, a derivation comes out wrong, and the capture must say so, not the log."""
+    initiator, responder = (handshake.Keypair.from_private(bytes([n]) * 32) for n in (1, 2))
+    ephemerals = [handshake.Keypair.from_private(bytes([n]) * 32) for n in (3, 4)]
+    psk = bytes([0x55]) * 32
+    initiation, initiated = handshake.create_initiation(
+        initiator, responder.public, ephemerals[0], 7, 1.0
+    )
+    received = handshake.consume_initiation(responder, initiation)
+    response, sealed = handshake.create_response(received, ephemerals[1], 8, psk)
+    assert handshake.consume_response(initiated, response, psk) == sealed
+    local, remote, ephemeral = (
+        (initiator, responder, ephemerals[0])
+        if side == "initiator"
+        else (responder, initiator, ephemerals[1])
+    )
+    lines = [
+        f"LOCAL_STATIC_PRIVATE_KEY = {base64.b64encode(local.private).decode()}",
+        f"REMOTE_STATIC_PUBLIC_KEY = {base64.b64encode(remote.public).decode()}",
+        f"LOCAL_EPHEMERAL_PRIVATE_KEY = {base64.b64encode(ephemeral.private).decode()}",
+    ]
+    without = converting.derive(converting.read_wireshark_keylog(lines), [initiation], [response])
+    assert without.sessions == []
+    psk_line = f"PRESHARED_KEY = {base64.b64encode(psk).decode()}"
+    logged = converting.read_wireshark_keylog([*lines, psk_line])
+    assert converting.derive(logged, [initiation], [response]).sessions == [sealed]
+
+
+def test_the_converted_key_log_opens_the_capture_from_the_command_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """The README's way: convert one endpoint's log, then ``kober run`` with it."""
+    capture, lines, _ = logged_run(tmp_path)
+    log = tmp_path / "responder.keys"
+    log.write_text("\n".join(one_side(lines, 1)) + "\n")
+    converted = tmp_path / "converted.json"
+    argv = [str(capture), "--wireshark-keylog", str(log), "-o", str(converted)]
+    assert converting.main(argv) == 0
+    assert "4 of 4 handshakes opened" in capsys.readouterr().out
+    out = tmp_path / "out.zpf"
+    assert run_cli(WIREGUARD, capture, out, monkeypatch, converted) == OK
+    opened = [block for block in blocks(out) if block[0] != "participant"]
+    assert plaintexts(opened) == [bytes.fromhex(line["inner"]) for line in truth(tmp_path)]
 
 
 # --- the outside check: Wireshark opens what the example seals -----------------------------------

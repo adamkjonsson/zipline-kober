@@ -71,9 +71,9 @@ def wg_transport(data: bytes, *, limit: int, key: bytes, counter: int) -> bytes:
 
     Raises:
         ValueError: If the key, the counter or the length cannot be right, or
-            what opens is not an IP packet. WireGuard drops such a packet too,
-            and the spec names it ``decrypt-failed``, which is the one case that
-            says more than happened: it did decrypt.
+            what opens is not an IP packet. WireGuard drops such a packet too.
+            The spec names every failure ``decrypt-failed``, so this one is
+            named so as well, though it did decrypt.
         wg_crypto.AuthenticationError: If the tag does not verify.
 
     """

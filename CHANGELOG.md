@@ -124,6 +124,17 @@ minor bump here too.
 
 ### Documentation
 
+- **Does your protocol fit?** The guide and the WireGuard README now say first
+  what decides it: a transform keeps nothing between messages, so a protocol
+  fits when each message carries what opens it. WireGuard, ESP without
+  extended sequence numbers, DTLS 1.2 and an OpenVPN data channel do; TLS,
+  QUIC, DTLS 1.3 and ESP with extended sequence numbers do not, and what to do
+  instead is a stage of your own with `zpf.decode_stage`. From python-zipline's
+  review of the example's documentation.
+- **The WireGuard README is in two parts**: using kober with your own
+  transform, then adding an example to this repository. *How the pieces meet*
+  comes before the steps and explains `limit`, `fails_as` and `emit: none`,
+  and a new section decodes a real capture, keys and all.
 - **A guides section, and its first guide: *Bringing your own code: a
   WireGuard tunnel***. For a protocol a spec can frame but not read, because it
   is encrypted or compressed: what the spec declares and what the caller's
@@ -143,6 +154,13 @@ minor bump here too.
   `tests/examplekit.py` does what every example's tests need, and
   `tools/pipeline.py` runs the example's spec and generated inputs with no
   edit of its own.
+- **Keys from a real WireGuard endpoint: `examples/wireguard/wg_keylog.py`.**
+  A WireGuard endpoint never writes its transport keys down; what it can be
+  made to log (wireguard-tools' `extract-handshakes`, in the format Wireshark
+  reads) is the static and ephemeral keys each handshake derives them from.
+  `wg_keylog.py` replays a capture's handshakes with them, from either
+  endpoint's log, and writes the key log `--param keys=file:…` reads. The
+  example's handshake module gains a pre-shared key.
 - **A second example of bringing your own code, `examples/packbits/`**: a
   made-up tunnel of PackBits-compressed packets, the shape with no keys and no
   parameters. Its codec is checked against Apple TN1023's worked example and

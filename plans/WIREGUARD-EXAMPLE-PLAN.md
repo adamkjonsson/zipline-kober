@@ -836,6 +836,53 @@ and the pipeline, which needed nothing.
    `tools/pipeline.py`'s code.
 4. Every place A–C did not fit D is recorded here, with what was changed.
 
+## python-zipline's review of the documentation (2026-10-18)
+
+`plans/reviews/kober-wireguard-docs-review.md`, at `2225371`: the README and
+the guide serve a VPN whose messages carry what opens them, and not HTTPS,
+which learns only at the end that it does not fit. What was done, by its
+numbering:
+
+1. **A fit check first**, in both: a transform keeps nothing between
+   messages, so a protocol fits when each message carries its key's index and
+   its nonce. Two of the review's examples were corrected rather than copied:
+   ESP fits only *without* extended sequence numbers, whose high half is never
+   sent, and DTLS 1.2 fits where DTLS 1.3, which shortens and protects its
+   record numbers, does not. What to do instead: a stage of one's own with
+   `zpf.decode_stage`, keeping the citation to the capture, or an outside tool
+   that follows the connection, losing it. The review's "wait for the
+   extension point §11.5 describes" is half right: §11.5 does name a transform
+   kept for a whole stream as the natural extension, deferred with no date, so
+   the docs say not to wait for it.
+2. **Real captures.** A WireGuard endpoint never writes its transport keys
+   down, so this was more than documentation: `examples/wireguard/wg_keylog.py`
+   reads the key log Wireshark reads, which wireguard-tools'
+   `contrib/extract-handshakes` writes (fetched and confirmed: a heading per
+   session, indented `NAME = base64` lines, `PRESHARED_KEY` included), and
+   replays each of a capture's handshakes as whichever side logged it, to the
+   transport keys `--param keys=file:…` reads. `wg_handshake.py` gains a
+   pre-shared key and `own_initiation`, an initiator's state rebuilt from what
+   it sent. A derivation is taken only when the capture confirms it: the
+   initiation decrypts to the logged static key and the response opens, or, as
+   the responder, the response is rebuilt byte for byte. Tested from either
+   endpoint's half of `wg_seal.py`'s Wireshark log to exactly the keys sealed
+   with, then through `kober run`. Mutation-checked: keys written under each
+   other's index fail four tests; the responder trusting its derivation
+   unconfirmed passed every test until a pre-shared key the log lacks was
+   tested from both sides. ESP's mapping (`ip xfrm state`, `keys[spi]`) is
+   documented, not built.
+3. **Two audiences**: the README is now *using kober with your own transform*,
+   then *Adding an example to this repository* (`example.json`, the tests, the
+   conventions).
+4. **Terms first**: *How the pieces meet* moved up, before any step, and now
+   explains `limit`, `fails_as` and `emit: none`; the copying table links the
+   guide's step 1.
+5. **Small things**: the not-an-IP-packet case said plainly, in the README and
+   `wg_transforms.py`; the stray wrap reflowed; the `net:ip` sentence dropped,
+   since the zpf 0.6 port rewrites those lines anyway. The review itself moved
+   from `docs/guides/` to `plans/reviews/`: outside any toctree it failed the
+   `-W` docs build.
+
 ## Found on the way: the compiled driver decoded a datagram spec over a byte stream
 
 The interpreter refuses a `datagram` spec a byte stream, since it has no framing

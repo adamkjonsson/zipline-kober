@@ -19,9 +19,45 @@ sealed. This page walks through it in the order you would build your own.
 | `wg_transforms.py` | The transform: a function, and one call that registers it. |
 | `wg_crypto.py` | The algorithm, in a file of its own, because two things share it. |
 | `wg_handshake.py`, `wg_seal.py` | What generates traffic you know the answer to. |
+| `wg_keylog.py` | What turns a real endpoint's logged keys into the keys a decode needs. |
 
 The folder is meant to be copied: its README says, file by file, what to
-replace, keep or delete, and the conventions a new example keeps.
+replace, keep or delete.
+
+## Does your protocol fit?
+
+Ask this first, because everything below depends on it. **A transform keeps
+nothing from one message to the next.** It is given one message's bytes, and
+what the spec hands it from that message's fields and the run's parameters,
+and nothing else. So a protocol fits when **each message carries what opens
+it**: which key, by an index or an SPI, and the nonce or counter, explicitly on
+the wire.
+
+| Fits | Does not fit |
+| --- | --- |
+| WireGuard: a receiver index and a counter in every transport message. | TLS, of any version: the record sequence number every nonce depends on is counted, never sent. |
+| ESP without extended sequence numbers: an SPI and a sequence number. | ESP with extended sequence numbers: their high 32 bits are never sent. |
+| DTLS 1.2: an epoch and a sequence number in every record. | DTLS 1.3 and QUIC: record and packet numbers are shortened and protected, and need earlier messages to reconstruct. |
+| An OpenVPN data channel: a packet ID in every packet. | Compression with a dictionary carried from one message to the next. |
+| Any codec applied one message at a time: [`examples/packbits/`](https://github.com/adamkjonsson/zipline-kober/tree/main/examples/packbits). | |
+
+A protocol that fits still needs its keys supplied when the decode is set up
+(step 2), and a handshake that agrees them is decoded as structure only.
+
+**If yours does not fit**, the step that keeps state belongs outside a spec:
+
+- **A stage of your own.** python-zipline's `zpf.decode_stage` lets you write
+  one: it reads the capture's streams, keeps whatever the protocol needs, and
+  writes the plaintext as records that cite the ciphertext they came from.
+  kober then decodes what is inside with an ordinary spec, and every record
+  still cites the capture.
+- **A tool that follows the connection**, such as Wireshark with
+  `SSLKEYLOGFILE` for TLS, whose output kober then decodes. That is quicker,
+  and loses the citation back to the capture.
+
+Do not wait for kober to keep the state. `DESIGN.md` §11.5 names a transform
+kept for a whole stream as the natural next extension, but it is deferred, with
+no date; *What a spec cannot do here*, at the end, says where the line is now.
 
 ## Which steps your protocol needs
 
@@ -114,6 +150,24 @@ From the command line a map is a JSON file of keys and values, each written as
 `secret: true` keeps a value out of every record, region and message. It goes
 into the output's `params_digest` only as part of the hash, so a file says which
 key log wrote it, and a run with another reads as another configuration.
+
+**Where the keys come from** in a real capture depends on the protocol, and
+the work is to map what it logs to the field that picks a key:
+
+- **WireGuard** never writes its transport keys down. On Linux, wireguard-tools'
+  `contrib/extract-handshakes` logs, from the kernel, the static and ephemeral
+  keys each handshake derives them from, in the format Wireshark reads.
+  `wg_keylog.py` replays the capture's handshakes with them and writes the
+  table above. One endpoint's log opens both directions:
+
+  ```console
+  python examples/wireguard/wg_keylog.py wg.zpf --wireshark-keylog handshakes.log -o keys.json
+  ```
+
+- **ESP**'s keys are its security associations, `ip xfrm state` on Linux: one
+  per SPI, so the table is `keys[spi]`.
+- **Generated traffic** brings its own: the module that sealed it ran the
+  handshake, and writes the table directly (step 5).
 
 ## 3. Write the transform
 
@@ -274,6 +328,8 @@ exactly that:
   instead.
 - **A replay decodes again.** WireGuard's replay window is state too.
 
-The same line rules out TLS 1.3's per-connection nonce counter and compression
-with a dictionary carried between messages. It is a deliberate line, and
-`DESIGN.md` §11.5 says where it sits and why.
+The same line rules out TLS's record counter and compression with a dictionary
+carried between messages, as *Does your protocol fit?* says at the start. It is
+a deliberate line for now: `DESIGN.md` §11.5 says why a transform maps one
+message's bytes to bytes, and names a transform kept for a whole stream as the
+extension that would move it, deferred.
