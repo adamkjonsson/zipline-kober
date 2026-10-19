@@ -528,7 +528,9 @@ the tunnel module. What was decided or found:
   `decrypt-failed` region.
 - **Two things a decode shows that the plan did not say.** A corrupted
   datagram also fails its UDP checksum, since packeteer#200, and `zpfwire`
-  keeps it by default; `--checksum drop` turns it into a loss. And Wireshark
+  keeps it by default; `--checksum drop` turned it into a loss, until zpfwire
+  `81c4453` (2026-10-19) made `drop` drop TCP only, as the format requires, so
+  it is `decrypt-failed` under either policy now. And Wireshark
   strips WireGuard's padding by the inner IP header's length, where kober's
   record keeps it, which the README already says.
 - **Not done, deliberately:** cookies (`mac2` is always zero), a pre-shared

@@ -297,8 +297,9 @@ one comparison. Two things it has to allow for:
   own, and kober decodes one after the other, so the decode's order is not the
   wire's.
 - **A corrupted datagram fails its UDP checksum too**, as on a real link.
-  `zpfwire` keeps it by default and kober names it `decrypt-failed`;
-  `zpfwire convert --checksum drop` drops it, and it reads as a loss instead.
+  `zpfwire` keeps it under either `--checksum` policy, since leaving out a UDP
+  datagram would leave no trace, and only counts it, so it reaches kober and
+  your transform's failure names it.
 
 ## 8. Go inside
 

@@ -200,9 +200,10 @@ packet, and so does the transform. No key is ever written, and the decoder
 descriptor's `params_digest` says which key log produced the file.
 
 A datagram the tunnel corrupted also fails its UDP checksum, as it would on a
-real link. `zpfwire` keeps it by default, and kober names it `decrypt-failed`;
-with `zpfwire convert --checksum drop` it is dropped instead, and reads as a
-loss.
+real link. `zpfwire` keeps it, and counts it under `bad cksum`, whatever
+`--checksum` says: `drop` drops a corrupt TCP segment, whose resend fills the
+hole it leaves, but never a UDP datagram, whose loss nothing downstream could
+see. So it reaches kober, and the tag check names it `decrypt-failed`.
 
 ## The traffic inside
 
