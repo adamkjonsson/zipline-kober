@@ -30,6 +30,7 @@ generator bug becomes a refusal rather than a broken module.
 from __future__ import annotations
 
 import ast
+import builtins
 import keyword
 import re
 from dataclasses import dataclass, replace
@@ -47,6 +48,7 @@ from kober.expr import (
     BoolOp,
     Call,
     Compare,
+    Index,
     IntLiteral,
     Ref,
     StrLiteral,
@@ -63,7 +65,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from kober.expr import Expr
-    from kober.ops import FieldPlan, ObjectPlan, ValueType
+    from kober.ops import FieldPlan, ObjectPlan, ParamPlan, ValueType
     from kober.spec import Spec
 
 #: Longest line the backend emits, matching this project's ``ruff.toml``.
@@ -94,6 +96,7 @@ RESERVED_PREFIX = "_"
 RESERVED_MODULE = frozenset(
     {
         "Cursor",
+        "INPUT",
         "MESSAGE_CONTENT_TYPE",
         "MappingProxyType",
         "Mapping",
@@ -101,6 +104,7 @@ RESERVED_MODULE = frozenset(
         "Protocol",
         "Sink",
         "Spanned",
+        "map_entry",
         "shift_left",
         "shift_right",
         "to_int",
@@ -117,10 +121,6 @@ RESERVED_MODULE = frozenset(
     }
 )
 
-#: Plain names the generated decode functions use. Empty — every name they
-#: introduce begins with an underscore, which :data:`RESERVED_PREFIX` already
-#: keeps — and kept as the place to put one if that stops being true.
-RESERVED_LOCAL: frozenset[str] = frozenset()
 
 #: Everything :mod:`kober.runtime` offers a generated module. What a given
 #: module imports is whatever it turns out to use.
@@ -137,6 +137,7 @@ RUNTIME_NAMES = frozenset(
         "concat",
         "decode_text",
         "document_params",
+        "map_entry",
         "size_of",
         "run_transform",
         "take_over",
@@ -155,6 +156,11 @@ RUNTIME_NAMES = frozenset(
         "to_int",
     }
 )
+
+#: Plain names the generated decode functions use. Empty — every name they
+#: introduce begins with an underscore, which :data:`RESERVED_PREFIX` already
+#: keeps — and kept as the place to put one if that stops being true.
+RESERVED_LOCAL: frozenset[str] = frozenset()
 
 #: How a ``parent.x`` reference reaches its value: a parameter the caller
 #: passes. The parent's fields are locals in a function that has not finished
@@ -283,6 +289,20 @@ PARAM_TYPES: Mapping[Kind, str] = {
     Kind.TEXT: "str",
     Kind.BYTES: "bytes",
 }
+
+
+
+def _param_type(param: ParamPlan) -> str:
+    """Spell a document parameter's type as ``PARAMS`` does, a map's included.
+
+    The spelling is :attr:`kober.expr.MapType.value`'s, which is what
+    :func:`kober.runtime.document_params` reads back.
+    """
+    if param.entries is None:
+        return PARAM_TYPES[param.kind]
+    key, item = param.entries
+    return f"map[{PARAM_TYPES[key]}, {PARAM_TYPES[item]}]"
+
 
 ANNOTATIONS: Mapping[Kind, str] = {
     Kind.INT: "int",
@@ -1049,6 +1069,11 @@ def _expr(expr: Expr, binding: Binding, limit: int) -> str:
         return _group(f"{left} {expr.op} {right}", level, limit)
     if isinstance(expr, Call):
         return _builtin(expr, binding)
+    if isinstance(expr, Index):
+        # An atom, like a call. Through the runtime's helper, which is the
+        # interpreter's own, so a missing entry is worded the same in both.
+        name = _literal(expr.table)
+        return f"map_entry(_doc[{name}], {_expr(expr.key, binding, 0)}, {name})"
     return _binary(expr, binding, limit)
 
 
@@ -1061,7 +1086,8 @@ def _builtin(expr: Call, binding: Binding) -> str:
     the differential has nothing to find here. ``lower``, ``trim``,
     ``startswith`` and ``endswith`` are method calls on a value the checker has
     already typed as text, and mean exactly what the interpreter's ``str``
-    methods of the same names mean.
+    methods of the same names mean; ``len`` is Python's, over a value typed as
+    bytes.
     """
     arguments = [_expr(argument, binding, 0) for argument in expr.args]
     if expr.name == "lower":
@@ -1070,6 +1096,8 @@ def _builtin(expr: Call, binding: Binding) -> str:
         return f"{arguments[0]}.strip()"
     if expr.name in ("startswith", "endswith"):
         return f"{arguments[0]}.{expr.name}({arguments[1]})"
+    if expr.name == "len":
+        return f"len({arguments[0]})"
     return f"to_int({', '.join(arguments)})"
 
 
@@ -2726,6 +2754,8 @@ class _Function:
         spoken = self.spoken(plan)
         if spoken:
             over.append(f"spoken=({', '.join(spoken)},)")
+        if plan.fails_as != NodeStatus.UNDECODABLE.value:
+            over.append(f"fails_as={_literal(plan.fails_as)}")
         self.lines.extend(_call("take_over", ["_sink", *over], indent))
 
     def spoken(self, plan: TransformPlan) -> list[str]:
@@ -3193,9 +3223,10 @@ def _failing(where: str, raised: str = "Undecodable") -> list[str]:
 def _fallible(rendered: str) -> bool:
     """Whether a rendered expression can fail for some input.
 
-    Integer division, modulo, a bounded shift, and reading text as a number.
-    Everything else in this language answers for every value it can be handed,
-    which is what makes checking worth the two lines it costs.
+    Integer division, modulo, a bounded shift, reading text as a number, and
+    an entry of a map parameter, which may not be there. Everything else in
+    this language answers for every value it can be handed, which is what
+    makes checking worth the two lines it costs.
 
     ``to_int`` is here because the differential put it here: text that is not a
     number raises, and without the wrapper a generated decoder let `EvalError`
@@ -3206,7 +3237,9 @@ def _fallible(rendered: str) -> bool:
     """
     return any(
         token in rendered
-        for token in ("//", " % ", "shift_left(", "shift_right(", "to_int(", "present(")
+        for token in (
+            "//", " % ", "shift_left(", "shift_right(", "to_int(", "present(", "map_entry("
+        )
     )
 
 
@@ -3795,11 +3828,14 @@ def _granularity_constants(plan: Plan, emit: Emit) -> list[str]:
         "#: the interpreter writes for the same configuration.",
         f"SPEC_DIGEST = {_literal(plan.spec_digest)}",
         "",
+        "#: What input the specification declares it reads: the stage driver",
+        "#: refuses a datagram decoder a byte stream, as it refuses the interpreter.",
+        f"INPUT = {_literal(plan.input)}",
+        "",
     ]
     if plan.params:
         declared = ", ".join(
-            f"{_literal(param.name)}: {_literal(PARAM_TYPES[param.kind])}"
-            for param in plan.params
+            f"{_literal(param.name)}: {_literal(_param_type(param))}" for param in plan.params
         )
         lines += [
             "#: The document's parameters and their types: every one must be supplied",
@@ -3841,6 +3877,147 @@ def _has_text(plan: Plan) -> bool:
         for item in obj.fields
         for value in item.types
     )
+
+
+#: Names a generated module defines or imports at its top besides what
+#: :func:`_unshadow` reads off the rendered source: the stdlib imports every
+#: module has.
+_MODULE_IMPORTS = frozenset(
+    {"dataclass", "MappingProxyType", "TYPE_CHECKING", "ClassVar", "Mapping"}
+)
+
+
+def _scope(function: ast.FunctionDef) -> tuple[set[str], list[ast.AST]]:
+    """Return a function's locals, and every node of its own scope.
+
+    Its locals are its parameters and every name it stores. A nested function is
+    its own scope and is left out; a comprehension's body is kept, since what it
+    reads from outside is this function's, but its loop variables are its own.
+    """
+    arguments = function.args
+    names = {
+        argument.arg
+        for argument in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)
+    }
+    for extra in (arguments.vararg, arguments.kwarg):
+        if extra is not None:
+            names.add(extra.arg)
+    nodes: list[ast.AST] = []
+    owned: set[int] = set()
+    pending: list[ast.AST] = list(function.body)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        if isinstance(node, ast.comprehension):
+            owned.update(id(target) for target in ast.walk(node.target))
+        nodes.append(node)
+        pending.extend(ast.iter_child_nodes(node))
+    for node in nodes:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and id(node) not in owned:
+            names.add(node.id)
+    return names, nodes
+
+
+def _helper_positions(nodes: list[ast.AST]) -> list[ast.Name]:
+    """Return the names used as a helper is: called, raised, caught, or an ``isinstance`` class.
+
+    A field's value is never used in any of these ways, which is what lets a
+    helper be told from a field of the same name without knowing the spec.
+    """
+
+    def names_in(node: ast.AST | None) -> list[ast.Name]:
+        if isinstance(node, ast.Name):
+            return [node]
+        if isinstance(node, ast.Tuple):
+            return [element for element in node.elts if isinstance(element, ast.Name)]
+        return []
+
+    found: list[ast.Name] = []
+    for node in nodes:
+        if isinstance(node, ast.Call):
+            found.extend(names_in(node.func))
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "isinstance" and len(node.args) > 1:
+                found.extend(names_in(node.args[1]))
+        elif isinstance(node, ast.Raise):
+            found.extend(names_in(node.exc))
+        elif isinstance(node, ast.ExceptHandler):
+            found.extend(names_in(node.type))
+    return found
+
+
+def _unshadow(rendered: str, constants: Sequence[str]) -> tuple[str, list[str]]:
+    """Keep a field named like a helper from hiding it inside its unit's function.
+
+    A field or parameter is a local of the function that decodes its unit, so
+    one named ``to_int``, ``present`` or ``len`` would hide the helper or the
+    built-in of that name from the code that calls it there, and the compiled
+    decode would raise where the interpreter answers. Wherever a function has
+    such a local, the calls it makes are renamed to an underscore alias, which no
+    spec name can take (:data:`RESERVED_PREFIX`), and the module defines the
+    alias. Nothing changes in a function without such a clash, so a module with
+    none is exactly what it was.
+
+    A local named like something the module defines for itself, a unit's class
+    or a constant, is read as a value rather than called, and cannot be told
+    from the field by where it stands; that is refused.
+
+    Args:
+        rendered: The module's body.
+        constants: The module-level constants placed before it.
+
+    Returns:
+        The body, renamed where it needs to be, and the alias assignments to
+        put before it.
+
+    Raises:
+        CompileError: If a local hides a name the module defines and reads.
+
+    """
+    tree = ast.parse(rendered)
+    defined = set(_MODULE_IMPORTS)
+    for statement in (*tree.body, *ast.parse("\n".join(constants)).body):
+        if isinstance(statement, (ast.FunctionDef, ast.ClassDef)):
+            defined.add(statement.name)
+        elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            defined.update(t.id for t in targets if isinstance(t, ast.Name))
+    aliasable = RUNTIME_NAMES | frozenset(dir(builtins))
+    edits: list[ast.Name] = []
+    for function in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+        local, nodes = _scope(function)
+        clashes = local & (aliasable | defined)
+        if not clashes:
+            continue
+        edits.extend(n for n in _helper_positions(nodes) if n.id in clashes & aliasable)
+        hidden = sorted(
+            n.id
+            for n in nodes
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in clashes & defined
+        )
+        if hidden:
+            msg = (
+                f"{hidden[0]!r} is both a field or parameter read in {function.name}() and "
+                f"a name the generated module defines for that code to read; rename it in "
+                f"the spec"
+            )
+            raise CompileError(msg)
+    if not edits:
+        return rendered, []
+    lines = rendered.split("\n")
+    for name in sorted(edits, key=lambda n: (n.lineno, n.col_offset), reverse=True):
+        raw = lines[name.lineno - 1].encode()
+        start, end = name.col_offset, name.end_col_offset or name.col_offset
+        lines[name.lineno - 1] = (raw[:start] + b"_" + raw[start:end] + raw[end:]).decode()
+    aliased = sorted({name.id for name in edits})
+    aliases = [
+        "#: Aliases for names a field of the spec shares, so the code that calls them",
+        "#: still reaches them inside that field's function.",
+        *(f"_{name} = {name}" for name in aliased),
+        "",
+    ]
+    return "\n".join(lines), aliases
 
 
 def _runtime_import(body: str) -> list[str]:
@@ -3904,6 +4081,8 @@ def _shift_names(expr: Expr) -> set[str]:
             found |= _shift_names(operand)
     elif isinstance(expr, UnaryOp):
         found |= _shift_names(expr.operand)
+    elif isinstance(expr, Index):
+        found |= _shift_names(expr.key)
     return found
 
 
@@ -3964,10 +4143,12 @@ def render(plan: Plan, names: Names | None = None, *, emit: Emit = Emit.MESSAGE)
     body.extend([_rule("entry points"), "", "", render_entry(plan, names, emit=emit), ""])
     rendered = "\n".join(body)
     constants = _granularity_constants(plan, emit)
+    rendered, aliases = _unshadow(rendered, constants)
     # The constants are scanned too: `TRANSFORMS` calls into the runtime.
-    lines.extend(_runtime_import("\n".join([rendered, *constants])))
+    lines.extend(_runtime_import("\n".join([rendered, *constants, *aliases])))
     lines.extend(["if TYPE_CHECKING:", "    from collections.abc import Mapping", ""])
     lines.extend(constants)
+    lines.extend(aliases)
     source = "\n".join([*lines, rendered])
     try:
         ast.parse(source)

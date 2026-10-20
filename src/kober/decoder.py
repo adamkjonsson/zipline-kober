@@ -37,7 +37,7 @@ from kober.check import (
 from kober.cursor import Cursor
 from kober.emit import root_emit
 from kober.errors import EvalError, TransformError, TruncatedRead
-from kober.expr import ExprValue, evaluate, references
+from kober.expr import ExprValue, ParamValue, evaluate, references
 from kober.node import Node, NodeStatus
 from kober.runtime import document_params, params_digest
 from kober.spec import (
@@ -196,7 +196,7 @@ class _Frame:
     tail: bool = False
     #: The document's parameters (:attr:`kober.spec.Spec.params`), as supplied
     #: to the decoder: in scope in every unit, after its own names.
-    document: Mapping[str, ExprValue] = dataclass_field(default_factory=dict)
+    document: Mapping[str, ParamValue] = dataclass_field(default_factory=dict)
 
     def root(self) -> _Frame:
         """Return the outermost frame."""
@@ -233,6 +233,15 @@ class _Environment:
             return self._in_frame(parent, tuple(rest), path)
         return self._in_frame(self.frame, path, path)
 
+    def lookup_map(self, name: str) -> Mapping[ExprValue, ExprValue]:
+        """Return the map parameter ``name``."""
+        value = self.frame.document.get(name)
+        if not isinstance(value, Mapping):
+            # Only reachable unchecked: `check` proves the name is a map.
+            msg = f"{name!r} is not a map parameter"
+            raise EvalError(msg)
+        return value
+
     def _in_frame(
         self, frame: _Frame, parts: tuple[str, ...], path: tuple[str, ...]
     ) -> ExprValue:
@@ -245,7 +254,12 @@ class _Environment:
             return frame.params[head]
         node = frame.named.get(head)
         if node is None and head in frame.document and not rest:
-            return frame.document[head]
+            value = frame.document[head]
+            if isinstance(value, Mapping):
+                # Only reachable unchecked: `check` refuses a map read whole.
+                msg = f"{'.'.join(path)}: {head!r} is a map, and only one entry of it is a value"
+                raise EvalError(msg)
+            return value
         if node is None:
             msg = f"{'.'.join(path)}: {head!r} has not been decoded"
             raise EvalError(msg)
@@ -314,7 +328,7 @@ class Decoder:
         *,
         emit: Emit = Emit.MESSAGE,
         check: bool = True,
-        params: Mapping[str, ExprValue] | None = None,
+        params: Mapping[str, ParamValue] | None = None,
         transforms: Registry | None = None,
     ) -> None:
         if check:

@@ -27,7 +27,8 @@ def blocks(path: Path) -> list[tuple[object, ...]]:
     that is a statement about every record in it, derived separately by each
     implementation. A region's comment is included because it is the only
     place a region can say *why*, and two implementations that disagree about
-    that have written different files. Each decoder's descriptor is included
+    that have written different files. So is its ``reason_class``, which a reason
+    of a spec's own, a transform's ``fails_as``, must state. Each decoder's descriptor is included
     with its ``params_digest``, since the two must say the same configuration
     produced the file. Read from the raw block stream rather
     than the session views, because the order the two implementations write in
@@ -53,7 +54,14 @@ def blocks(path: Path) -> list[tuple[object, ...]]:
                 out.append(("record", block.content_type, block.role, block.payload, spans))
             elif isinstance(block, Undecoded):
                 out.append(
-                    ("undecoded", block.reason, block.off_start, block.off_end, block.comment)
+                    (
+                        "undecoded",
+                        block.reason,
+                        block.off_start,
+                        block.off_end,
+                        block.comment,
+                        block.reason_class,
+                    )
                 )
     return out
 

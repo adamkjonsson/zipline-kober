@@ -11,13 +11,16 @@ from kober.expr import (
     BoolOp,
     Compare,
     ExprType,
+    Index,
     IntLiteral,
+    MapType,
     Ref,
     Scope,
     StrLiteral,
     UnaryOp,
     evaluate,
     infer_type,
+    map_entry,
     parse,
     references,
     unparse,
@@ -110,7 +113,7 @@ def test_slash_is_integer_division():
 @pytest.mark.parametrize(
     ("source", "fragment"),
     [
-        ("len(x)", "not one of the expression language's functions"),
+        ("abs(x)", "not one of the expression language's functions"),
         ("a ** 2", "'**'"),
         ("a @ b", "'@'"),
         ("a is b", "'is'"),
@@ -119,7 +122,11 @@ def test_slash_is_integer_division():
         ("[1, 2]", "list literal"),
         ("(1, 2)", "tuple literal"),
         ("{1: 2}", "dict literal"),
-        ("x[0]", "index or slice"),
+        ("x[0:1]", "slice"),
+        ("x[0, 1]", "one expression"),
+        ("a.b[0]", "only a map parameter"),
+        ("this[0]", "only a map parameter"),
+        ("f(x)[0]", "only a map parameter"),
         ("x if y else z", "conditional expression"),
         ("lambda: 1", "lambda"),
         ("f'{x}'", "f-string"),
@@ -137,8 +144,8 @@ def test_refused_constructs(source: str, fragment: str):
 def test_error_carries_source_and_location():
     where = Location("dns.message.size")
     with pytest.raises(ExprError) as caught:
-        parse("len(x)", where=where)
-    assert caught.value.source == "len(x)"
+        parse("abs(x)", where=where)
+    assert caught.value.source == "abs(x)"
     assert caught.value.loc == where
     assert "dns.message.size" in str(caught.value)
 
@@ -147,7 +154,7 @@ def test_the_location_puts_the_line_in_front_of_the_message():
     """An expression fault reads like every other one: file, line, path, why."""
     where = Location("dns.message.size", line=27, source="dns.yaml")
     with pytest.raises(ExprError) as caught:
-        parse("len(x)", where=where)
+        parse("abs(x)", where=where)
     assert str(caught.value).startswith("dns.yaml:27: dns.message.size: ")
 
 
@@ -303,7 +310,7 @@ def test_a_call_is_an_atom_and_needs_no_brackets():
 @pytest.mark.parametrize(
     ("source", "fragment"),
     [
-        ("len(x)", "not one of the expression language's functions"),
+        ("abs(x)", "not one of the expression language's functions"),
         ("s.lower()", "not one of the expression language's functions"),
         ("to_int()", "takes 1 or 2 argument(s), got 0"),
         ("to_int(a, 16, 2)", "takes 1 or 2 argument(s), got 3"),
@@ -432,3 +439,93 @@ def test_a_call_checks_its_argument_types(source: str, scope: dict, fragment: st
 def test_a_call_reports_the_references_inside_it():
     """The checker's forward-reference rule has to see through an argument."""
     assert [ref.path for ref in references(parse("to_int(a.b, c)"))] == [("a", "b"), ("c",)]
+
+
+# --- an entry of a map parameter ---------------------------------------------
+
+
+class _MapScope(FakeScope):
+    """A scope that also knows map parameters."""
+
+    def __init__(self, maps: dict[str, MapType], **names: ExprType) -> None:
+        super().__init__(**names)
+        self._maps = maps
+
+    def resolve_map(self, name: str) -> MapType:
+        if name not in self._maps:
+            msg = f"unknown map parameter {name!r}"
+            raise ExprError(msg, name)
+        return self._maps[name]
+
+
+class _Tables(_Values):
+    def __init__(self, tables: dict[str, dict[object, object]], **values: object) -> None:
+        super().__init__(**values)
+        self.tables = tables
+
+    def lookup_map(self, name: str) -> dict[object, object]:
+        return self.tables[name]
+
+
+KEYS = MapType(ExprType.INT, ExprType.BYTES)
+
+
+def test_an_index_parses_to_a_named_table_and_a_key_expression():
+    assert parse("keys[receiver + 1]") == Index(
+        "keys", BinOp("+", Ref(("receiver",)), IntLiteral(1))
+    )
+
+
+@pytest.mark.parametrize(
+    "source", ["keys[receiver]", "keys[a + 1] == b", "lower(names[peer])", "keys[keys2[a]]"]
+)
+def test_an_index_round_trips(source: str):
+    assert parse(unparse(parse(source))) == parse(source)
+    assert unparse(parse(source)) == source
+
+
+def test_an_index_is_an_atom_and_needs_no_brackets():
+    assert unparse(parse("(keys[a]) == b")) == "keys[a] == b"
+
+
+def test_an_index_has_the_maps_value_type():
+    scope = _MapScope({"keys": KEYS}, receiver=ExprType.INT)
+    assert infer_type(parse("keys[receiver]"), scope, "keys[receiver]") is ExprType.BYTES
+
+
+def test_an_index_checks_its_key_against_the_maps_key_type():
+    scope = _MapScope({"keys": KEYS}, name=ExprType.STR)
+    with pytest.raises(ExprError) as caught:
+        infer_type(parse("keys[name]"), scope, "keys[name]")
+    assert "the key of 'keys' needs int, got str" in str(caught.value)
+
+
+def test_an_index_names_the_field_it_was_chosen_by_and_not_the_table():
+    """The key is what chose the entry, so it is cited; the table is a parameter."""
+    assert references(parse("keys[receiver]")) == (Ref(("receiver",)),)
+
+
+def test_an_index_evaluates_to_the_entry():
+    env = _Tables({"keys": {7: b"seven"}}, receiver=7)
+    assert evaluate(parse("keys[receiver]"), env) == b"seven"
+
+
+def test_a_missing_entry_names_the_key_and_never_a_value():
+    with pytest.raises(EvalError) as caught:
+        map_entry({1: b"secret-key"}, 2, "keys")
+    assert str(caught.value) == "'keys' has no entry for 2"
+    assert "secret" not in str(caught.value)
+
+
+# --- len ---------------------------------------------------------------------------------------
+
+
+def test_len_is_the_bytes_length_and_an_int():
+    assert typed("len(sealed)", sealed=ExprType.BYTES) is ExprType.INT
+    assert evaluate(parse("len(sealed) == 16"), _Values(sealed=b"\x00" * 16)) is True
+
+
+def test_len_takes_bytes_only():
+    with pytest.raises(ExprError) as caught:
+        typed("len(name)", name=ExprType.STR)
+    assert "argument 1 of len() needs bytes, got str" in str(caught.value)

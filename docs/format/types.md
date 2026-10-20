@@ -350,7 +350,7 @@ are.
 | `limit` | **yes** | The most bytes the output may have. |
 | `args` | no | The transform's parameters, as expressions, by name. Exactly those the declaration lists. |
 | `type` | no | What the output is. Decoded in the output's own offset space. |
-| `content_type` | no | The record label for an output kept as bytes: `prim:…`, `mime:type/subtype` or `dec:…`. Only without `type`. |
+| `content_type` | no | The record label for an output kept as bytes: `prim:…`, `mime:type/subtype`, `dec:…`, or `net:ip` or `net:ethernet` for exactly one IP packet or Ethernet frame, which `check` holds to the format's closed list. Only without `type`. |
 
 It reads nothing where it stands. Like `select`, it reads a field already
 decoded, never the position, so a transform may follow a field that reads to
@@ -386,7 +386,8 @@ A transform may be a `switch` case, which is how a content coding chooses one:
 **A transform that fails does not fail its message.** Bad compressed data, an
 output past `limit`, an argument that cannot be evaluated, an output its `type`
 does not decode or does not read to its end: the message still decodes whole,
-and the transform's source is what is named `undecodable`. Its node in the
+and the transform's source is what is named `undecodable`, or the
+[`fails_as`](document.md#transforms) its declaration gives. Its node in the
 tree says `failed`, with why. A short read inside an output is never
 `truncated`, since the input it came from arrived whole.
 
@@ -453,9 +454,15 @@ binds what the Python standard library can run, and a program adds the rest
 with {func}`kober.transforms.register`, or a {class}`kober.transforms.Registry`
 of its own, or from the command line in a module `--load-transforms` runs: a
 cipher, which the standard library has none of, or `br` from a Brotli package.
+A module loaded by path can import the modules beside it, as a script can.
+`examples/wireguard/` is a complete one: a spec, a cipher, and the module that
+registers it, walked through in
+[Bringing your own code](../guides/your-own-code.md); `examples/packbits/` is
+the smallest, a codec with no parameters at all.
 A transform is a callable taking the source's bytes, `limit`, and the spec's
 `args` by name, and returning at most `limit` bytes. What it
-raises makes the source `undecodable`, and its message is never written out: a
+raises makes the source `undecodable`, or the transform's `fails_as`, and its
+message is never written out: a
 cipher's error text can hold a key. A name a spec uses that nothing binds is
 refused before any input is read, saying whether it is a well-known name this
 backend does not bind or a name of the spec's own that nothing registered.

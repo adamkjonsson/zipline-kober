@@ -81,7 +81,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from kober.errors import SpecError
-from kober.expr import ExprType, parse
+from kober.expr import MAP_KEY_TYPES, ExprType, MapType, parse
 from kober.source import Location, SourceMap
 from kober.spec import (
     BytesType,
@@ -151,9 +151,13 @@ _POINTER_KEYS = frozenset({"at", "type"})
 _TRANSFORM_KEYS = frozenset({"from", "with", "limit", "args", "type", "content_type"})
 _TRANSFORM_REQUIRED = ("from", "with", "limit")
 #: Every key of a transform's declaration under ``transforms:``.
-_TRANSFORM_DECL_KEYS = frozenset({"params", "doc"})
+_TRANSFORM_DECL_KEYS = frozenset({"params", "fails_as", "doc"})
 #: Every key of a document parameter written out.
 _DOC_PARAM_KEYS = frozenset({"type", "secret", "doc"})
+#: Every key of a parameter type written as a mapping.
+_PARAM_TYPE_KEYS = frozenset({"map"})
+#: How many types a map's type lists: its key's, then its values'.
+_MAP_ARITY = 2
 _PARAM_KEYS = frozenset({"name", "type"})
 _ENUM_KEYS = frozenset({"members", "doc"})
 
@@ -1283,6 +1287,9 @@ def _transform_decls(document: object, at: _At, owner: str) -> dict[str, Transfo
         body = _require_mapping({} if value is None else value, site)
         _reject_unknown(body, _TRANSFORM_DECL_KEYS, site)
         params_doc = _require_mapping(body.get("params", {}), site.child("params"))
+        fails_as = body.get("fails_as")
+        if fails_as is not None:
+            fails_as = _require_str(fails_as, site.child("fails_as"))
         site.record(f"{owner}.transforms.{name}")
         decls[name] = TransformDecl(
             name=name,
@@ -1290,6 +1297,7 @@ def _transform_decls(document: object, at: _At, owner: str) -> dict[str, Transfo
                 param: _member(ExprType, kind, site.child("params").child(param))
                 for param, kind in params_doc.items()
             },
+            fails_as=fails_as,
         )
     return decls
 
@@ -1318,9 +1326,37 @@ def _doc_params(document: object, at: _At, owner: str) -> list[Param]:
         if not isinstance(secret, bool):
             msg = f"'secret' is true or false, got {secret!r}"
             raise SpecError(msg, site.child("secret").loc)
-        kind = _member(ExprType, body["type"], site.child("type"))
+        kind = _param_type(body["type"], site.child("type"))
         params.append(Param(name=name, type=kind, secret=secret))
     return params
+
+
+def _param_type(document: object, at: _At) -> ExprType | MapType:
+    """Build a document parameter's type: a name, or ``{map: [key, value]}``.
+
+    A map is only ever written out, under ``type``. Its short form would be a
+    mapping where a parameter's long form already is one, and a table of keys
+    is secret more often than not, which needs the long form anyway.
+    """
+    if not isinstance(document, dict):
+        return _member(ExprType, document, at)
+    body = _require_mapping(document, at)
+    _reject_unknown(body, _PARAM_TYPE_KEYS, at)
+    if "map" not in body:
+        msg = "a parameter type written as a mapping is {map: [key type, value type]}"
+        raise SpecError(msg, at.loc)
+    site = at.child("map")
+    pair = _require_list(body["map"], site)
+    if len(pair) != _MAP_ARITY:
+        msg = f"a map is [key type, value type], and this lists {len(pair)} type(s)"
+        raise SpecError(msg, site.loc)
+    key = _member(ExprType, pair[0], site.child("[0]"))
+    item = _member(ExprType, pair[1], site.child("[1]"))
+    if key not in MAP_KEY_TYPES:
+        allowed = " or ".join(sorted(kind.value for kind in MAP_KEY_TYPES))
+        msg = f"a map is keyed by {allowed}, not {key.value}"
+        raise SpecError(msg, site.child("[0]").loc)
+    return MapType(key=key, item=item)
 
 
 def _pointer(document: object, at: _At) -> Pointer:

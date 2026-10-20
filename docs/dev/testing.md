@@ -28,6 +28,12 @@ itself came from the second kind, and none of them needed a clever test.
 | `test_emit_conformance.py` | What `zpf` *accepts*: real files written through a decode stage and put past `ConformanceChecker` and `check_coverage`. |
 | `test_stage.py` | The driver: gaps, seams, shape dispatch, chaining, timestamps, `content_registry`, and what the output declares — a unit sequence at field granularity, the input's adjacency carried forward otherwise. |
 | `test_stage_transforms.py` | What a stage writes for a transform, through both drivers: take-over, a failure that neither confirms nor declines, the digest, and a tunnel feeding a second stage. |
+| `test_map_params.py` | Map parameters and `keys[receiver]`: loaded, checked, decoded by both drivers, read from a JSON key log, and in the digest, with no value ever written. |
+| `test_fails_as.py` | A transform's declared `fails_as`: loaded, checked against the format's classes, planned alike by both backends, and written with its `reason_class`. |
+| `examplekit.py` | Not tests: what every bring-your-own-code example's tests need, described once by an `Example` read from the example's `example.json` — loading its modules by path, its key log read as `--param` reads it, the oracle that checks a decode against what its tunnel module sealed, the whole chain, fuzz invariants, and `kober run`. No pytest import, so `tools/pipeline.py` can use it too. |
+| `test_examplekit.py` | Every `example.json`: the files it names exist, its failure and key parameter are its spec's, and a key the kit does not know is refused. |
+| `test_packbits_example.py` | `examples/packbits/`, the second example, written from the first's template: its codec against TN1023's worked example and TIFF 6.0's rules, its tunnel module, its spec over datagrams built here, the whole chain, fuzzing, and `kober run` with no `--param`. Most of it is the kit's. |
+| `test_wireguard_example.py` | `examples/wireguard/`: its cipher against RFC 8439's and RFC 7748's own vectors (and `cryptography`, where installed), its handshake, its spec, its tunnel module, its key-log converter (from either endpoint's half of Wireshark's key log, it must derive exactly the keys that were sealed with, and a pre-shared key it lacks must leave a handshake unopened), a tunnel decoded by both drivers, and `kober run` with a key log. Some tests reach outside and skip without it: Wireshark opening what the example seals (needs `tshark`), and the whole chain through packeteer, `zpfwire`, the tunnel, `zpfwire` again and `dns.yaml` or `http.yaml` (needs the sibling checkouts, `zpfwire` 0.5.0 for the inner hop). |
 | `test_cli.py` | All five verbs, driving `main()` directly. |
 | `test_examples.py` | The shipped `examples/` specs — they must check clean, carry documentation, and still decode. |
 | `test_packeteer.py` | packeteer's shipped specs, vendored under `tests/packeteer/` at a stated version: they load, decode, and have every key kober has no meaning for declined by name. |
@@ -129,6 +135,19 @@ transforms, some failing, fuzz the driver as well: a failure neither confirms
 the stream nor declines it, and the message after one is still decoded. The
 compiled module is held to the same corpus by the differential.
 
+A key chosen per message from a map parameter, `keys[receiver]`, adds one
+more: a receiver with no entry fails the transform it keys and nothing else,
+in the interpreter's words in both backends, and no value of the table is ever
+seen in a tree, a record or a message. The receiver is the corpus's first
+byte, so most mutations of it name a key the table lacks. The check is run
+against a lookup that lets the miss escape and one that quotes the table, and
+must fail on both.
+
+A transform may declare the reason its failure is named, `fails_as`, so the
+vocabulary invariant widens: every region's reason is one `zpf` classifies, or
+a `fails_as` the spec declared. It is fuzzed over the transform corpus with a
+reason declared for each codec, and the corpus is required to reach each.
+
 ### A seed is only worth the code it reaches
 
 Check what a seed *enters*, not only that its variants pass. `fuzzing.py` seeds
@@ -173,7 +192,10 @@ It is one command, and **run it before a release, or after touching
 
 It needs two sibling checkouts with their own venvs, neither a dependency of
 this project — `../packeteer` and `../python-zipline-wire`, or wherever
-`--packeteer` and `--wire` say. It builds ten inputs:
+`--packeteer` and `--wire` say: packeteer 0.18.0 or later, for its UDP tunnel,
+and `zpfwire` 0.5.0 or later, for a `.zpf` of packets. It builds ten inputs of
+its own, and those of every example that describes itself in an `example.json`
+(`tests/examplekit.py`); WireGuard's five and PackBits' two make seventeen:
 
 | Input | What it is for |
 | --- | --- |
@@ -185,11 +207,19 @@ this project — `../packeteer` and `../python-zipline-wire`, or wherever
 | `gzip_clean` | The same traffic with no loss, checked exactly against the reference reader. |
 | `packet_loss`, `tcp_lossy_ts`, `tcp_reorder_ts` | Real captures kept for their loss and reordering. They are not DNS or HTTP; they are driver structure. |
 | `http_stream_1` | A real HTTP capture, 2000 messages, lossless. |
+| `pb_clean`, `pb_impaired` | From `examples/packbits/example.json`. DNS both ways through `examples/packbits/pb_tunnel.py`, clean, and under every tunnel impairment at once. |
+| `wg_clean`, `wg_loss`, `wg_corrupt`, `wg_reorder`, `wg_duplicate` | From `examples/wireguard/example.json`. DNS both ways through `examples/wireguard/wg_seal.py`: a real handshake, a rekey every ten packets, and one tunnel impairment each, or none, so a count that moves says which impairment moved it. The key log and what was sealed are written beside the capture. |
 
-Each is converted with `zpfwire convert` and run through **both** example specs
-— a spec meeting a stream in another protocol is a case the driver has to
-handle too — by the interpreter and by a module compiled fresh from the spec, at
-both granularities: 80 files. For each, it checks:
+Each is converted with `zpfwire convert` and run through **every** example
+spec — DNS, HTTP and every described example's, each over every input, since
+a spec meeting a stream in another protocol is a case the driver has to handle
+too — by the interpreter and by a module compiled fresh from the spec, at both
+granularities. A described example's is given the input's key log, or an empty
+table. A
+`datagram` spec over a byte stream is refused rather than decoded, and the
+check there is that **both** drivers refuse it: the compiled one did not, until
+these inputs ran the first datagram spec the pipeline had. For each file, it
+checks:
 
 - **Conformance and coverage**: `zpf.ConformanceChecker` and
   `zpf.check_coverage`.
@@ -212,6 +242,15 @@ both granularities: 80 files. For each, it checks:
 - **The inflated content**, over the two compressed-body inputs: every
   `http.content` record must be byte for byte a document `tools/gzip_http.py`
   compressed, and over the lossless one every compressed body must be there.
+- **The tunnel**, over a described example's inputs, exactly, against what
+  its tunnel module sealed, by `examplekit`'s oracle, the one its tests use: a
+  packet whose datagram reached the wire unchanged opens once per arrival, and
+  every other datagram that carries a packet is one region named its failure
+  (`decrypt-failed`, for WireGuard).
+- **The traffic inside**, over the same: `zpfwire` turns the opened packets
+  back into the conversation, the example's `inside` spec decodes it
+  (`dns.yaml`, for WireGuard), and each direction must be, message for
+  message, what was inside what arrived intact.
 
 It prints one line per check and exits non-zero if any failed, keeping the work
 directory. `--work DIR` keeps it anyway, and `--baseline DIR` compares every

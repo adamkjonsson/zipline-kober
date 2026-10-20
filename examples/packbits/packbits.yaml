@@ -1,0 +1,52 @@
+# A tunnel of PackBits-compressed IP packets: a protocol made up for this
+# example, the smallest one that needs code of your own and is not a cipher.
+#
+# Every datagram carries one IP packet, packed with PackBits (TIFF 6.0 §9,
+# Apple TN1023), which the standard library does not have, so the transform
+# that unpacks it is pb_transforms.py's. PackBits cannot say where its packed
+# bytes end, so the datagram says how long the packet is; and it checks
+# nothing, so the datagram carries the packet's CRC-32, and a datagram the
+# link corrupted fails rather than opening to the wrong packet.
+#
+#     version   1 byte    1
+#     length    2 bytes   the packet's length, unpacked
+#     crc       4 bytes   CRC-32 of the packet, unpacked
+#     packed    the rest
+#
+# A datagram that does not unpack to its length, or to its CRC, or to one IP
+# packet, is one `unpack-failed` region, and the next datagram decodes. A packet
+# is labelled `net:ip`, which promises exactly one IP packet, and is what a
+# sessionization stage such as zpfwire's takes a packet by.
+name: packbits
+version: "0.1"
+entry: datagram
+input: datagram
+doc: >-
+  A made-up tunnel: one IP packet per datagram, PackBits-packed, with its
+  length and CRC-32.
+
+transforms:
+  packbits:
+    params: {length: int, crc: int}
+    fails_as: unpack-failed
+    doc: >-
+      PackBits to exactly `length` bytes, which must have the CRC-32 `crc`.
+      The caller registers it: kober has no PackBits.
+
+units:
+  datagram:
+    doc: One datagram, which carries one packet.
+    confirm: "version == 1"
+    fields:
+      - {name: version, bits: 8}
+      - {name: length, bits: 16, emit: none, doc: "The packet's length, unpacked."}
+      - {name: crc, bits: 32, emit: none, doc: "The packet's CRC-32, unpacked."}
+      - {name: packed, bytes: {size: {remaining: true}}, doc: "The packet, packed."}
+      - name: packet
+        doc: The IP packet.
+        transform:
+          from: packed
+          with: packbits
+          limit: 65535
+          args: {length: length, crc: crc}
+          content_type: "net:ip"

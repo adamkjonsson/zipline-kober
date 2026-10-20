@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from kober.expr import Expr, ExprType
+    from kober.expr import Expr, ExprType, ParamType
 
 #: Widest integer field the model accepts. Not a format limit — `zpf`'s
 #: ``prim:`` tokens stop at 64 bits, and a wider field would have nowhere to
@@ -600,7 +600,9 @@ class Param:
 
     Attributes:
         name: Parameter name, referable in expressions.
-        type: The type the value must have.
+        type: The type the value must have. Only a document parameter may
+            be a :class:`~kober.expr.MapType`, since a unit's are bound from
+            expressions and no expression is a map.
         secret: Whether the value must never be written anywhere: not in a
             record, a region's comment, or a diagnostic. It is hashed into the
             decoder's parameters digest and nothing else. Document parameters
@@ -609,7 +611,7 @@ class Param:
     """
 
     name: str
-    type: ExprType
+    type: ParamType
     secret: bool = False
 
     def __post_init__(self) -> None:
@@ -636,11 +638,16 @@ class TransformDecl:
         name: The transform's name, as ``with`` spells it.
         params: Each parameter's name and type. A well-known transform has
             none.
+        fails_as: What a failure of it is called, where its source's bytes
+            are named: ``decrypt-failed`` for a cipher, say. ``None`` is
+            ``undecodable``. A reason of the format's ``bytes`` class, since
+            the bytes a transform could not use did exist.
 
     """
 
     name: str
     params: Mapping[str, ExprType] = field(default_factory=dict)
+    fails_as: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():

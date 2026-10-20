@@ -107,7 +107,7 @@ datagrams is allowed — each datagram is one self-contained message.
 ```yaml
 transforms:
   br: {}
-  aes-gcm: {params: {key: bytes, nonce: bytes, aad: bytes}}
+  aes-gcm: {params: {key: bytes, nonce: bytes, aad: bytes}, fails_as: decrypt-failed}
 ```
 
 Each transform a [`transform`](types.md#transform) field uses that is not in the
@@ -115,6 +115,16 @@ core tier, by name, with its parameters and their types. An extended name such
 as `br` takes none, and declaring it is how the spec says it relies on one a
 backend may decline. A name of the spec's own, such as a cipher, lists what its
 `args` must supply. A declaration nothing uses is a warning.
+
+`fails_as` is what the transform's failure is called where its source's bytes
+are named, in place of `undecodable`: `decrypt-failed` for a cipher, so a reader
+can tell a wrong key from bytes that made no sense. Any declared transform may
+have one, a core name included. It is spelled as the format spells a reason,
+lower-case words joined by hyphens, and must be a reason of the format's `bytes`
+class, since a failed transform's bytes did exist: `gap` and `truncated` are
+refused. A reason outside the format's four must say its class, so the region
+is written with `reason_class: bytes` beside it, which `zpf` has had since
+0.5.2 ([python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79)).
 
 What a name is bound to is decided by the program that runs the spec, not by
 the spec: `check` reads this block, never a registry.
@@ -133,18 +143,41 @@ every unit under its name, so `args: {key: key}` is ordinary. `name: type` is
 the short form. A parameter may not share a name with any field or unit
 parameter.
 
+A parameter may also be a **map**, one value per key, written out:
+
+```yaml
+params:
+  keys: {type: {map: [int, bytes]}, secret: true}
+```
+
+The first type is the key's, `int` or `str`; the second is the values', any of
+the four. An expression reads one entry, `keys[receiver]`, and never the map
+whole ([An entry of a map parameter](expressions.md#an-entry-of-a-map-parameter)).
+It is how a spec chooses a key per message from a table, which a protocol
+that names its key in the message needs. Only the document's parameters may
+be maps.
+
 Every one is required, and a run without one does not start. From the command
 line, `--param NAME=VALUE`, read as the declared type: `bytes` as `hex:0a0b` or
 `file:PATH`, never as bare text; `int` as a decimal; `bool` as `true` or
-`false`; `str` as given. From Python, `Decoder(spec, params={...})`, and a
-compiled module's `decode(data, params={...})` or
-`run_compiled(module, ..., params={...})`.
+`false`; `str` as given. A map is `file:PATH`, a JSON object whose keys and
+values are each written that way:
+
+```json
+{"1234": "hex:5f0c…", "5678": "hex:9a21…"}
+```
+
+From Python, `Decoder(spec, params={...})`, a map as a `dict`, and a compiled
+module's `decode(data, params={...})` or `run_compiled(module, ...,
+params={...})`. A map is copied when the decode is set up, so changing the
+caller's `dict` afterwards changes nothing.
 
 `secret: true` marks a value that must never be written anywhere: not in a
 record, a region's comment, or a diagnostic. Every value goes into the
 `params_digest` the output's decoder descriptor carries, a digest of the spec,
 the granularity and the parameters, so a file says which configuration wrote
-it; a secret one is in it only as part of the hash.
+it; a secret one is in it only as part of the hash. A map goes in as its
+entries in a canonical order, so the order it was built in does not count.
 
 These are the **document's** parameters, supplied by whoever runs the spec. A
 unit's own `params` (below) are supplied by the field that references the

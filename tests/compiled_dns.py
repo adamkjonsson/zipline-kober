@@ -31,6 +31,10 @@ EMIT = "field"
 #: the interpreter writes for the same configuration.
 SPEC_DIGEST = "ddad4b284b808a6f1e3da559fe660e809abc70c4ef9ae967a12fe9db2bacce91"
 
+#: What input the specification declares it reads: the stage driver
+#: refuses a datagram decoder a byte stream, as it refuses the interpreter.
+INPUT = "either"
+
 #: How a text field's payload is labelled. Not ``prim:`` — that scheme
 #: has no text token — so the format's other fully specified one is used.
 TEXT_CONTENT_TYPE = "mime:text/plain; charset=utf-8"

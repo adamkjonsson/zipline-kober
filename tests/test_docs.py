@@ -129,7 +129,7 @@ def test_the_readme_lists_every_field_type():
 
 def test_the_readme_counts_the_builtins_correctly():
     """It says how many there are in words, which a table cannot check for it."""
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
     spelled = words[len(expr.BUILTINS)]
     text = README.read_text()
     assert f"closed table of {spelled} functions" in text, (

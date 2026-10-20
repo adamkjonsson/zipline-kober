@@ -66,7 +66,7 @@ number, or reserved bits that must be zero — which refuses traffic that is not
 this protocol's at the field that says so, rather than after a whole message
 has been read against the wrong one. The expression language behind all of that
 is small on purpose — arithmetic, comparison, field references, and a
-closed table of five functions an author cannot add to.
+closed table of six functions an author cannot add to.
 
 What it deliberately cannot do is move the read cursor. That is the invariant
 the coverage guarantee rests on, and it is why constructs get added rather than
@@ -80,6 +80,10 @@ The [spec format reference](docs/format/index.md) documents every key;
 [`examples/dns.yaml`](examples/dns.yaml) and
 [`examples/http.yaml`](examples/http.yaml) are complete specs for real
 protocols, exercised by the test suite against real captures.
+[`examples/wireguard/`](examples/wireguard/README.md) and
+[`examples/packbits/`](examples/packbits/README.md) are protocols that need
+code of your own, a cipher and a codec, each with the traffic generator and
+tests that check its decode exactly.
 
 `show` prints the field tree a spec describes, expanding nested units in place:
 
@@ -257,10 +261,11 @@ python3 -m venv .venv
 ```
 
 **Why `zpf` is installed from a checkout.** This project depends on
-`zpf>=0.5.1,<0.6` — it is built on `zpf.decode_stage` and its `adjacency=`
-keyword, which is `0.5.0` work, its `params_digest=` keyword, which is
-`0.5.1`, on the per-record `role=` label, and on a record timestamp derived
-from `cites`. `zpf` `0.5.1` is released and tagged, but at the time of writing
+`zpf>=0.6.0,<0.7`, which implements Zipline Payload Format 0.23: it is built
+on `zpf.decode_stage` and its `adjacency=`, `params_digest=` and
+`reason_class=` keywords, on the per-record `role=` label, on a record
+timestamp derived from `cites`, and on 0.23's `net:` labels. `zpf` `0.6.0` is
+released and tagged, but at the time of writing
 PyPI publishes only `0.1.0`, so the dependency has to come from a local (or
 git) install. Once it reaches PyPI the checkout becomes a convenience rather
 than a requirement, and the first line above can be dropped.
@@ -304,7 +309,8 @@ It needs two sibling checkouts with their own venvs,
 [`python-zipline-wire`](https://github.com/adamkjonsson/python-zipline-wire)
 (`--packeteer` and `--wire` if they are not at `../`). It fuzzes and generates
 DNS and chunked HTTP, builds HTTP responses with gzip and deflate bodies,
-converts them and four real captures to `.zpf`, and runs both example specs
+generates traffic through each example's own tunnel module, converts them and
+four real captures to `.zpf`, and runs every example spec
 through the interpreter and a freshly compiled module at both granularities. Every output must be conformant and account for every byte; each
 interpreter/compiled pair must be identical block for block; and the decoded
 **shape** must be right — counted against an independent reader where the

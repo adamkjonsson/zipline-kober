@@ -313,6 +313,21 @@ def test_a_malformed_content_type_is_refused(label: str):
     assert "is not a label the format has" in only_error(built)
 
 
+@pytest.mark.parametrize("label", ["net:ip", "net:ethernet"])
+def test_a_net_label_the_format_has_is_accepted(label: str):
+    """Spec 0.23's ``net:``: one IP packet, or one Ethernet frame."""
+    labelled = f'{{from: body, with: gzip, limit: 9, content_type: "{label}"}}'
+    assert errors(spec(f"- name: plain\n  transform: {labelled}")) == []
+
+
+@pytest.mark.parametrize("label", ["net:ipv4", "net:ip-packet", "net:"])
+def test_a_net_label_outside_the_formats_vocabulary_is_refused(label: str):
+    """``net:`` is closed: a name it does not have is refused, and the ones it has named."""
+    labelled = f'{{from: body, with: gzip, limit: 9, content_type: "{label}"}}'
+    message = only_error(spec(f"- name: plain\n  transform: {labelled}"))
+    assert "'net:ethernet', 'net:ip'" in message or "is not a label the format has" in message
+
+
 @pytest.mark.parametrize(
     "construct", ["transform: {from: body, with: gzip, limit: 9}", "concat: chunks.data"]
 )

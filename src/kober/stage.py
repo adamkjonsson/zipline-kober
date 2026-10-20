@@ -131,6 +131,47 @@ class _Verdict:
     refused: bool = False
 
 
+def canonical_class(reason: str) -> str | None:
+    """Return the class `zpf` gives a canonical reason, or ``None`` for any other.
+
+    The four canonical reasons imply their class, ``bytes`` or ``hole``; a
+    reason of a producer's own, such as a transform's declared ``fails_as``,
+    has to state one. Read from :data:`zpf.blocks.UNDECODED_REASONS` here, the
+    one module that imports `zpf`, so ``check`` and the writer agree with the
+    conformance checker and with each other.
+
+    Args:
+        reason: A region's reason.
+
+    Returns:
+        ``"bytes"`` or ``"hole"`` for a canonical reason, else ``None``.
+
+    """
+    return UNDECODED_REASONS.get(reason)
+
+
+def net_tokens() -> tuple[str, ...]:
+    """Return the tokens the format's closed ``net:`` vocabulary has, sorted.
+
+    ``net:ip`` is one IP packet, ``net:ethernet`` one Ethernet frame: a
+    label a sessionization stage recognises a packet by. Read from
+    :data:`zpf.NET_LINK_TYPES` here, the one module that imports `zpf`, so
+    ``check`` refuses exactly what the writer would.
+    """
+    return tuple(sorted(zpf.NET_LINK_TYPES))
+
+
+def _reason_class(reason: str) -> str | None:
+    """Return the ``reason_class`` a region's reason must be written with.
+
+    ``None`` for a canonical reason, which implies its class. A reason of the
+    spec's own, a transform's ``fails_as``, must state one, and it is always
+    ``bytes``: ``check`` allows a ``fails_as`` of that class only, since a
+    failed transform's bytes did exist.
+    """
+    return None if canonical_class(reason) is not None else "bytes"
+
+
 def _seam_for(reason: str) -> zpf.Seam | None:
     """Return the seam owed after an undecoded region, if any.
 
@@ -232,8 +273,14 @@ def decode_stream_compiled(
 
     Raises:
         ParameterError: If ``params`` does not match what the module declares.
+        SpecError: If the module's spec reads datagrams and ``stream`` is a
+            byte stream, as for the interpreter. A module generated before
+            ``INPUT`` existed is not checked.
 
     """
+    shape = getattr(module, "INPUT", None)
+    if shape is not None:
+        _check_shape(InputShape(shape), module.NAME, stream)
     _drive(_compiled(module, params), _Writer(stage, stream, module.NAME), stream)
 
 
@@ -492,7 +539,14 @@ class _Writer:
             return
         off_start, off_end, reason, comment = self._pending
         self._pending = None
-        self.stage.undecoded(self.stream, off_start, off_end, reason=reason, comment=comment)
+        self.stage.undecoded(
+            self.stream,
+            off_start,
+            off_end,
+            reason=reason,
+            reason_class=_reason_class(reason),
+            comment=comment,
+        )
         self._seam = _seam_for(reason) or self._seam
 
 

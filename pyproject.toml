@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "kober"
 # The single source of truth for the version; `kober.__version__`
 # reads it back out of the installed metadata.
-version = "0.5.0"
+version = "0.6.0.dev0"
 description = "Decode network protocols from a declarative specification into Zipline decode stages"
 readme = "README.md"
 license = "MIT"
@@ -30,18 +30,17 @@ classifiers = [
 # minor is a break with no upgrade path promised, so a range spanning two of
 # them would be a promise neither project can keep.
 #
-# The floor is 0.5.1, for `params_digest=` on `decode_stage`: kober's transforms
-# take document parameters such as a key, and the digest is where a file says
-# which configuration produced it (python-zipline#77, filed for this). 0.5.0
-# implements Zipline Payload Format v0.21. What this
-# project needs landed *in* it: `adjacency=` on `decode_stage`, the Participant
-# Descriptor field that lets field-granularity output say its records are a
-# unit sequence rather than leaving a consumer to assume they join. The earlier
-# floor's reasons still hold — `role=` on `DecodeStage.record()` and a `ts`
-# derived from `cites`, both 0.3.0 — but a 0.3 or 0.4 build cannot read a file
-# written at 0.21 at all, so the version gate would refuse it before any of
-# that mattered.
-dependencies = ["zpf>=0.5.1,<0.6"]
+# 0.6.0 implements Zipline Payload Format v0.23, whose `net:` content-type
+# scheme is what a decoded packet is labelled (`net:ip`), and what a
+# sessionization stage such as zpfwire's recognises a packet by. A 0.5.x build
+# cannot read a file written at 0.23 at all, and 0.6.0 refuses one written at
+# 0.21, so the floor is that minor's first release. The earlier floors' reasons
+# still hold, and every one is in 0.6.0: `reason_class=` on
+# `DecodeStage.undecoded` (0.5.2, python-zipline#79), for a transform's
+# `fails_as`; `params_digest=` on `decode_stage` (0.5.1, #77); `adjacency=`
+# (0.5.0), for field-granularity output's unit sequence; and `role=` and a
+# `ts` derived from `cites` (0.3.0).
+dependencies = ["zpf>=0.6.0,<0.7"]
 
 [project.optional-dependencies]
 # YAML is the authoring format for specs, and comments are the reason: a
@@ -55,7 +54,7 @@ yaml = ["PyYAML>=6.0"]
 kober = "kober.cli:main"
 
 [project.urls]
-Specification = "https://github.com/adamkjonsson/zipline/blob/v0.21/docs/zipline-payload-format.md"
+Specification = "https://github.com/adamkjonsson/zipline/blob/v0.23/docs/zipline-payload-format.md"
 Changelog = "https://github.com/adamkjonsson/zipline-kober/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]

@@ -54,7 +54,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from kober.errors import ExprError, SpecError
-from kober.expr import ExprType, IntLiteral, infer_type, unparse
+from kober.expr import MAP_KEY_TYPES, ExprType, IntLiteral, MapType, infer_type, unparse
 from kober.loader import FOREIGN_KEYS
 from kober.spec import (
     BytesType,
@@ -82,11 +82,11 @@ from kober.spec import (
 from kober.transforms import WELL_KNOWN, is_core
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
 
     from kober.expr import Expr, Scope
     from kober.source import Location
-    from kober.spec import FieldType, Repeat, SizeSpec, Spec
+    from kober.spec import FieldType, Param, Repeat, SizeSpec, Spec
 
 
 class Severity(Enum):
@@ -717,9 +717,17 @@ def _int_range(kind: IntType) -> tuple[int, int]:
     return 0, (1 << kind.bits) - 1
 
 
+#: How the format spells an undecoded region's reason: lower-case words joined
+#: by hyphens, as ``undecodable`` and ``decrypt-failed`` are.
+_REASON = re.compile(r"[a-z]+(-[a-z0-9]+)*")
+
 #: What a record's content type may look like, loosely: a namespace the format
-#: defines, and a name. ``prim:bytes``, ``mime:application/json``, ``dec:ip-packet``.
-_CONTENT_TYPE = re.compile(r"^(prim:[a-z0-9]+|mime:[\w.+-]+/[\w.+-]+(;.*)?|dec:[\w.-]+)$")
+#: defines, and a name. ``prim:bytes``, ``mime:application/json``,
+#: ``dec:wireguard-keepalive``, ``net:ip``. ``net:``'s names are a closed set,
+#: checked against the format's own (:meth:`_check_net_label`).
+_CONTENT_TYPE = re.compile(
+    r"^(prim:[a-z0-9]+|mime:[\w.+-]+/[\w.+-]+(;.*)?|dec:[\w.-]+|net:[\w.-]+)$"
+)
 
 
 def _visible_names(unit: Unit, upto: int) -> set[str]:
@@ -802,6 +810,13 @@ class _Checker:
                     f"parameter {param.name!r} has the name of a field or unit parameter, "
                     "and a document parameter is in scope in every unit",
                 )
+            if isinstance(param.type, MapType) and param.type.key not in MAP_KEY_TYPES:
+                allowed = " or ".join(sorted(kind.value for kind in MAP_KEY_TYPES))
+                self.error(
+                    f"{self.spec.name}.params.{param.name}",
+                    f"parameter {param.name!r}: a map is keyed by {allowed}, "
+                    f"not {param.type.key.value}",
+                )
         used = {
             kind.name
             for unit in self.spec.units.values()
@@ -819,6 +834,35 @@ class _Checker:
                 )
             if name not in used:
                 self.warn(where, f"transform {name!r} is declared and never used")
+            if declared.fails_as is not None:
+                self._check_fails_as(name, declared.fails_as, f"{where}.fails_as")
+
+    def _check_fails_as(self, name: str, reason: str, where: str) -> None:
+        """Check the reason a transform's failure is written with.
+
+        Any reason the format's open vocabulary allows, spelled as its own
+        are, and of the ``bytes`` class: a failed transform's source was
+        read whole, so naming it a hole would tell a reader to look upstream
+        for bytes that were never missing.
+        """
+        if not _REASON.fullmatch(reason):
+            self.error(
+                where,
+                f"transform {name!r}: fails_as {reason!r} is not a reason as the format "
+                "spells one: lower-case words joined by hyphens, such as 'decrypt-failed'",
+            )
+            return
+        # The stage driver is the one module that imports `zpf`, and it imports
+        # this one, so its table is reached lazily, as the decoder reaches it.
+        from kober.stage import canonical_class
+
+        canonical = canonical_class(reason)
+        if canonical is not None and canonical != "bytes":
+            self.error(
+                where,
+                f"transform {name!r}: fails_as {reason!r} is a {canonical!r}-class reason, "
+                "and a failed transform's bytes did exist; use a 'bytes'-class one",
+            )
 
     def _check_foreign(self) -> None:
         """Report every packeteer key the spec used, and why it means nothing here.
@@ -949,6 +993,13 @@ class _Checker:
         seen_params = {param.name for param in unit.params}
         if len(seen_params) != len(unit.params):
             self.error(where, "unit declares duplicate parameter names")
+        for param in unit.params:
+            if isinstance(param.type, MapType):
+                self.error(
+                    where,
+                    f"parameter {param.name!r} is a map, and only a document parameter "
+                    "may be one: a unit's are bound from expressions, and none is a map",
+                )
 
         # confirm/reject see the whole unit: both are decided once it is done.
         whole = _visible_names(unit, len(unit.fields))
@@ -1336,8 +1387,25 @@ class _Checker:
                 self.error(
                     where,
                     f"{label}: content_type {kind.content_type!r} is not a label the "
-                    "format has: 'prim:…', 'mime:type/subtype', or 'dec:…'",
+                    "format has: 'prim:…', 'mime:type/subtype', 'dec:…', or 'net:…'",
                 )
+            elif kind.content_type.startswith("net:"):
+                self._check_net_label(kind.content_type, where, label)
+
+    def _check_net_label(self, content_type: str, where: str, label: str) -> None:
+        """Check a ``net:`` label against the format's closed vocabulary."""
+        # The stage driver is the one module that imports `zpf`, and it imports
+        # this one, so its table is reached lazily, as `_check_fails_as` does.
+        from kober.stage import net_tokens
+
+        tokens = net_tokens()
+        if content_type.removeprefix("net:") not in tokens:
+            known = ", ".join(f"'net:{token}'" for token in tokens)
+            self.error(
+                where,
+                f"{label}: content_type {content_type!r} is not one the format has; "
+                f"'net:' names only {known}",
+            )
 
     def _check_transform_source(
         self, unit: Unit, kind: Transform, visible: set[str], where: str, label: str
@@ -1514,6 +1582,41 @@ class _Scope:
             return self._resolve_parent(tuple(rest), path)
         return self._in_unit(self.unit, path, self.visible, path)
 
+    def resolve_map(self, name: str) -> MapType:
+        """Return the type of the map parameter ``name``, or raise :class:`ExprError`.
+
+        Only a document parameter may be a map, so that is the only place
+        looked. Anything else of the name is named in the refusal, since a
+        field called ``keys`` indexed by mistake deserves better than *unknown*.
+        """
+        for param in self.checker.spec.params:
+            if param.name == name:
+                if isinstance(param.type, MapType):
+                    return param.type
+                message = (
+                    f"{name!r} is {param.type.value}, and only a map parameter can be indexed"
+                )
+                raise ExprError(message, name)
+        if self.unit.field(name) is not None or any(p.name == name for p in self.unit.params):
+            message = f"{name!r} is not a map parameter, and only a map parameter can be indexed"
+            raise ExprError(message, name)
+        maps = sorted(p.name for p in self.checker.spec.params if isinstance(p.type, MapType))
+        known = ", ".join(maps) or "none"
+        message = f"unknown map parameter {name!r}; the spec's maps: {known}"
+        raise ExprError(message, name)
+
+    def _scalar(self, param: Param, rest: Sequence[str], path: tuple[str, ...]) -> ExprType:
+        """Type a reference to a parameter, which has no fields and is never a map."""
+        if rest:
+            raise self._fail(path, f"parameter {param.name!r} has no fields to reference")
+        if isinstance(param.type, MapType):
+            raise self._fail(
+                path,
+                f"{param.name!r} is a map; an expression reads one entry of it, "
+                f"{param.name}[key]",
+            )
+        return param.type
+
     def _fail(self, path: tuple[str, ...], message: str) -> ExprError:
         """Build the error for an unresolvable path."""
         return ExprError(message, ".".join(path))
@@ -1589,9 +1692,7 @@ class _Scope:
 
         for param in unit.params:
             if param.name == head:
-                if rest:
-                    raise self._fail(path, f"parameter {head!r} has no fields to reference")
-                return param.type
+                return self._scalar(param, rest, path)
 
         item = unit.field(head)
         if item is None:
@@ -1599,9 +1700,7 @@ class _Scope:
             # one named like a field or unit parameter, so nothing is shadowed.
             for param in self.checker.spec.params:
                 if param.name == head:
-                    if rest:
-                        raise self._fail(path, f"parameter {head!r} has no fields to reference")
-                    return param.type
+                    return self._scalar(param, rest, path)
         if item is None:
             known = ", ".join(sorted(visible or ())) or "none"
             message = f"unknown name {head!r} in unit {unit.name!r}; in scope: {known}"

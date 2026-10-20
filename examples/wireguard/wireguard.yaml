@@ -1,0 +1,135 @@
+# WireGuard, as its paper and the reference implementation define the wire:
+# https://www.wireguard.com/protocol/ and https://www.wireguard.com/papers/wireguard.pdf §5.4.
+#
+# Every message is one UDP datagram, and its first byte says which of four it
+# is. Three make up the handshake, and those decode as structure only: their
+# encrypted fields stay bytes. Opening them takes the Noise IK handshake's
+# state, which runs from one message to the next, and a transform keeps nothing
+# between messages (DESIGN.md §11.5). The fourth carries the traffic: an IP
+# packet sealed with ChaCha20-Poly1305 under the receiver's key for the
+# session, with the message's counter as the nonce. That is what this spec
+# opens, with `wg-transport` from wg_transforms.py.
+#
+# The keys are a table supplied with the run, `keys`, from the receiver index
+# each transport message names to that session's key in that direction: the
+# index is chosen by the receiving peer, so one table covers both directions,
+# every rekey and every peer. A message whose receiver is not in the table,
+# or whose tag does not verify, is one `decrypt-failed` region and the next
+# message is decoded as usual.
+#
+# A packet comes out without the padding WireGuard seals it with: the
+# transform cuts it where its own IP header says it ends, as a receiver does,
+# so the record is exactly one IP packet, which is what `net:ip` promises and
+# what a sessionization stage such as zpfwire's takes a packet by.
+# A keepalive, which seals nothing, is told apart by its size and labelled as
+# one, and its tag is checked all the same.
+#
+# What a decode cannot do, and says nothing about: a replayed or duplicated
+# message decodes again. WireGuard's replay window is state across messages
+# too.
+name: wireguard
+version: "0.1"
+entry: message
+input: datagram
+endian: little
+doc: >-
+  WireGuard messages: the handshake as structure, and transport messages
+  opened with the session's key, one IP packet per datagram.
+
+enums:
+  msgtype: {1: initiation, 2: response, 3: cookie_reply, 4: transport}
+
+transforms:
+  wg-transport:
+    params: {key: bytes, counter: int}
+    fails_as: decrypt-failed
+    doc: >-
+      ChaCha20-Poly1305 with an empty AAD and the counter as the nonce
+      (wg_crypto.transport_nonce). The caller registers it: kober has no cipher.
+
+params:
+  keys:
+    type: {map: [int, bytes]}
+    secret: true
+    doc: >-
+      Each session's key in each direction, by the receiver index its transport
+      messages carry. From the command line, a JSON key log:
+      --param keys=file:keys.json, {"1234": "hex:…"}.
+
+units:
+  message:
+    doc: One WireGuard message, which is one UDP datagram.
+    confirm: "reserved == 0"
+    fields:
+      - {name: type, int: {bits: 8, enum: msgtype}}
+      - {name: reserved, bits: 24, doc: "Zero in every message WireGuard sends."}
+      # No default: a type outside these four is not WireGuard, and its
+      # message is undecodable. `check` warns about that, and it is meant.
+      - name: body
+        switch:
+          dispatch: type
+          cases:
+            1: {unit: initiation}
+            2: {unit: response}
+            3: {unit: cookie_reply}
+            4: {unit: transport}
+
+  initiation:
+    doc: The initiator's first handshake message, 148 bytes.
+    fields:
+      - {name: sender, bits: 32, doc: "The initiator's index: the receiver of messages to it."}
+      - {name: ephemeral, bytes: 32, doc: "The initiator's ephemeral public key."}
+      - {name: encrypted_static, bytes: 48, doc: "Its static public key, sealed."}
+      - {name: encrypted_timestamp, bytes: 28, doc: "A TAI64N timestamp, sealed."}
+      - {name: mac1, bytes: 16}
+      - {name: mac2, bytes: 16, doc: "Zero unless the responder asked for a cookie."}
+
+  response:
+    doc: The responder's handshake message, 92 bytes.
+    fields:
+      - {name: sender, bits: 32, doc: "The responder's index: the receiver of messages to it."}
+      - {name: receiver, bits: 32, doc: "The initiator's index, from its initiation."}
+      - {name: ephemeral, bytes: 32, doc: "The responder's ephemeral public key."}
+      - {name: encrypted_nothing, bytes: 16, doc: "An empty plaintext, sealed: its tag."}
+      - {name: mac1, bytes: 16}
+      - {name: mac2, bytes: 16}
+
+  cookie_reply:
+    doc: Sent under load in place of a response, 64 bytes.
+    fields:
+      - {name: receiver, bits: 32}
+      - {name: nonce, bytes: 24}
+      - {name: encrypted_cookie, bytes: 32}
+
+  transport:
+    doc: >-
+      One IP packet, sealed. A keepalive is one with nothing in it. The
+      receiver and counter are spoken for by the packet they open, so a
+      decode writes one record per datagram for a second stage to read.
+    fields:
+      - {name: receiver, bits: 32, emit: none, doc: "Which session, and which direction."}
+      - {name: counter, bits: 64, emit: none, doc: "Per session and direction: the nonce."}
+      - {name: sealed, bytes: {size: {remaining: true}}, doc: "The packet, encrypted, and its tag."}
+      # A keepalive seals nothing, so its 16 bytes are its tag alone. Both kinds
+      # are opened, so every tag is checked; only what the record says differs.
+      - name: packet
+        doc: >-
+          The IP packet, without WireGuard's padding; for a keepalive, nothing,
+          labelled as one.
+        switch:
+          dispatch: "len(sealed)"
+          cases:
+            16:
+              transform:
+                from: sealed
+                with: wg-transport
+                limit: 1  # what opens is always empty; a limit must be positive
+                args: {key: "keys[receiver]", counter: counter}
+                content_type: "dec:wireguard-keepalive"
+          default:
+            transform:
+              from: sealed
+              with: wg-transport
+              limit: 65535
+              args: {key: "keys[receiver]", counter: counter}
+              content_type: "net:ip"

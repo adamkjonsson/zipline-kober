@@ -32,7 +32,7 @@ __version__: str = _distribution_version("kober")
 
 from kober.check import Finding, Severity, check, require_valid, scope_at
 from kober.decoder import Decoder
-from kober.emit import Emission, Unclaimed, field_path, plan
+from kober.emit import Emission, Unclaimed, failure_reason, field_path, plan
 from kober.errors import (
     CompileError,
     EvalError,
@@ -47,7 +47,7 @@ from kober.errors import (
     UnboundTransformError,
     Undecodable,
 )
-from kober.expr import ExprType, shift_left, shift_right
+from kober.expr import ExprType, MapType, ParamValue, map_entry, shift_left, shift_right
 from kober.loader import from_dict, from_file, from_json, from_yaml
 from kober.node import Node, NodeStatus
 from kober.ops import (
@@ -139,9 +139,11 @@ from kober.spec import (
     Until,
 )
 from kober.stage import (
+    canonical_class,
     content_registry,
     decode_stream,
     decode_stream_compiled,
+    net_tokens,
     run,
     run_compiled,
 )
@@ -181,6 +183,7 @@ __all__ = [
     "Kind",
     "KoberError",
     "Location",
+    "MapType",
     "Names",
     "Node",
     "NodeStatus",
@@ -188,6 +191,7 @@ __all__ = [
     "ObjectPlan",
     "Param",
     "ParamPlan",
+    "ParamValue",
     "ParameterError",
     "Plan",
     "Pointer",
@@ -227,18 +231,22 @@ __all__ = [
     "decode_text",
     "cited",
     "bind_transforms",
+    "canonical_class",
     "content_registry",
     "content_type_of",
     "decode_stream",
     "decode_stream_compiled",
     "document_params",
+    "failure_reason",
     "field_path",
     "first_failed",
     "from_dict",
     "from_file",
     "from_json",
     "from_yaml",
+    "net_tokens",
     "granularity",
+    "map_entry",
     "nonnegative",
     "normalize_int",
     "params_digest",

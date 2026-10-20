@@ -1,0 +1,24 @@
+{
+  "spec": "wireguard.yaml",
+  "transforms": "wg_transforms.py",
+  "packet_role": "wireguard.body.packet",
+  "packet_label": "net:ip",
+  "failure": "decrypt-failed",
+  "keys": "keys",
+  "tunnel": "wg_seal.py",
+  "port": 51820,
+  "tunnel_args": ["rekey_after=10"],
+  "packet_prefix": "04",
+  "inside": "../dns.yaml",
+  "traffic": [
+    "--protocol", "udp", "--payload", "dns", "--protocol-messages", "{folder}/dns.json",
+    "--server-port", "53", "--packets", "40"
+  ],
+  "inputs": {
+    "wg_clean": [],
+    "wg_loss": ["--tunnel-packet-loss", "0.15"],
+    "wg_corrupt": ["--tunnel-corruption", "0.15"],
+    "wg_reorder": ["--tunnel-reorder", "0.3"],
+    "wg_duplicate": ["--tunnel-duplicate", "0.15"]
+  }
+}

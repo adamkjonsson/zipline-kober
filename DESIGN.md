@@ -11,7 +11,7 @@ everything in §11 that is still a question.
 `zpf` by [`pressure_test.py`](pressure_test.py), and since revision 6 against
 real captures too.
 
-Revision 12. Revision 1 was written blind and got the layer wrong — it invented
+Revision 13. Revision 1 was written blind and got the layer wrong — it invented
 reassembly, gaps, and provenance that `zpf` already provides. Revision 2 fixed
 that against the source. Revision 3 added the results of an executable pressure
 test (§10) and treated this project as what it is: **a load test of `zpf`, where
@@ -143,6 +143,27 @@ transform that fails: it neither confirms nor declines. §6 gains document
 parameters, a key say, and the registry that binds a transform's name. §11.5
 records that its deferred branch was taken and where the line sits now, and
 §13.6 what the compressed-body corpus found.
+
+Revision 13, for `0.6.0`, begins the WireGuard example
+([`plans/WIREGUARD-EXAMPLE-PLAN.md`](plans/WIREGUARD-EXAMPLE-PLAN.md)). A
+document parameter may be a **map**, and an expression reads one entry of it,
+`keys[receiver]`: a tunnel's key is chosen per message by a field, from a table
+the run supplies. §3.3 says what indexing is and is not, §3.2's refused keyed
+repeat says why this does not reopen it, and §6 how a map is supplied. The
+expression language gains a sixth function, `len`, for a keepalive (§3.3). A
+transform's declaration may say what its failure is called, `fails_as:
+decrypt-failed`, a reason of the `bytes` class the source's bytes are named
+with in place of `undecodable`. Both backends write it, with the
+`reason_class` a reason outside the canonical four must state, which `zpf`'s
+stage passes since 0.5.2
+([python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79),
+filed for this).
+It moves to `zpf` 0.6.0 and spec 0.23 for the `net:` scheme: a packet a
+transform opens is labelled `net:ip`, the format's own name for exactly one IP
+packet, which a sessionization stage takes as a packet. `net:` is closed, so
+`check` holds a label to `zpf`'s list as it holds a reason to its classes, and
+the format never checks a payload against its label, so the transform that
+writes one has to make it true.
 
 Claims below marked **[verified]** were executed, not reasoned about: against
 `zpf` 0.16 by the script in §10, and against real captures as recorded in §13.
@@ -792,6 +813,12 @@ then `headers["content-length"]`. It reads beautifully for headers and badly
 for everything else, it introduces a map type *and* an indexing syntax, and it
 has no answer for duplicate keys, which HTTP has (`Set-Cookie`).
 
+Revision 13 gave the language both, and the refusal stands, because what it
+refused was a map **built from the input**. A map parameter (§3.3) is supplied
+by the run, whole, before any byte is read: a key log, a table of security
+associations. It has no duplicates to answer for, since the caller's table
+has one value per key, and no expression builds, iterates or returns one.
+
 The element binds under **the repetition's own name**, which is not merely
 consistent with `until` but is `until`'s mechanism: the checker already had
 `element_of`, and the decode loop already wrote the element under that name
@@ -940,6 +967,25 @@ caller had registered. That extension point is question 5's *hooks* branch, and
 the shape it wants is the spec **naming** a transform while a registry supplies
 it — the spec file staying data, which is also what keeps a non-Python backend
 possible. It was built that way in revision 12, as a field type (§3.2).
+
+**An entry of a map parameter** is the one other thing an expression can
+read, since revision 13: `keys[receiver]`. A document parameter may be
+declared `{map: [int, bytes]}` (keyed by `int` or `str`, holding any of the
+four types), and indexing it gives its value type. Only a map parameter is
+indexed, by its bare name, and a map is never a value itself: it cannot be
+compared, passed, or read whole, so the language still has no collection type.
+It is what a protocol that names its own key needs: a WireGuard receiver
+index, an ESP SPI, a TLS key log's client random. A message whose key is not
+in the table is an expression that cannot be answered, so it fails the way a
+division by zero does, and the message goes on. The failure names the key and
+never a value, which may be a secret.
+
+**`len(b)`**, the sixth function since revision 13, is the length of a bytes
+value. WireGuard is the use that reopened the table: a keepalive is a transport
+message sealing nothing, its 16 bytes its tag alone, and the spec has to tell it
+from a packet by size to label what it opens, before opening either. A length
+is the smallest thing that says so, and it is useful past WireGuard wherever a
+field's bytes say what they are by how many there are.
 
 This is the "richer expressions" branch of question 5, taken.
 
@@ -1197,7 +1243,11 @@ missing one could not be reproduced, and none is ever quoted in a message.
 They go into the Decoder Descriptor's `params_digest`, a secret one only
 hashed, so a file says which configuration wrote it. The CLI takes them as
 `--param NAME=VALUE` and a module of the caller's transforms as
-`--load-transforms MODULE`, which runs as code because it is code.
+`--load-transforms MODULE`, which runs as code because it is code. A map
+parameter (§3.3) is a `dict` from Python, copied when the decode is set up,
+and `--param NAME=file:PATH` from the command line: a JSON object whose keys
+and values are each written as `--param` would write them, which is the shape
+a key log is easiest to write in.
 
 CLI, one verb per API entry point:
 
@@ -1320,8 +1370,9 @@ became `role` (`0x0092`), a per-record label read in the namespace of the
 decoder that wrote it — independent of `content_type`, so a field record carries
 `prim:u32` *and* `dns.header.id` at once rather than choosing. #59 reshaped
 `SessionWriter.record()`, which this project does not call. The pin became
-`zpf>=0.3.0,<0.4` — it is `>=0.5.0,<0.6` since kober 0.3.0, two minors that
-changed nothing this tree calls except to add `adjacency=` — and §4.1's single
+`zpf>=0.3.0,<0.4` — it was `>=0.5.0,<0.6` from kober 0.3.0, two minors that
+changed nothing this tree calls except to add `adjacency=`, and is
+`>=0.6.0,<0.7` (spec 0.23) since kober 0.6.0, for `net:` — and §4.1's single
 emit site made the switch the one-line change it was kept that way to be.
 
 ### 9.2 Smaller findings

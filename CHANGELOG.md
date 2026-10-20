@@ -22,6 +22,171 @@ minor bump here too.
 
 ## [Unreleased]
 
+### Added
+
+- **`net:ip` and `net:ethernet`, the format's own labels for a packet** (spec
+  0.23's `net:` scheme). A transform's `content_type` may be either, meaning
+  exactly one IP packet or one Ethernet frame, and a sessionization stage such
+  as `zpfwire`'s takes a record so labelled as a packet with no option. `net:`
+  is a closed vocabulary, so `kober check` refuses any other name in it, from
+  the list `zpf` itself has, which `kober.net_tokens()` returns. The WireGuard and PackBits examples label their
+  packets `net:ip` (a keepalive keeps `dec:wireguard-keepalive`), and
+  PackBits' transform refuses what is not one IP packet, since nothing
+  downstream checks a payload against its label.
+- **Map parameters, and reading one entry of one**: a key chosen per message
+  from a table a run supplies. A document parameter may be declared
+  `{type: {map: [K, V]}}`, keyed by `int` or `str` and holding any of the four
+  types, and an expression reads one entry, `keys[receiver]`, typed as the
+  map's values. Only a map parameter is indexed, by its bare name, and a map is
+  never read whole, so the language still has no collection type. A key with
+  no entry makes the expression unanswerable: in a transform's `args` it fails
+  the transform, saying `'keys' has no entry for 9` and never a value, and the
+  message goes on. The field the key reads is cited by the output, so a
+  receiver read only to choose the key is spoken for rather than `skipped`.
+  Both backends decode it; a generated module calls
+  `kober.runtime.map_entry`, which is the interpreter's own. From Python a map
+  is a `dict`, checked entry by entry and copied when the decode is set up;
+  from `kober run` and `kober try`, `--param NAME=file:PATH`, a JSON object of
+  keys and values each written as `--param` would write it. A map goes into
+  `params_digest` as its entries in a canonical order. New public names:
+  `kober.MapType`, `kober.ParamValue`, `kober.map_entry`, `kober.expr.Index`,
+  `Kind.MAP` and `ParamPlan.entries`. It is the first step of the WireGuard
+  example ([`plans/WIREGUARD-EXAMPLE-PLAN.md`](plans/WIREGUARD-EXAMPLE-PLAN.md)).
+
+- **`fails_as` on a transform's declaration**: what its failure is called
+  where its source's bytes are named, in place of `undecodable`, such as
+  `decrypt-failed` for a cipher. Any declared transform may have one, a core
+  name included. `check` requires it spelled as the format spells a reason and
+  of the `bytes` class, refusing `gap` and `truncated`. Both backends write
+  it, a concat source's every member included, with `reason_class: bytes`,
+  which a reason outside the canonical four must state
+  ([python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79)).
+  New:
+  `TransformDecl.fails_as`, `TransformPlan.fails_as`, `take_over(fails_as=)`,
+  `kober.emit.failure_reason` and `kober.stage.canonical_class`.
+
+- **`examples/wireguard/`**, the worked example of a protocol that needs the
+  caller's own code: `wireguard.yaml`, which decodes the handshake as
+  structure and opens each transport message with a declared `wg-transport`
+  transform, choosing the key per message with `keys[receiver]` and naming a
+  failure `decrypt-failed`; `wg_crypto.py`, ChaCha20-Poly1305 (RFC 8439) in
+  the standard library, checked against the RFC's own test vectors; and
+  `wg_transforms.py`, which registers it. Its README says how they fit
+  together and what a decode cannot do: open the handshake, or detect a
+  replay. A packet comes out without WireGuard's padding, cut where its own
+  IP header says it ends, and a keepalive is an empty record labelled
+  `dec:wireguard-keepalive`, its tag checked like any other's. It also
+  generates traffic: `wg_handshake.py` is WireGuard's Noise IK handshake, both peers' sides,
+  over X25519 (RFC 7748) added to `wg_crypto.py`, and `wg_seal.py` is a
+  tunnel module for packeteer 0.18.0's `stream --udp-tunnel`, which seals
+  what packeteer generates with a real handshake and rekeys, and writes the
+  key log kober reads, a line per sealed packet to check a decode against,
+  and optionally the keys Wireshark needs to open the same capture. The
+  example's tests check it against RFC 7748's vectors and against Wireshark,
+  and run the whole chain where packeteer and `zpfwire` are checked out
+  beside it. The README goes on to the traffic inside: `zpfwire` 0.5.0 turns
+  the decrypted packets back into conversations, and `dns.yaml` and
+  `http.yaml` decode them, checked against what was sealed.
+- **`len(b)`**, the expression language's sixth function: how many bytes a
+  bytes value holds, as an `int`, in both backends. WireGuard needs it to tell
+  a keepalive, which seals nothing, from a packet by size before opening
+  either.
+- **A module `--load-transforms` loads by path can import the modules beside
+  it**, as a script run by `python` can: a cipher kept in a file of its own,
+  shared with the code that generates traffic. Its directory is appended to
+  `sys.path`, never put first, so a file beside it cannot stand in for the
+  standard library or an installed package.
+
+### Changed
+
+- **Breaking:** the required `zpf` is now `>=0.6.0,<0.7` (Zipline Payload
+  Format 0.23), up from `>=0.5.0,<0.6` (0.21). A caller on `zpf` 0.5 must
+  upgrade, and a `.zpf` kept from an earlier kober should be regenerated, not
+  transcoded: `0.6.0` refuses `0.5`'s files at the version gate, and the
+  reverse. What kober needs of it: `net:`, the label a decoded packet is given
+  (above), and, already in `0.5.2`, the `reason_class` a transform's
+  `fails_as` reason is written with
+  ([python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79)).
+  Nothing else kober calls changed: on `0.6.0` the suite passed unchanged.
+- **Breaking:** `kober.expr.Scope` gains `resolve_map(name)` and
+  `kober.expr.Environment` gains `lookup_map(name)`. An implementation of
+  either protocol outside kober must add the method, raising `ExprError` or
+  `EvalError` if it has no maps, to type or evaluate an expression that
+  indexes one. `Param.type` may now be a `MapType`, for a document parameter,
+  so code that reads it as an `ExprType` must allow for one.
+
+### Fixed
+
+- **`tools/pipeline.py`'s `dns_gen` input is lossy, as it always said.**
+  Before packeteer 0.18.0, `--packet-loss` did nothing to a UDP stream
+  (packeteer#194), so the input every report called lossy never was; its
+  outputs moved when packeteer did. And a `--baseline` the installed `zpf`
+  cannot read, one written in an older format, is refused before the run with
+  a message saying so, where it raised a traceback after it.
+
+- **The compiled driver decoded a `datagram` spec over a byte stream**, where
+  the interpreter refuses it: a spec with no framing of its own, given a byte
+  stream, writes a confident decode of the wrong bytes. A generated module now
+  carries its spec's `INPUT`, and `run_compiled` and `decode_stream_compiled`
+  refuse that stream as `run` does. A module generated before `INPUT` existed is
+  not checked. Every generated module gains the one constant. Found by the
+  pipeline's WireGuard inputs, the first `datagram` spec it ran.
+- **A compiled decode could raise on a field named like what it calls.** A
+  field or parameter is a local of its unit's generated function, so one named
+  `to_int`, `present`, `len` or any other runtime helper or Python built-in hid
+  that name from the code calling it there, and the compiled module raised
+  where the interpreter answered. Where a function has such a local, its calls
+  now go through an underscore alias no spec name can take, defined once in
+  the module. A module with no such clash is unchanged, character for
+  character. A local named like something the module defines for its code to
+  read, a unit's class or a constant, cannot be told from the field by where
+  it stands, and `kober compile` refuses it, saying why.
+
+### Documentation
+
+- **Does your protocol fit?** The guide and the WireGuard README now say first
+  what decides it: a transform keeps nothing between messages, so a protocol
+  fits when each message carries what opens it. WireGuard, ESP without
+  extended sequence numbers, DTLS 1.2 and an OpenVPN data channel do; TLS,
+  QUIC, DTLS 1.3 and ESP with extended sequence numbers do not, and what to do
+  instead is a stage of your own with `zpf.decode_stage`. From python-zipline's
+  review of the example's documentation.
+- **The WireGuard README is in two parts**: using kober with your own
+  transform, then adding an example to this repository. *How the pieces meet*
+  comes before the steps and explains `limit`, `fails_as` and `emit: none`,
+  and a new section decodes a real capture, keys and all.
+- **A guides section, and its first guide: *Bringing your own code: a
+  WireGuard tunnel***. For a protocol a spec can frame but not read, because it
+  is encrypted or compressed: what the spec declares and what the caller's
+  code supplies, choosing a key per message, telling apart what decodes
+  differently before opening it, generating traffic to check against with
+  packeteer, checking the caller's own code against something that is not it,
+  and the conversations inside. Linked from the index and from
+  `types.md#transform`.
+- `examples/wireguard/dns.json`, the traffic the README's commands send through
+  the tunnel, which the README named and did not ship.
+- **The WireGuard example as a template.** Its README says, file by file, what a
+  writer of another protocol replaces, keeps or deletes, and writes down the
+  conventions a new example keeps: the key log, the truth file, and the tunnel
+  module's arguments. The guide gains *Which steps your protocol needs*, by
+  shape: a tunnel with keys, a tunnel without, and a transformed field inside a
+  protocol. An example describes itself once, in an `example.json`; from it,
+  `tests/examplekit.py` does what every example's tests need, and
+  `tools/pipeline.py` runs the example's spec and generated inputs with no
+  edit of its own.
+- **Keys from a real WireGuard endpoint: `examples/wireguard/wg_keylog.py`.**
+  A WireGuard endpoint never writes its transport keys down; what it can be
+  made to log (wireguard-tools' `extract-handshakes`, in the format Wireshark
+  reads) is the static and ephemeral keys each handshake derives them from.
+  `wg_keylog.py` replays a capture's handshakes with them, from either
+  endpoint's log, and writes the key log `--param keys=file:…` reads. The
+  example's handshake module gains a pre-shared key.
+- **A second example of bringing your own code, `examples/packbits/`**: a
+  made-up tunnel of PackBits-compressed packets, the shape with no keys and no
+  parameters. Its codec is checked against Apple TN1023's worked example and
+  TIFF 6.0's rules; it was written from the WireGuard example's template, and
+  the guide points to it for a tunnel without keys.
+
 ## [0.5.0] - 2026-09-28
 
 ### Added

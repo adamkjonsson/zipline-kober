@@ -31,6 +31,8 @@ import random
 import struct
 import zlib
 
+from cipher import seal
+
 from kober.errors import TransformError
 
 #: How many mutations per seed case. Small enough to keep the suite fast, large
@@ -659,3 +661,65 @@ def hostile_cases(seed: int) -> list[bytes]:
         *HOSTILE_MESSAGES,
         *(data for message in HOSTILE_MESSAGES for data in variants(message, seed, rounds=10)),
     ]
+
+
+#: A cipher whose key is chosen per message from a map parameter: the WireGuard
+#: example plan's Q1. The receiver is a byte, so a mutation that touches it
+#: names a key the table usually does not have, which must fail the transform
+#: and nothing else.
+KEYED_SPEC = """
+name: keyed
+version: "1"
+entry: m
+transforms:
+  xor: {params: {key: bytes, nonce: bytes}}
+params:
+  keys: {type: {map: [int, bytes]}, secret: true}
+units:
+  m:
+    fields:
+      - {name: receiver, type: {int: {bits: 8}}, emit: none}
+      - {name: nonce, type: {bytes: {size: 2}}, emit: none}
+      - {name: n, type: {int: {bits: 8}}}
+      - {name: sealed, type: {bytes: {size: {expr: n}}}}
+      - name: inner
+        transform:
+          from: sealed
+          with: xor
+          limit: 32
+          args: {key: "keys[receiver]", nonce: nonce}
+          content_type: "prim:bytes"
+      - {name: after, type: {int: {bits: 8}}}
+"""
+
+#: The table :data:`KEYED_SPEC` is decoded with. Its values must never be seen
+#: in a tree, a record or a message.
+KEYED_KEYS = {1: b"\x11" * 16, 2: b"\x22" * 16}
+
+
+def _keyed(receiver: int, payload: bytes, key: bytes) -> bytes:
+    sealed = seal(payload, key=key, nonce=b"nn")
+    return bytes([receiver]) + b"nn" + bytes([len(sealed)]) + sealed + bytes([0x7E])
+
+
+#: Messages for :data:`KEYED_SPEC`: one per direction, and one whose receiver
+#: has no entry.
+KEYED_MESSAGES = (
+    _keyed(1, b"to the initiator", KEYED_KEYS[1]),
+    _keyed(2, b"to the responder", KEYED_KEYS[2]),
+    _keyed(9, b"to nobody", KEYED_KEYS[1]),
+)
+
+
+def keyed_cases(seed: int) -> list[bytes]:
+    """Build one batch of variants of every :data:`KEYED_MESSAGES`.
+
+    Args:
+        seed: Which batch.
+
+    Returns:
+        The batch, the messages themselves first.
+
+    """
+    return [*KEYED_MESSAGES, *(data for m in KEYED_MESSAGES for data in variants(m, seed))]
+

@@ -8,10 +8,18 @@ where the seam bug lived. This script is the release checklist's requirement
     .venv/bin/python tools/pipeline.py
 
 It needs two sibling checkouts with their own virtual environments, neither a
-dependency of this project: ``packeteer`` (to fuzz and generate traffic) and
-``python-zipline-wire`` (``zpfwire``, to turn captures into ``.zpf``).
+dependency of this project: ``packeteer`` 0.18.0 or later (to fuzz and generate
+traffic, through an example's tunnel module included) and
+``python-zipline-wire`` 0.5.0 or later (``zpfwire``, to turn captures into
+``.zpf``, and a tunnel's opened packets back into conversations).
 
-For each input it builds, it runs both example specs through the interpreter
+An example that brings its own code (``examples/<name>/``) joins the pipeline
+by describing itself in an ``example.json`` beside its spec
+(``tests/examplekit.py``, :class:`Example`): its spec is run over every input,
+its inputs are generated through its tunnel module, and each is checked
+exactly against what that module says it sealed. Nothing here names one.
+
+For each input it builds, it runs every example spec through the interpreter
 (:func:`kober.stage.run`) and through a module compiled fresh from the same spec
 (:func:`kober.stage.run_compiled`), at message and at field granularity. Every
 output must pass ``zpf`` conformance and account for every byte of its input;
@@ -47,19 +55,19 @@ from zpf.blocks import Record, Undecoded
 from zpf.reassembly import Gap
 
 from kober.decoder import Decoder
+from kober.errors import SpecError
 from kober.pygen import render_spec
-from kober.spec import Emit, Spec
+from kober.spec import Emit, InputShape, Spec
 from kober.stage import run, run_compiled
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from types import ModuleType
 
+    from examplekit import Example
+
 ROOT = Path(__file__).resolve().parent.parent
 
-#: The specs every input is run through. Both, over every input: a spec meeting
-#: a stream in another protocol is a case the driver has to handle too.
-SPECS = ("dns", "http")
 
 #: Requests in the generated HTTP stream, so the shape check knows how many start
 #: lines there can be: one request and one response each.
@@ -77,6 +85,39 @@ CAPTURES = ("packet_loss", "http_stream_1", "tcp_lossy_ts", "tcp_reorder_ts")
 
 PRODUCED_BY = "kober pipeline"
 PRODUCED_AT = 1_700_000_000
+
+
+def _load(path: Path, name: str) -> ModuleType:
+    """Import a Python file as a module, registered under ``name``.
+
+    Registered in ``sys.modules`` because ``dataclasses`` looks a class's module
+    up there, as it would for a generated module a consumer imports normally.
+    """
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        msg = f"cannot import {path}"
+        raise ImportError(msg)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+#: The shared test kit: the examples' descriptions, and the oracles their tests use.
+examplekit = _load(ROOT / "tests" / "examplekit.py", "examplekit")
+
+#: Every example that describes itself, by name.
+DESCRIBED: dict[str, Example] = {example.name: example for example in examplekit.discover()}
+
+#: The specs every input is run through, every one over every input: a spec
+#: meeting a stream in another protocol is a case the driver has to handle too.
+#: A described example's is given the input's key log, or an empty table where
+#: there is none, so it meets traffic it holds no keys for as well.
+SPECS = {
+    "dns": ROOT / "examples" / "dns.yaml",
+    "http": ROOT / "examples" / "http.yaml",
+    **{name: example.path(example.spec) for name, example in DESCRIBED.items()},
+}
 
 
 # --- the tools --------------------------------------------------------------
@@ -120,6 +161,15 @@ class Tools:
     def convert(self, capture: Path, out: Path) -> None:
         """Turn a capture into a transport-level ``.zpf``."""
         _run([str(self.zpfwire_bin), "convert", str(capture), "-o", str(out)])
+
+    def sessionize(self, packets: Path, out: Path, content_type: str) -> None:
+        """Turn a ``.zpf`` of decrypted packets into the conversations inside (zpfwire#35)."""
+        _run(
+            [
+                str(self.zpfwire_bin), "convert", str(packets), "-o", str(out),
+                "--content-type", content_type,
+            ]
+        )
 
 
 def _run(argv: list[str]) -> str:
@@ -244,6 +294,24 @@ def _gzip_http_clean(tools: Tools, out: Path) -> None:
     _gzip_http(tools, out, lossy=False)
 
 
+
+def _tunnelled(example: Example, impairments: tuple[str, ...]) -> Callable[[Tools, Path], None]:
+    """Return a maker for an example's own traffic through its tunnel module.
+
+    The key log and the truth the module writes go beside the capture.
+    """
+
+    def make(tools: Tools, out: Path) -> None:
+        tools.packeteer_cmd(
+            *examplekit.stream_args(
+                example, out, out.with_suffix(".truth.jsonl"), out.with_suffix(".keys.json"),
+                impairments=impairments,
+            )
+        )
+
+    return make
+
+
 def _capture(name: str) -> Callable[[Tools, Path], None]:
     """Return a maker that copies one of the real captures."""
 
@@ -265,26 +333,17 @@ INPUTS = (
         Input(name, "http" if name.startswith("http") else None, _capture(name))
         for name in CAPTURES
     ),
+    # One impairment per input, as an example names them, so a count that
+    # moves says which one moved it.
+    *(
+        Input(name, example.name, _tunnelled(example, impairments))
+        for example in DESCRIBED.values()
+        for name, impairments in example.inputs.items()
+    ),
 )
 
 
 # --- checking ---------------------------------------------------------------
-
-
-def _load(path: Path, name: str) -> ModuleType:
-    """Import a Python file as a module, registered under ``name``.
-
-    Registered in ``sys.modules`` because ``dataclasses`` looks a class's module
-    up there, as it would for a generated module a consumer imports normally.
-    """
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        msg = f"cannot import {path}"
-        raise ImportError(msg)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 #: The one definition of "block for block", shared with the suite.
@@ -458,7 +517,9 @@ def _count_http(data: bytes, counts: Counter[str]) -> None:
 
 def _shape(report: Report, source: Input, path: Path, transport: Path, what: str) -> None:
     """Check that a field-granularity decode of an input has its protocol's shape."""
-    if source.protocol == "dns":
+    if source.protocol in DESCRIBED:
+        _tunnel(report, DESCRIBED[source.protocol], path, transport, what)
+    elif source.protocol == "dns":
         followed, through = _pointers(path)
         report.line(
             followed > 0,
@@ -494,6 +555,60 @@ def _shape(report: Report, source: Input, path: Path, transport: Path, what: str
         report.line(ok, f"{what} shape", detail)
         if source.inflates:
             _inflated(report, source, path, transport, what)
+
+
+def _truth(transport: Path) -> list[dict[str, object]]:
+    """Return what an example's tunnel module sealed for an input, a line per packet."""
+    return examplekit.read_truth(transport.with_suffix(".truth.jsonl"))
+
+
+def _tunnel(report: Report, example: Example, path: Path, transport: Path, what: str) -> None:
+    """Check a tunnel's decode exactly: what arrived intact opens, and nothing else does.
+
+    The WireGuard plan's Q7. A sealed packet whose datagram is on the wire
+    unchanged opens once per arrival; every other datagram that carries a
+    packet, a corrupted one or a copy of one, is one region named the example's
+    failure.
+    """
+    truth = _truth(transport)
+    expected, left = examplekit.arrivals(example, truth, transport)
+    opened = examplekit.opened_in(example, path)
+    failed = examplekit.failures_in(example, path)
+    problems = examplekit.tunnel_problems(example, truth, transport, path)
+    detail = (
+        f"{sum(opened.values())} packets opened of {sum(expected.values())} that arrived "
+        f"intact; {failed} {example.failure} of {sum(left.values())} other datagrams"
+    )
+    report.line(not problems, f"{what} tunnel", "; ".join([detail, *problems]))
+
+
+def _inner(
+    report: Report, tools: Tools, example: Example, capture: Path, packets: Path, what: str
+) -> None:
+    """Check the traffic inside the tunnel: what decodes from it is what arrived.
+
+    ``zpfwire`` turns the opened packets back into the conversation they
+    carried, and the example's ``inside`` spec reads it. Each direction's
+    messages must be, one for one, the payloads of the sealed packets whose
+    datagrams reached the wire unchanged.
+    """
+    assert example.inside is not None
+    inner = packets.with_suffix(".inner.zpf")
+    decoded_path = packets.with_suffix(".inner.decoded.zpf")
+    tools.sessionize(packets, inner, example.packet_label)
+    decoder = Decoder(Spec.from_file(example.path(example.inside)))
+    run(decoder, inner, decoded_path, produced_by=PRODUCED_BY, produced_at=PRODUCED_AT)
+    transport = capture.with_suffix(".zpf")
+    expected = examplekit.expected_inside(example, _truth(transport), transport)
+    found = examplekit.messages_by_direction(decoded_path)
+    decoded = {direction: Counter(messages) for direction, messages in found.items()}
+    problems = _COMPARE.conformance_problems(decoded_path, inner)
+    ok = decoded == expected and not problems
+    total = sum(sum(c.values()) for c in decoded.values())
+    detail = f"{total} messages, each direction what arrived intact"
+    if problems:
+        detail += f"; {problems[0]}"
+    report.line(ok, f"{what} inner", detail)
 
 
 def _inflated(report: Report, source: Input, path: Path, transport: Path, what: str) -> None:
@@ -547,7 +662,11 @@ def pipeline(tools: Tools, work: Path, baseline: Path | None = None) -> Report:
     print(f"{tools.version(tools.packeteer_bin)}; {tools.version(tools.zpfwire_bin)}")
     print(f"work directory: {work}\n", flush=True)
 
-    specs = {name: Spec.from_file(ROOT / "examples" / f"{name}.yaml") for name in SPECS}
+    # Each example's transforms, registered as a user's process would, and
+    # before the modules are compiled, since a module binds when it is imported.
+    for example in DESCRIBED.values():
+        example.module(Path(example.transforms).stem)
+    specs = {name: Spec.from_file(path) for name, path in SPECS.items()}
     modules = {
         (name, emit): _compile(spec, name, emit, work)
         for name, spec in specs.items()
@@ -560,26 +679,24 @@ def pipeline(tools: Tools, work: Path, baseline: Path | None = None) -> Report:
         source.make(tools, capture)
         tools.convert(capture, transport)
         for name, spec in specs.items():
+            params = _params(name, capture)
             for emit in (Emit.MESSAGE, Emit.FIELD):
                 what = f"{source.name} {name} {emit.value}"
                 stem = f"{source.name}.{name}.{emit.value}"
                 interpreted = work / "out" / f"{stem}.interpreted.zpf"
                 compiled = work / "out" / f"{stem}.compiled.zpf"
                 started = time.monotonic()
-                run(
-                    Decoder(spec, emit=emit),
-                    transport,
-                    interpreted,
-                    produced_by=PRODUCED_BY,
-                    produced_at=PRODUCED_AT,
+                decoder = Decoder(spec, emit=emit, params=params)
+                refusals = _decode_both(
+                    decoder, modules[name, emit], params, transport, interpreted, compiled
                 )
-                run_compiled(
-                    modules[name, emit],
-                    transport,
-                    compiled,
-                    produced_by=PRODUCED_BY,
-                    produced_at=PRODUCED_AT,
-                )
+                if refusals:
+                    # A datagram spec over a byte stream is refused, by design
+                    # (`docs/format/document.md`, *input*): both drivers must.
+                    ok = len(refusals) == 2 and spec.input is InputShape.DATAGRAM
+                    detail = "both drivers refuse a datagram spec over a byte stream"
+                    report.line(ok, f"{what} refused", detail if ok else refusals[0])
+                    continue
                 elapsed = time.monotonic() - started
                 for driver, path in (("interpreted", interpreted), ("compiled", compiled)):
                     problems = _COMPARE.conformance_problems(path, transport)
@@ -592,7 +709,47 @@ def pipeline(tools: Tools, work: Path, baseline: Path | None = None) -> Report:
                 if emit is Emit.FIELD and name == source.protocol:
                     _shape(report, source, interpreted, transport, f"{what} interpreted")
                     _shape(report, source, compiled, transport, f"{what} compiled")
+                described = DESCRIBED.get(name)
+                inside = described is not None and described.inside is not None
+                if emit is Emit.FIELD and name == source.protocol and inside:
+                    _inner(report, tools, described, capture, interpreted, what)
     return report
+
+
+def _decode_both(
+    decoder: Decoder,
+    module: ModuleType,
+    params: dict[str, object] | None,
+    transport: Path,
+    interpreted: Path,
+    compiled: Path,
+) -> list[str]:
+    """Decode an input with both drivers, and return what either refused it for."""
+    refusals = []
+    try:
+        run(decoder, transport, interpreted, produced_by=PRODUCED_BY, produced_at=PRODUCED_AT)
+    except SpecError as exc:
+        refusals.append(str(exc))
+    try:
+        run_compiled(
+            module,
+            transport,
+            compiled,
+            produced_by=PRODUCED_BY,
+            produced_at=PRODUCED_AT,
+            params=params,
+        )
+    except SpecError as exc:
+        refusals.append(str(exc))
+    return refusals
+
+
+def _params(name: str, capture: Path) -> dict[str, object] | None:
+    """Return the parameters a spec runs with over an input: an example's key log."""
+    if name not in DESCRIBED:
+        return None
+    log = capture.with_suffix(".keys.json")
+    return DESCRIBED[name].params(log if log.exists() else None)
 
 
 def _first_difference(left: Path, right: Path) -> str | None:
@@ -626,9 +783,35 @@ def _against(report: Report, path: Path, before: Path) -> None:
     if not before.exists():
         report.changed(what, f"not in the baseline ({before})")
         return
-    difference = _first_difference(before, path)
+    try:
+        difference = _first_difference(before, path)
+    except zpf.ZpfError as exc:
+        report.changed(what, f"the baseline's file cannot be read: {exc}")
+        return
     if difference is not None:
         report.changed(what, f"baseline, now {difference}")
+
+
+def unreadable_baseline(baseline: Path) -> str | None:
+    """Return why a baseline cannot be compared with, or ``None`` if it can.
+
+    A baseline written in an older format is the usual reason: while `zpf` is
+    in 0.x every minor is a format of its own, and a file from another is
+    refused at its header. Found before the run rather than after it, since a
+    run takes minutes and every comparison would fail the same way.
+    """
+    outputs = sorted((baseline / "out").glob("*.zpf"))
+    if not outputs:
+        return f"{baseline} holds no outputs ({baseline / 'out'}/*.zpf): not a --work directory"
+    try:
+        _COMPARE.blocks(outputs[0])
+    except zpf.ZpfError as exc:
+        return (
+            f"{outputs[0].name} cannot be read by this zpf, which reads spec "
+            f"{'.'.join(map(str, zpf.SPEC_VERSION))}: {exc}. A baseline from before a "
+            "format change cannot be compared with; take a new one with --work"
+        )
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -639,7 +822,7 @@ def main(argv: list[str] | None = None) -> int:
 
     Returns:
         The exit status: 0 when every check held, 1 when any failed, 2 when a
-        sibling checkout is missing.
+        sibling checkout is missing or the baseline cannot be compared with.
 
     """
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -674,6 +857,12 @@ def main(argv: list[str] | None = None) -> int:
     if missing:
         print("missing: " + ", ".join(missing), file=sys.stderr)
         return 2
+
+    if args.baseline is not None:
+        why = unreadable_baseline(args.baseline)
+        if why is not None:
+            print(f"baseline: {why}", file=sys.stderr)
+            return 2
 
     work = args.work or Path(tempfile.mkdtemp(prefix="kober-pipeline-"))
     report = pipeline(tools, work, args.baseline)

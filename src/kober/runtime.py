@@ -40,7 +40,10 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from kober import transforms
@@ -54,13 +57,13 @@ from kober.errors import (
     TruncatedRead,
     Undecodable,
 )
-from kober.expr import shift_left, shift_right, to_int
+from kober.expr import map_entry, shift_left, shift_right, to_int
 from kober.spec import Endian
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Sequence
 
-    from kober.expr import ExprValue
+    from kober.expr import ExprValue, ParamValue
     from kober.transforms import Transformer
 
 __all__ = [
@@ -84,6 +87,7 @@ __all__ = [
     "decode_text",
     "document_params",
     "first_failed",
+    "map_entry",
     "normalize_int",
     "params_digest",
     "present",
@@ -613,11 +617,13 @@ def take_over(
     skipped: bool = False,
     record: tuple[str, str | None, tuple[int, int]] | None = None,
     spoken: Sequence[tuple[int, int]] = (),
+    fails_as: str = "undecodable",
 ) -> None:
     """Write what a transform's outcome says about its source (*Decided* 1).
 
     The source's own record is taken back, since the outcome speaks for it.
-    On failure its bytes are ``undecodable``; with ``emit: none`` they are
+    On failure its bytes are named ``fails_as``, ``undecodable`` unless the
+    transform's declaration says otherwise; with ``emit: none`` they are
     ``skipped`` whatever happened. A type-less output that succeeded is
     written as a record of its own.
 
@@ -640,6 +646,7 @@ def take_over(
         spoken: The ranges of argument fields marked ``emit: none``. They were
             named ``skipped`` where they stand; an output that succeeded cites
             them, so those regions are taken back.
+        fails_as: What a failure names the source's bytes.
 
     """
     if sink is None:
@@ -647,7 +654,7 @@ def take_over(
     if role is not None:
         sink.retract(role)
     failed = isinstance(value, TransformFailed)
-    reason = "skipped" if skipped else "undecodable"
+    reason = "skipped" if skipped else fails_as
     if (failed or skipped) and joined and members is not None:
         elements, attribute, path, name = members
         for index, element in enumerate(elements or ()):
@@ -747,10 +754,13 @@ def bind_transforms(names: Sequence[str]) -> Mapping[str, Transformer]:
 #: an ``int`` to Python, and is refused where an integer is wanted.
 _PARAM_TYPES: Mapping[str, type] = {"int": int, "bool": bool, "str": str, "bytes": bytes}
 
+#: How a map parameter's type is spelled: :attr:`kober.expr.MapType.value`.
+_MAP_TYPE = re.compile(r"map\[(\w+), (\w+)\]")
+
 
 def document_params(
-    spec: str, declared: Mapping[str, str], supplied: Mapping[str, ExprValue]
-) -> dict[str, ExprValue]:
+    spec: str, declared: Mapping[str, str], supplied: Mapping[str, ParamValue]
+) -> dict[str, ParamValue]:
     """Check the values supplied for a spec's ``params:``, and return them.
 
     Every declared parameter must be supplied, nothing undeclared may be, and
@@ -758,10 +768,14 @@ def document_params(
     reproduced, so it never starts. No message quotes a value, since one may be
     a secret. Shared by both backends, so they refuse alike.
 
+    A map is checked entry by entry, and what is returned is a read-only copy
+    of it, so a caller that changes its own dictionary afterwards changes
+    neither the decode nor the digest that says which configuration wrote it.
+
     Args:
         spec: The spec's name, for messages.
         declared: Each parameter's name and type, as ``"int"``, ``"bool"``,
-            ``"str"`` or ``"bytes"``.
+            ``"str"``, ``"bytes"``, or ``"map[K, V]"`` of two of those.
         supplied: The values given.
 
     Returns:
@@ -781,22 +795,55 @@ def document_params(
         listed = ", ".join(repr(name) for name in missing)
         msg = f"spec {spec!r} needs parameter(s) {listed}, and none was supplied"
         raise ParameterError(msg)
+    checked: dict[str, ParamValue] = {}
     for name, value in supplied.items():
-        wanted = _PARAM_TYPES[declared[name]]
-        if not isinstance(value, wanted) or (wanted is int and isinstance(value, bool)):
+        table = _MAP_TYPE.fullmatch(declared[name])
+        if table is None:
+            checked[name] = _scalar_param(name, declared[name], value, "")
+            continue
+        if not isinstance(value, Mapping):
             msg = f"parameter {name!r} must be {declared[name]}, got {type(value).__name__}"
             raise ParameterError(msg)
-    return dict(supplied)
+        key_type, item_type = table.groups()
+        checked[name] = MappingProxyType(
+            {
+                _scalar_param(name, key_type, key, " key"): _scalar_param(
+                    name, item_type, item, " value"
+                )
+                for key, item in value.items()
+            }
+        )
+    return checked
 
 
-def params_digest(spec_digest: str, emit: str, params: Mapping[str, ExprValue]) -> str:
+def _scalar_param(name: str, declared: str, value: object, part: str) -> ExprValue:
+    """Return one scalar parameter value, or one entry of a map, checked."""
+    wanted = _PARAM_TYPES[declared]
+    if not isinstance(value, wanted) or (wanted is int and isinstance(value, bool)):
+        msg = f"parameter {name!r}{part} must be {declared}, got {type(value).__name__}"
+        raise ParameterError(msg)
+    return value  # type: ignore[return-value]
+
+
+def _digestible(value: ParamValue) -> object:
+    """Return a parameter value as JSON, the same for two equal values."""
+    if isinstance(value, bytes):
+        return {"bytes": value.hex()}
+    if isinstance(value, Mapping):
+        pairs = [[_digestible(key), _digestible(item)] for key, item in value.items()]
+        return {"map": sorted(pairs, key=lambda pair: json.dumps(pair, sort_keys=True))}
+    return value
+
+
+def params_digest(spec_digest: str, emit: str, params: Mapping[str, ParamValue]) -> str:
     """Return the digest of a decode's configuration, for the Decoder Descriptor.
 
     Over the spec's own digest (:meth:`kober.spec.Spec.digest`), the
     granularity, and every parameter's value, so the same spec with a different
     key is a different configuration. A secret goes into the hash and nowhere
-    else. Shared by both backends, so a compiled module and the interpreter
-    write the same one.
+    else. A map goes in as its entries in a canonical order, so the order a
+    caller built it in does not count. Shared by both backends, so a compiled
+    module and the interpreter write the same one.
 
     Args:
         spec_digest: The spec's digest.
@@ -810,10 +857,7 @@ def params_digest(spec_digest: str, emit: str, params: Mapping[str, ExprValue]) 
     document = {
         "spec": spec_digest,
         "emit": emit,
-        "params": [
-            [name, {"bytes": value.hex()} if isinstance(value, bytes) else value]
-            for name, value in sorted(params.items())
-        ],
+        "params": [[name, _digestible(value)] for name, value in sorted(params.items())],
     }
     text = json.dumps(document, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
