@@ -644,9 +644,12 @@ is that both drivers refuse it, which is how the bug below was found.
    gained WireGuard code; what they gained is general (packeteer#194–#197,
    #200, #202, #203; python-zipline#79; zpfwire#35).
 6. Met: RFC 8439's and RFC 7748's vectors, and Wireshark.
-7. Written; whether it is the page a user with another protocol would follow is
-   a reader's judgement, and the one reader whose judgement settles it is not
-   its author.
+7. Met: python-zipline read the guide and the README as a writer of another
+   protocol would, at `2225371` (*python-zipline's review of the
+   documentation*, below; the review is in `plans/reviews/`). It found the
+   guide followable for a VPN whose messages carry what opens them, and its
+   points, the fit check first above all, were all taken. Accepted as the
+   non-author reading on 2026-10-20.
 
 ### Stage 7 — the example as a template
 
