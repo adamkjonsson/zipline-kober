@@ -22,6 +22,17 @@ minor bump here too.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-20
+
+**Bringing your own code.** A protocol a spec can frame but not read, because
+it is encrypted or compressed by an algorithm of the caller's own, now decodes
+with that algorithm registered beside the spec, and is checked against what
+went in. WireGuard is the worked example, keys and all, and PackBits a second
+one written from it as a template. What the language gained for it is general:
+map parameters, `fails_as`, `len()` and `net:` labels. **Breaking:** `zpf`
+0.6.0 and Zipline Payload Format 0.23 are required, so files from kober 0.5
+must be regenerated; see *Changed*.
+
 ### Added
 
 - **`net:ip` and `net:ethernet`, the format's own labels for a packet** (spec
@@ -2355,7 +2366,8 @@ installed from a checkout (see the README).
   parses `comment` back. Whether to follow `zpf` 0.3 (#58, #59) is recorded as
   an open question rather than settled.
 
-[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.2.0...v0.3.0
