@@ -24,6 +24,15 @@ minor bump here too.
 
 ### Added
 
+- **`net:ip` and `net:ethernet`, the format's own labels for a packet** (spec
+  0.23's `net:` scheme). A transform's `content_type` may be either, meaning
+  exactly one IP packet or one Ethernet frame, and a sessionization stage such
+  as `zpfwire`'s takes a record so labelled as a packet with no option. `net:`
+  is a closed vocabulary, so `kober check` refuses any other name in it, from
+  the list `zpf` itself has, which `kober.net_tokens()` returns. The WireGuard and PackBits examples label their
+  packets `net:ip` (a keepalive keeps `dec:wireguard-keepalive`), and
+  PackBits' transform refuses what is not one IP packet, since nothing
+  downstream checks a payload against its label.
 - **Map parameters, and reading one entry of one**: a key chosen per message
   from a table a run supplies. A document parameter may be declared
   `{type: {map: [K, V]}}`, keyed by `int` or `str` and holding any of the four
@@ -90,11 +99,15 @@ minor bump here too.
 
 ### Changed
 
-- Requires `zpf` 0.5.2 or later, still below 0.6: its
-  `DecodeStage.undecoded` takes the `reason_class` a `fails_as` reason is
-  written with
+- **Breaking:** the required `zpf` is now `>=0.6.0,<0.7` (Zipline Payload
+  Format 0.23), up from `>=0.5.0,<0.6` (0.21). A caller on `zpf` 0.5 must
+  upgrade, and a `.zpf` kept from an earlier kober should be regenerated, not
+  transcoded: `0.6.0` refuses `0.5`'s files at the version gate, and the
+  reverse. What kober needs of it: `net:`, the label a decoded packet is given
+  (above), and, already in `0.5.2`, the `reason_class` a transform's
+  `fails_as` reason is written with
   ([python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79)).
-  Nothing a spec without `fails_as` writes changes.
+  Nothing else kober calls changed: on `0.6.0` the suite passed unchanged.
 - **Breaking:** `kober.expr.Scope` gains `resolve_map(name)` and
   `kober.expr.Environment` gains `lookup_map(name)`. An implementation of
   either protocol outside kober must add the method, raising `ExprError` or
@@ -103,6 +116,13 @@ minor bump here too.
   so code that reads it as an `ExprType` must allow for one.
 
 ### Fixed
+
+- **`tools/pipeline.py`'s `dns_gen` input is lossy, as it always said.**
+  Before packeteer 0.18.0, `--packet-loss` did nothing to a UDP stream
+  (packeteer#194), so the input every report called lossy never was; its
+  outputs moved when packeteer did. And a `--baseline` the installed `zpf`
+  cannot read, one written in an older format, is refused before the run with
+  a message saying so, where it raised a traceback after it.
 
 - **The compiled driver decoded a `datagram` spec over a byte stream**, where
   the interpreter refuses it: a spec with no framing of its own, given a byte

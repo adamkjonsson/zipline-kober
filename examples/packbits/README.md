@@ -21,6 +21,13 @@ keys, no handshake, no parameters, one transform.
 
 Its tests are [`tests/test_packbits_example.py`](../../tests/test_packbits_example.py).
 
+## What you need
+
+kober with its YAML extra (`pip install 'kober[yaml]'`),
+[`zpfwire`](https://github.com/adamkjonsson/python-zipline-wire) 0.5.0 or
+later, and, to generate traffic,
+[packeteer](https://github.com/adamkjonsson/packeteer) 0.18.0 or later.
+
 ## The protocol
 
 ```
@@ -74,9 +81,12 @@ kober run examples/packbits/packbits.yaml pb.zpf -o packets.zpf --emit field \
 ```
 
 No `--param`: everything the transform needs, the datagram says. Each packet
-is one record, `packbits.packet`, labelled `dec:ip-packet` and citing the
-datagram it came from; a corrupted datagram is one `unpack-failed` region, and
-the next one decodes.
+is one record, `packbits.packet`, labelled `net:ip` and citing the datagram
+it came from; a corrupted datagram is one `unpack-failed` region, and the next
+one decodes. `net:ip` promises exactly one IP packet and nothing checks it
+downstream, so the transform does: what unpacks with the right length and CRC
+but is not one IP packet is `unpack-failed` too, as a tunnel's receiver would
+drop it.
 
 ## The traffic inside
 
@@ -84,7 +94,7 @@ As for WireGuard, `zpfwire` 0.5.0 turns the packets back into the conversation
 they carried, and any spec decodes it:
 
 ```console
-zpfwire convert packets.zpf -o inner.zpf --content-type dec:ip-packet
+zpfwire convert packets.zpf -o inner.zpf
 kober run examples/dns.yaml inner.zpf -o dns.zpf
 ```
 

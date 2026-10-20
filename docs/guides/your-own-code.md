@@ -105,7 +105,7 @@ units:
           with: wg-transport
           limit: 65535
           args: {key: "keys[receiver]", counter: counter}
-          content_type: "dec:ip-packet"
+          content_type: "net:ip"
 ```
 
 - **`transforms:` is the interface**, a name and the types of its arguments.
@@ -121,6 +121,12 @@ units:
 - **The output speaks for its source.** The record for `packet` cites the
   datagram it came from, `receiver` and `counter` included, so marking those
   `emit: none` leaves one record per datagram for the next stage to read.
+- **`content_type` says what the output is.** `net:ip` is the format's label
+  for exactly one IP packet, and `net:ethernet` for one Ethernet frame: a
+  sessionization stage such as `zpfwire`'s takes a record so labelled as a
+  packet, with no option. The format never checks a payload against its
+  label, so your transform has to make it true; anything else gets a `dec:`
+  label of your own, as WireGuard's keepalive does (step 4).
 
 ## 2. Supply what a run needs
 
@@ -219,7 +225,7 @@ branch's `args` are the ones in step 1):
       16: {transform: {from: sealed, with: wg-transport, limit: 1, args: …,
                        content_type: "dec:wireguard-keepalive"}}
     default: {transform: {from: sealed, with: wg-transport, limit: 65535, args: …,
-                          content_type: "dec:ip-packet"}}
+                          content_type: "net:ip"}}
 ```
 
 Decide by what the framing already says, and keep every branch going through
@@ -308,7 +314,7 @@ decrypted packets back into the conversations they were, and any spec decodes
 those:
 
 ```console
-zpfwire convert packets.zpf -o inner.zpf --content-type dec:ip-packet
+zpfwire convert packets.zpf -o inner.zpf
 kober run examples/dns.yaml inner.zpf -o dns.zpf
 ```
 

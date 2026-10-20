@@ -18,7 +18,9 @@
 # message is decoded as usual.
 #
 # A packet comes out without the padding WireGuard seals it with: the
-# transform cuts it where its own IP header says it ends, as a receiver does.
+# transform cuts it where its own IP header says it ends, as a receiver does,
+# so the record is exactly one IP packet, which is what `net:ip` promises and
+# what a sessionization stage such as zpfwire's takes a packet by.
 # A keepalive, which seals nothing, is told apart by its size and labelled as
 # one, and its tag is checked all the same.
 #
@@ -130,4 +132,4 @@ units:
               with: wg-transport
               limit: 65535
               args: {key: "keys[receiver]", counter: counter}
-              content_type: "dec:ip-packet"
+              content_type: "net:ip"

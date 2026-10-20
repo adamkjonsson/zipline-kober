@@ -13,8 +13,10 @@
 #     crc       4 bytes   CRC-32 of the packet, unpacked
 #     packed    the rest
 #
-# A datagram that does not unpack to its length, or to its CRC, is one
-# `unpack-failed` region, and the next datagram decodes.
+# A datagram that does not unpack to its length, or to its CRC, or to one IP
+# packet, is one `unpack-failed` region, and the next datagram decodes. A packet
+# is labelled `net:ip`, which promises exactly one IP packet, and is what a
+# sessionization stage such as zpfwire's takes a packet by.
 name: packbits
 version: "0.1"
 entry: datagram
@@ -47,4 +49,4 @@ units:
           with: packbits
           limit: 65535
           args: {length: length, crc: crc}
-          content_type: "dec:ip-packet"
+          content_type: "net:ip"

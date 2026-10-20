@@ -2,7 +2,7 @@
   "spec": "wireguard.yaml",
   "transforms": "wg_transforms.py",
   "packet_role": "wireguard.body.packet",
-  "packet_label": "dec:ip-packet",
+  "packet_label": "net:ip",
   "failure": "decrypt-failed",
   "keys": "keys",
   "tunnel": "wg_seal.py",

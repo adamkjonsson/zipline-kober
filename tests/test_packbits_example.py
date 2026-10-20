@@ -148,6 +148,26 @@ def test_the_transform_checks_the_crc_and_the_limit():
         unpacking.packbits(packed, limit=10, length=len(packet), crc=crc)
 
 
+IPV6 = bytes([0x60, 0, 0, 0]) + (5).to_bytes(2, "big") + bytes([17, 64]) + bytes(32) + b"hello"
+
+
+@pytest.mark.parametrize(
+    ("packet", "one"),
+    [
+        (ipv4(b"x"), True),
+        (IPV6, True),
+        (ipv4(b"x") + b"\x00", False),
+        (IPV6[:-1], False),
+        (b"\x45" + bytes(10), False),
+        (b"", False),
+    ],
+    ids=["ipv4", "ipv6", "a byte past it", "a byte short", "too short", "empty"],
+)
+def test_net_ip_means_exactly_one_ip_packet(packet: bytes, one: bool):
+    """What the label promises and the format never checks, so the transform does."""
+    assert unpacking.is_one_ip_packet(packet) is one
+
+
 def test_the_tunnel_module_writes_one_datagram_and_one_truth_line(tmp_path: Path):
     wrapper = tunnel.make_wrapper({"truth": str(tmp_path / "truth.jsonl")})
     packet = ipv4(b"\x00" * 40)
@@ -195,7 +215,9 @@ def test_every_datagram_unpacks_to_its_packet_and_cites_it(tmp_path: Path, regis
     ]
 
 
-@pytest.mark.parametrize("fault", ["last byte flipped", "length off by one", "crc wrong"])
+@pytest.mark.parametrize(
+    "fault", ["last byte flipped", "length off by one", "crc wrong", "not an IP packet"]
+)
 def test_a_datagram_that_does_not_unpack_is_unpack_failed_and_the_next_one_opens(
     tmp_path: Path, registry: Registry, fault: str
 ):
@@ -205,8 +227,10 @@ def test_a_datagram_that_does_not_unpack_is_unpack_failed_and_the_next_one_opens
         bad[-1] ^= 0xFF  # where packeteer's --tunnel-corruption lands
     elif fault == "length off by one":
         bad[1:3] = (int.from_bytes(bad[1:3], "big") + 1).to_bytes(2, "big")
-    else:
+    elif fault == "crc wrong":
         bad[3] ^= 0x01
+    else:  # packed whole, its CRC right: what net:ip would mislabel
+        bad = bytearray(tunnel.datagram(b"plain text, not a packet"))
     source = tmp_path / "in.zpf"
     datagrams(source, [tunnel.datagram(good), bytes(bad), tunnel.datagram(after)])
     written = decode(spec(), source, tmp_path, transforms=registry)

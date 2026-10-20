@@ -158,6 +158,12 @@ with in place of `undecodable`. Both backends write it, with the
 stage passes since 0.5.2
 ([python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79),
 filed for this).
+It moves to `zpf` 0.6.0 and spec 0.23 for the `net:` scheme: a packet a
+transform opens is labelled `net:ip`, the format's own name for exactly one IP
+packet, which a sessionization stage takes as a packet. `net:` is closed, so
+`check` holds a label to `zpf`'s list as it holds a reason to its classes, and
+the format never checks a payload against its label, so the transform that
+writes one has to make it true.
 
 Claims below marked **[verified]** were executed, not reasoned about: against
 `zpf` 0.16 by the script in §10, and against real captures as recorded in §13.
@@ -1364,8 +1370,9 @@ became `role` (`0x0092`), a per-record label read in the namespace of the
 decoder that wrote it — independent of `content_type`, so a field record carries
 `prim:u32` *and* `dns.header.id` at once rather than choosing. #59 reshaped
 `SessionWriter.record()`, which this project does not call. The pin became
-`zpf>=0.3.0,<0.4` — it is `>=0.5.0,<0.6` since kober 0.3.0, two minors that
-changed nothing this tree calls except to add `adjacency=` — and §4.1's single
+`zpf>=0.3.0,<0.4` — it was `>=0.5.0,<0.6` from kober 0.3.0, two minors that
+changed nothing this tree calls except to add `adjacency=`, and is
+`>=0.6.0,<0.7` (spec 0.23) since kober 0.6.0, for `net:` — and §4.1's single
 emit site made the switch the one-line change it was kept that way to be.
 
 ### 9.2 Smaller findings

@@ -261,10 +261,11 @@ python3 -m venv .venv
 ```
 
 **Why `zpf` is installed from a checkout.** This project depends on
-`zpf>=0.5.1,<0.6` — it is built on `zpf.decode_stage` and its `adjacency=`
-keyword, which is `0.5.0` work, its `params_digest=` keyword, which is
-`0.5.1`, on the per-record `role=` label, and on a record timestamp derived
-from `cites`. `zpf` `0.5.1` is released and tagged, but at the time of writing
+`zpf>=0.6.0,<0.7`, which implements Zipline Payload Format 0.23: it is built
+on `zpf.decode_stage` and its `adjacency=`, `params_digest=` and
+`reason_class=` keywords, on the per-record `role=` label, on a record
+timestamp derived from `cites`, and on 0.23's `net:` labels. `zpf` `0.6.0` is
+released and tagged, but at the time of writing
 PyPI publishes only `0.1.0`, so the dependency has to come from a local (or
 git) install. Once it reaches PyPI the checkout becomes a convenience rather
 than a requirement, and the first line above can be dropped.

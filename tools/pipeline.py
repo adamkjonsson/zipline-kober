@@ -783,9 +783,35 @@ def _against(report: Report, path: Path, before: Path) -> None:
     if not before.exists():
         report.changed(what, f"not in the baseline ({before})")
         return
-    difference = _first_difference(before, path)
+    try:
+        difference = _first_difference(before, path)
+    except zpf.ZpfError as exc:
+        report.changed(what, f"the baseline's file cannot be read: {exc}")
+        return
     if difference is not None:
         report.changed(what, f"baseline, now {difference}")
+
+
+def unreadable_baseline(baseline: Path) -> str | None:
+    """Return why a baseline cannot be compared with, or ``None`` if it can.
+
+    A baseline written in an older format is the usual reason: while `zpf` is
+    in 0.x every minor is a format of its own, and a file from another is
+    refused at its header. Found before the run rather than after it, since a
+    run takes minutes and every comparison would fail the same way.
+    """
+    outputs = sorted((baseline / "out").glob("*.zpf"))
+    if not outputs:
+        return f"{baseline} holds no outputs ({baseline / 'out'}/*.zpf): not a --work directory"
+    try:
+        _COMPARE.blocks(outputs[0])
+    except zpf.ZpfError as exc:
+        return (
+            f"{outputs[0].name} cannot be read by this zpf, which reads spec "
+            f"{'.'.join(map(str, zpf.SPEC_VERSION))}: {exc}. A baseline from before a "
+            "format change cannot be compared with; take a new one with --work"
+        )
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -796,7 +822,7 @@ def main(argv: list[str] | None = None) -> int:
 
     Returns:
         The exit status: 0 when every check held, 1 when any failed, 2 when a
-        sibling checkout is missing.
+        sibling checkout is missing or the baseline cannot be compared with.
 
     """
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -831,6 +857,12 @@ def main(argv: list[str] | None = None) -> int:
     if missing:
         print("missing: " + ", ".join(missing), file=sys.stderr)
         return 2
+
+    if args.baseline is not None:
+        why = unreadable_baseline(args.baseline)
+        if why is not None:
+            print(f"baseline: {why}", file=sys.stderr)
+            return 2
 
     work = args.work or Path(tempfile.mkdtemp(prefix="kober-pipeline-"))
     report = pipeline(tools, work, args.baseline)

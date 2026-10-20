@@ -350,7 +350,7 @@ are.
 | `limit` | **yes** | The most bytes the output may have. |
 | `args` | no | The transform's parameters, as expressions, by name. Exactly those the declaration lists. |
 | `type` | no | What the output is. Decoded in the output's own offset space. |
-| `content_type` | no | The record label for an output kept as bytes: `prim:…`, `mime:type/subtype` or `dec:…`. Only without `type`. |
+| `content_type` | no | The record label for an output kept as bytes: `prim:…`, `mime:type/subtype`, `dec:…`, or `net:ip` or `net:ethernet` for exactly one IP packet or Ethernet frame, which `check` holds to the format's closed list. Only without `type`. |
 
 It reads nothing where it stands. Like `select`, it reads a field already
 decoded, never the position, so a transform may follow a field that reads to

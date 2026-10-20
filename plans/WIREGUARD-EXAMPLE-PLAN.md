@@ -633,7 +633,8 @@ is that both drivers refuse it, which is how the bug below was found.
 
 #### Acceptance, as it stands
 
-1. Waits on the `zpf` 0.6 port (above).
+1. Met (2026-10-20), on the released packeteer 0.18.0, `zpf` 0.6.0 and
+   `zpfwire` 0.5.0: see *The port, done* below.
 2. Met: the pipeline's five WireGuard inputs decode exactly to what was sealed,
    under each impairment, both directions and four sessions each.
 3. Met: one `decrypt-failed` region per corrupted datagram, class `bytes`, and
@@ -936,6 +937,44 @@ Waits for `zpf` 0.6.0's release, as #79's follow-up did:
    and the baseline is taken again on 0.23.
 5. zpfwire#35 should key on `net:ip`, and `zpf`'s `sessionize_stage` (#76) is
    the hop it describes.
+
+### The port, done (2026-10-20)
+
+packeteer 0.18.0, python-zipline 0.6.0 and python-zipline-wire 0.5.0 were
+released. Since the 0.6.0.dev0 review only #91 (an input measured once, output
+unchanged) and documentation landed, so the list above was the whole of it,
+and on 0.6.0 the suite passed unchanged before any of it was done.
+
+1. Done: `zpf>=0.6.0,<0.7`, and the Specification link at v0.23.
+2. Done: `kober check` accepts `net:ip` and `net:ethernet`, read from
+   `zpf.NET_LINK_TYPES` through `kober.stage.net_tokens`, and refuses any
+   other `net:` name, naming the two; mutation-checked both ways.
+3. Done, in both examples, with one thing the list did not foresee: the
+   format never checks a `net:` payload against its label, so the label is a
+   promise the transform has to keep. WireGuard's already did, cutting its
+   padding by the IP header and refusing what is not IP; PackBits' did not,
+   and a datagram that unpacked, CRC and all, to something that is not IP
+   would have been labelled one. It is `unpack-failed` now, tested and
+   mutation-checked. `--content-type` is gone from every command: `zpfwire`
+   0.5.0 takes `net:ip` and `net:ethernet` as packets by default. The test kit
+   still passes an example's own label, which stays right for one whose
+   packets are something else.
+4. Done: a `--baseline` the installed `zpf` cannot read is refused before the
+   run, exit 2, saying it is from another format; checked with a file whose
+   header says 0.21. The new baseline is the 2026-10-20 run: 383 checks, every
+   one holding, the tunnel and inner counts as before.
+5. Done upstream: `zpfwire` 0.5.0 defaults to `net:ip` and `net:ethernet`.
+
+**Acceptance 1, run:** a fresh venv with only the four released projects
+installed, kober with its `yaml` extra, and every console command of both
+example READMEs run as written. One fault found: neither README said to
+install `kober[yaml]`, and without it `kober run` stops at the spec. Each now
+says what to install. With it, everything ran, the WireGuard key-log converter
+deriving exactly the keys `wg_seal.py` sealed with from the Wireshark-format
+log.
+
+**packeteer 0.18.0:** `dns_gen` is lossy at last (packeteer#194), and the
+changelog says it was not before.
 
 ## Found on the way: a compiled field could hide what its function calls
 

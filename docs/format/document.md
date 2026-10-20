@@ -123,8 +123,8 @@ have one, a core name included. It is spelled as the format spells a reason,
 lower-case words joined by hyphens, and must be a reason of the format's `bytes`
 class, since a failed transform's bytes did exist: `gap` and `truncated` are
 refused. A reason outside the format's four must say its class, so the region
-is written with `reason_class: bytes` beside it, which needs `zpf` 0.5.2
-([python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79)).
+is written with `reason_class: bytes` beside it, which `zpf` has had since
+0.5.2 ([python-zipline#79](https://github.com/adamkjonsson/python-zipline/issues/79)).
 
 What a name is bound to is decided by the program that runs the spec, not by
 the spec: `check` reads this block, never a registry.

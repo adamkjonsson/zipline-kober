@@ -2,7 +2,7 @@
   "spec": "packbits.yaml",
   "transforms": "pb_transforms.py",
   "packet_role": "packbits.packet",
-  "packet_label": "dec:ip-packet",
+  "packet_label": "net:ip",
   "failure": "unpack-failed",
   "tunnel": "pb_tunnel.py",
   "port": 9999,

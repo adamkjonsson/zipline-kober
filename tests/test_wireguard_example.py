@@ -798,7 +798,7 @@ def test_every_transport_message_opens_under_its_receivers_key(
     written = decode(spec(), source, tmp_path, params={"keys": KEYS}, transforms=registry)
     assert plaintexts(written) == expected
     labels = [b[1] for b in written if b[0] == "record" and b[2] == WIREGUARD.packet_role]
-    assert labels == ["dec:ip-packet"] * 2 + ["dec:wireguard-keepalive"] + ["dec:ip-packet"] * 2
+    assert labels == ["net:ip"] * 2 + ["dec:wireguard-keepalive"] + ["net:ip"] * 2
     assert regions(written) == []
     for key in KEYS.values():
         assert key.hex() not in repr(written)

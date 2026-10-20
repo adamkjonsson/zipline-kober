@@ -717,13 +717,17 @@ def _int_range(kind: IntType) -> tuple[int, int]:
     return 0, (1 << kind.bits) - 1
 
 
-#: What a record's content type may look like, loosely: a namespace the format
-#: defines, and a name. ``prim:bytes``, ``mime:application/json``, ``dec:ip-packet``.
 #: How the format spells an undecoded region's reason: lower-case words joined
 #: by hyphens, as ``undecodable`` and ``decrypt-failed`` are.
 _REASON = re.compile(r"[a-z]+(-[a-z0-9]+)*")
 
-_CONTENT_TYPE = re.compile(r"^(prim:[a-z0-9]+|mime:[\w.+-]+/[\w.+-]+(;.*)?|dec:[\w.-]+)$")
+#: What a record's content type may look like, loosely: a namespace the format
+#: defines, and a name. ``prim:bytes``, ``mime:application/json``,
+#: ``dec:wireguard-keepalive``, ``net:ip``. ``net:``'s names are a closed set,
+#: checked against the format's own (:meth:`_check_net_label`).
+_CONTENT_TYPE = re.compile(
+    r"^(prim:[a-z0-9]+|mime:[\w.+-]+/[\w.+-]+(;.*)?|dec:[\w.-]+|net:[\w.-]+)$"
+)
 
 
 def _visible_names(unit: Unit, upto: int) -> set[str]:
@@ -1383,8 +1387,25 @@ class _Checker:
                 self.error(
                     where,
                     f"{label}: content_type {kind.content_type!r} is not a label the "
-                    "format has: 'prim:…', 'mime:type/subtype', or 'dec:…'",
+                    "format has: 'prim:…', 'mime:type/subtype', 'dec:…', or 'net:…'",
                 )
+            elif kind.content_type.startswith("net:"):
+                self._check_net_label(kind.content_type, where, label)
+
+    def _check_net_label(self, content_type: str, where: str, label: str) -> None:
+        """Check a ``net:`` label against the format's closed vocabulary."""
+        # The stage driver is the one module that imports `zpf`, and it imports
+        # this one, so its table is reached lazily, as `_check_fails_as` does.
+        from kober.stage import net_tokens
+
+        tokens = net_tokens()
+        if content_type.removeprefix("net:") not in tokens:
+            known = ", ".join(f"'net:{token}'" for token in tokens)
+            self.error(
+                where,
+                f"{label}: content_type {content_type!r} is not one the format has; "
+                f"'net:' names only {known}",
+            )
 
     def _check_transform_source(
         self, unit: Unit, kind: Transform, visible: set[str], where: str, label: str

@@ -150,6 +150,17 @@ def canonical_class(reason: str) -> str | None:
     return UNDECODED_REASONS.get(reason)
 
 
+def net_tokens() -> tuple[str, ...]:
+    """Return the tokens the format's closed ``net:`` vocabulary has, sorted.
+
+    ``net:ip`` is one IP packet, ``net:ethernet`` one Ethernet frame: a
+    label a sessionization stage recognises a packet by. Read from
+    :data:`zpf.NET_LINK_TYPES` here, the one module that imports `zpf`, so
+    ``check`` refuses exactly what the writer would.
+    """
+    return tuple(sorted(zpf.NET_LINK_TYPES))
+
+
 def _reason_class(reason: str) -> str | None:
     """Return the ``reason_class`` a region's reason must be written with.
 

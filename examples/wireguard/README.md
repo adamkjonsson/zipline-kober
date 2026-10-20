@@ -40,6 +40,15 @@ back to the capture. Do not wait for kober to keep the state: a transform kept
 for a whole stream is named as a possible extension (`DESIGN.md` §11.5), and
 deferred, with no date.
 
+## What you need
+
+kober with its YAML extra, since the spec is YAML (`pip install 'kober[yaml]'`,
+which brings `zpf` 0.6), and
+[`zpfwire`](https://github.com/adamkjonsson/python-zipline-wire) 0.5.0 or
+later to turn a capture into a `.zpf`. To generate traffic,
+[packeteer](https://github.com/adamkjonsson/packeteer) 0.18.0 or later. The
+example's own code needs nothing beyond the standard library.
+
 ## The files
 
 | File | What it is |
@@ -183,10 +192,12 @@ line alone, since `wg_seal.py` wrote `keys.json` already.
 
 ## What the decode says
 
-`packets.zpf` has one `dec:ip-packet` record per transport message, citing the
+`packets.zpf` has one `net:ip` record per transport message, citing the
 datagram it came from, for the next stage to read: the IP packet, without the
 padding WireGuard sealed it with, cut where its own header says it ends, as a
-WireGuard receiver cuts it. A keepalive, which seals nothing, is an empty
+WireGuard receiver cuts it. `net:ip` is the format's own label for exactly one
+IP packet, which is why the padding has to go: the format never checks a
+payload against it, so the transform has to be right. A keepalive, which seals nothing, is an empty
 record labelled `dec:wireguard-keepalive`, so a reader looking for packets
 passes it over and every byte is still accounted for. The spec tells the two
 apart by size before opening either, `len(sealed) == 16`, and opens both, so a
@@ -213,16 +224,16 @@ flows and TCP reassembled as it would be from a capture, and kober decodes
 those with any spec:
 
 ```console
-zpfwire convert packets.zpf -o inner.zpf --content-type dec:ip-packet
+zpfwire convert packets.zpf -o inner.zpf
 kober run examples/dns.yaml inner.zpf -o dns.zpf
 ```
 
-`--content-type dec:ip-packet` says which records are packets. Every record in
-`inner.zpf` cites the decrypted packets it came from, and those cite the
-datagrams, so a DNS answer three stages down still says which bytes of the
-capture it was read from. `zpfwire pcap packets.zpf -o inner.pcap
---content-type dec:ip-packet` writes the decrypted packets as a capture
-instead, for Wireshark.
+`zpfwire` takes a record labelled `net:ip` as a packet, so it needs no option
+to find them, and passes a keepalive over. Every record in `inner.zpf` cites
+the decrypted packets it came from, and those cite the datagrams, so a DNS
+answer three stages down still says which bytes of the capture it was read
+from. `zpfwire pcap packets.zpf -o inner.pcap` writes the decrypted packets
+as a capture instead, for Wireshark.
 
 Losses inside and outside the tunnel are different things, and the files say
 so. A segment the inner connection lost and retransmitted (`--packet-loss
