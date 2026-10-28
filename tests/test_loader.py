@@ -1011,6 +1011,49 @@ def test_an_unnamed_construct_falls_back_to_the_one_above_it():
     assert spec.sources.locate("dns.message.confirm").path == "dns.message.confirm"
 
 
+DECLARED_YAML = """\
+name: t
+version: "1"
+entry: m
+params:
+  mode: int
+  keys: {type: {map: [bool, bytes]}}
+units:
+  m:
+    fields: []
+"""
+
+
+def test_a_fault_in_a_document_parameter_reports_its_own_line():
+    """A param is its own construct, not a footnote of the document's first line."""
+    with pytest.raises(SpecError) as caught:
+        from_yaml(DECLARED_YAML, source="t.yaml")
+    assert caught.value.loc is not None
+    assert caught.value.loc.line == 6
+    assert str(caught.value).startswith("t.yaml:6: spec.params.keys")
+
+
+TRANSFORMS_YAML = """\
+name: t
+version: "1"
+entry: m
+transforms:
+  xz2: {fails_az: unpack-failed}
+units:
+  m:
+    fields: []
+"""
+
+
+def test_a_fault_in_a_transform_declaration_reports_its_own_line():
+    """Same rule for ``transforms:``: the declaration's body has the line."""
+    with pytest.raises(SpecError) as caught:
+        from_yaml(TRANSFORMS_YAML, source="t.yaml")
+    assert caught.value.loc is not None
+    assert caught.value.loc.line == 5
+    assert str(caught.value).startswith("t.yaml:5: spec.transforms.xz2")
+
+
 # --- the repeat kind lifts into the field ----------------------------------
 #
 # The same rule as the type kind, applied to the construct beside it. Every

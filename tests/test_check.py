@@ -1444,6 +1444,26 @@ def test_a_finding_renders_file_line_path_then_message():
     assert rendered.startswith("error: dns.yaml:8: dns.message.body: ")
 
 
+def test_a_finding_about_a_document_parameter_carries_its_line():
+    """A params finding names the param's line, not the document's first line."""
+    text = """\
+name: dns
+version: "1.0"
+entry: message
+units:
+  message:
+    fields:
+      - {name: kind, bits: 8}
+params:
+  kind: int
+"""
+    spec = from_yaml(text, source="dns.yaml")
+    findings = check(spec)
+    assert findings
+    assert findings[0].where.line == 9
+    assert findings[0].where.path == "dns.params.kind"
+
+
 def test_a_finding_from_a_mapping_reads_as_it_always_did():
     """`from_dict` has no source, and the message must not degrade beyond that."""
     spec = Spec.from_dict(
