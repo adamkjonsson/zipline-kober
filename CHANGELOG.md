@@ -38,6 +38,14 @@ minor bump here too.
   lower(tag)*. `(yield x)` and Python 3.14's t-strings, which were refused as
   `Yield` and `TemplateStr`, are named in words or quoted too. packeteer
   0.19.0 names the callee the same way.
+- **A mistake inside `params:` or `transforms:` is reported at its own line**
+  ([#59](https://github.com/adamkjonsson/zipline-kober/issues/59)), by the
+  loader and by `check`, errors and warnings alike. Every one said line 1, the
+  document's, wherever it was: a map keyed by `bool`, a parameter named like a
+  field, an unknown key or a misspelt `fails_as` on a declaration, a
+  declaration never used. Each is now at the line its parameter or
+  declaration is named on, the scalar short form `mode: int` included, and a
+  `fails_as` at its own. A spec from JSON still reports the path alone.
 
 ### Documentation
 

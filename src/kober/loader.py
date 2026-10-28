@@ -74,6 +74,7 @@ the *checker's* vocabulary, since it runs later with the document gone. See
 from __future__ import annotations
 
 import json
+from collections.abc import Hashable
 from dataclasses import dataclass
 from enum import Enum
 from functools import cache
@@ -234,6 +235,21 @@ class _At:
             return self
         return _At(self.loc.at_line(line), self.lines, self.found, self.endian)
 
+    def entry(self, mapping: Mapping[Any, Any], key: object) -> _At:
+        """Return the position of ``mapping[key]``, at the line its key is on.
+
+        For an entry keyed by name, a parameter or a transform declaration,
+        whose value may be a scalar with no line of its own. A mapping that
+        did not come from YAML knows no key's line, and then this is
+        :meth:`child`.
+        """
+        site = self.child(key)
+        key_lines = getattr(mapping, "key_lines", None)
+        line = key_lines.get(key) if isinstance(key_lines, dict) else None
+        return site if line is None else _At(
+            site.loc.at_line(line), self.lines, self.found, self.endian
+        )
+
     def defaulting(self, mapping: Mapping[str, Any]) -> _At:
         """Return this position with any lexical default ``mapping`` declares.
 
@@ -295,9 +311,12 @@ class _LinedDict(dict[Any, Any]):
     nothing downstream needs to know it exists.
     """
 
-    __slots__ = ("line",)
+    __slots__ = ("key_lines", "line")
 
     line: int
+    #: The line each key is written on, for an entry with no mapping of its
+    #: own to carry one: ``mode: int`` in ``params:`` (#59).
+    key_lines: dict[Any, int]
 
 
 @cache
@@ -323,14 +342,21 @@ def _lined_loader(yaml: Any) -> Any:
         """``SafeLoader``, plus the line each mapping starts on."""
 
         def construct_yaml_map(self, node: Any) -> Any:
-            """Build a mapping that carries its own line."""
+            """Build a mapping that carries its own line, and its keys'."""
             data = _LinedDict()
             data.line = node.start_mark.line + 1
+            data.key_lines = {}
             # Two-step, as PyYAML's own does: the empty mapping is yielded
             # first so a document that refers to itself has something to
             # point at before its contents exist.
             yield data
             data.update(self.construct_mapping(node))
+            # After construct_mapping, which has flattened any merge key into
+            # node.value and built every key, so this reads them back built.
+            for key_node, _ in node.value:
+                key = self.construct_object(key_node)
+                if isinstance(key, Hashable):
+                    data.key_lines.setdefault(key, key_node.start_mark.line + 1)
 
     LinedLoader.add_constructor("tag:yaml.org,2002:map", LinedLoader.construct_yaml_map)
     return LinedLoader
@@ -1280,21 +1306,24 @@ def _transform_decls(document: object, at: _At, owner: str) -> dict[str, Transfo
     A declaration with nothing to say is written ``{}`` or left empty, which is
     how a spec says it uses an extended-tier name.
     """
-    mapping = _require_mapping(document, at)
+    mapping = _require_mapping(document, at.within(document))
     decls: dict[str, TransformDecl] = {}
     for name, value in mapping.items():
-        site = at.child(name)
+        site = at.entry(mapping, name)
         body = _require_mapping({} if value is None else value, site)
         _reject_unknown(body, _TRANSFORM_DECL_KEYS, site)
-        params_doc = _require_mapping(body.get("params", {}), site.child("params"))
+        params_site = site.entry(body, "params")
+        params_doc = _require_mapping(body.get("params", {}), params_site)
         fails_as = body.get("fails_as")
         if fails_as is not None:
-            fails_as = _require_str(fails_as, site.child("fails_as"))
+            fails_as_site = site.entry(body, "fails_as")
+            fails_as = _require_str(fails_as, fails_as_site)
+            fails_as_site.record(f"{owner}.transforms.{name}.fails_as")
         site.record(f"{owner}.transforms.{name}")
         decls[name] = TransformDecl(
             name=name,
             params={
-                param: _member(ExprType, kind, site.child("params").child(param))
+                param: _member(ExprType, kind, params_site.entry(params_doc, param))
                 for param, kind in params_doc.items()
             },
             fails_as=fails_as,
@@ -1309,10 +1338,10 @@ def _doc_params(document: object, at: _At, owner: str) -> list[Param]:
     rather than bound in order. ``key: bytes`` is the short form, and
     ``key: {type: bytes, secret: true}`` the long one.
     """
-    mapping = _require_mapping(document, at)
+    mapping = _require_mapping(document, at.within(document))
     params: list[Param] = []
     for name, value in mapping.items():
-        site = at.child(name)
+        site = at.entry(mapping, name)
         site.record(f"{owner}.params.{name}")
         if isinstance(value, str):
             params.append(Param(name=name, type=_member(ExprType, value, site)))
@@ -1325,8 +1354,8 @@ def _doc_params(document: object, at: _At, owner: str) -> list[Param]:
         secret = body.get("secret", False)
         if not isinstance(secret, bool):
             msg = f"'secret' is true or false, got {secret!r}"
-            raise SpecError(msg, site.child("secret").loc)
-        kind = _param_type(body["type"], site.child("type"))
+            raise SpecError(msg, site.entry(body, "secret").loc)
+        kind = _param_type(body["type"], site.entry(body, "type"))
         params.append(Param(name=name, type=kind, secret=secret))
     return params
 
@@ -1345,7 +1374,7 @@ def _param_type(document: object, at: _At) -> ExprType | MapType:
     if "map" not in body:
         msg = "a parameter type written as a mapping is {map: [key type, value type]}"
         raise SpecError(msg, at.loc)
-    site = at.child("map")
+    site = at.entry(body, "map")
     pair = _require_list(body["map"], site)
     if len(pair) != _MAP_ARITY:
         msg = f"a map is [key type, value type], and this lists {len(pair)} type(s)"
