@@ -46,6 +46,15 @@ minor bump here too.
   declaration never used. Each is now at the line its parameter or
   declaration is named on, the scalar short form `mode: int` included, and a
   `fails_as` at its own. A spec from JSON still reports the path alone.
+- **`check` refuses a repeated `computed`, `select` or `pointer`**
+  ([#51](https://github.com/adamkjonsson/zipline-kober/issues/51)), and a
+  repeated `switch` none of whose cases reads anything. Each reads nothing
+  where it stands, so the decoder stopped every such repetition at its second
+  element, `undecodable` whatever the input, while `check` passed the spec.
+  They are refused now as `transform` and `concat` already were, under every
+  repetition kind, a `count` of 0 included. Not a break: every spec newly
+  refused failed on every message with at least one element. The decoder's
+  guard stays, for a spec run with `check=False`.
 
 ### Documentation
 

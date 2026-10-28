@@ -1966,9 +1966,12 @@ def test_the_shapes_the_backend_refuses_say_so(fragment: str, source: str):
     differential could not catch — it would never see the spec.
     """
     spec = inline(source)
-    assert Decoder(spec) is not None
+    # A repeated pointer is refused by `check` since #51; the compiler's own
+    # refusal is what a spec run with check=False meets.
+    unchecked = fragment == "repeated pointer"
+    assert Decoder(spec, check=not unchecked) is not None
     with pytest.raises(CompileError, match=fragment):
-        compiled(spec)
+        compiled(spec, check=not unchecked)
 
 
 # --- select ----------------------------------------------------------------
@@ -2213,7 +2216,9 @@ def test_a_conditional_repeat_of_a_consuming_element_needs_no_progress_guard():
     reading_nothing = CONDITIONAL_REPEAT.replace(
         '{unit: item}', '{computed: "flag"}'
     ).replace('repeat: {to_end: true}', 'repeat: {count: "flag"}')
-    assert "the repetition cannot terminate" in render(Plan.from_spec(inline(reading_nothing)))
+    # `check` refuses that shape (#51), so it is only reachable unchecked.
+    plan = Plan.from_spec(inline(reading_nothing), check=False)
+    assert "the repetition cannot terminate" in render(plan)
 
 
 @pytest.mark.parametrize(

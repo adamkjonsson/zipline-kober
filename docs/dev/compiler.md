@@ -156,7 +156,8 @@ All deliberate, each with a message naming the spec's own words:
   position swapped on some branches and not others, with the byte ranges
   written down before the branch is chosen.
 - **A repeated pointer.** A pointer reads no input where it stands, so a repeat
-  of one cannot make progress.
+  of one cannot make progress. `check` refuses one too, so only a spec
+  compiled with `check=False` reaches this.
 - **A `switch` with a `select` in only some cases.** A select's extent is the
   element it chose, and an ordinary read's is where it stands; one pair of span
   locals cannot hold both, written down as they are before the branch is

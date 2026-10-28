@@ -565,6 +565,23 @@ def _reads_input(kind: FieldType) -> bool:
     )
 
 
+#: How a refusal names a type that reads nothing where it stands, as the
+#: author wrote it.
+_CONSTRUCTS: dict[type, str] = {
+    Computed: "a computed field",
+    Select: "a select",
+    Pointer: "a pointer",
+    Concat: "a concat",
+    Transform: "a transform",
+    Switch: "a switch none of whose cases reads anything",
+}
+
+
+def _construct(kind: FieldType) -> str:
+    """Name a field type for a refusal: ``a pointer``, ``a transform``."""
+    return _CONSTRUCTS.get(type(kind), "a field of this type")
+
+
 def _trailing_bits(spec: Spec, unit: Unit, index: int, seen: tuple[str, ...]) -> int:
     """Sum the widths of ``unit``'s fields after ``index``, in bits."""
     total = 0
@@ -1131,14 +1148,14 @@ class _Checker:
         for kind in _walk_types(item.type):
             self._check_type(unit, kind, visible, where)
 
-        if item.repeat is not None and isinstance(item.type, (Concat, Transform)):
+        if item.repeat is not None and not _reads_input(item.type):
             # It reads nothing where it stands, so no element can make progress:
-            # every decode would stop at the second with "consumed no input".
-            construct = "concat" if isinstance(item.type, Concat) else "transform"
+            # every decode would stop at the second with "consumed no input",
+            # and one that is never longer than one is not a repetition (#51).
             self.error(
                 where,
-                f"a {construct} cannot repeat: it reads nothing where it stands, so "
-                "a repetition of it can never move on",
+                f"{_construct(item.type)} cannot repeat: it reads nothing where it "
+                "stands, so a repetition of it can never move on",
             )
 
         if isinstance(item.type, Switch):
