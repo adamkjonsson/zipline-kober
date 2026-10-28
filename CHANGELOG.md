@@ -22,6 +22,23 @@ minor bump here too.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A call on anything but a bare name is refused naming what was written**,
+  not a Python AST class
+  ([#57](https://github.com/adamkjonsson/zipline-kober/issues/57),
+  [#58](https://github.com/adamkjonsson/zipline-kober/issues/58)).
+  `a.len(body)` was refused as *'Attribute' is not one of the expression
+  language's functions*, `keys[0](x)` as `'Subscript'` (a regression in
+  0.6.0), and `lower(tag)(1)` as `'a function call'`, which read as though
+  every call were refused. The callee is now quoted as written: `'a.len'`,
+  `'keys[0]'`, `'lower(tag)'`. The method spelling of one of the functions,
+  the likeliest way to meet this from Python, says how to write it:
+  `tag.lower()` is refused with *a method call is not allowed; write
+  lower(tag)*. `(yield x)` and Python 3.14's t-strings, which were refused as
+  `Yield` and `TemplateStr`, are named in words or quoted too. packeteer
+  0.19.0 names the callee the same way.
+
 ### Documentation
 
 - **`zpf` is installed from its release tag**, not from a sibling checkout

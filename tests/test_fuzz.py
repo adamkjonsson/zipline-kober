@@ -15,8 +15,10 @@ differ.
 
 from __future__ import annotations
 
+import ast
 import itertools
 import random
+import re
 import sys
 import zlib
 from collections import Counter
@@ -1771,3 +1773,82 @@ def test_a_refused_attempt_after_a_gap_is_retried_where_it_stopped(seed: int, em
             and call[2] not in ends
         )
     assert retried, "the batch never retried after a refusal"
+
+
+# --- the expression language's refusals (#57) ---------------------------------
+#
+# `docs/format/expressions.md` promises a construct is refused by name "rather
+# than by an AST class". A table of names is only as good as its coverage, and
+# 0.6.0 lost `Subscript` from it without a test noticing, so this builds
+# expressions out of every construct Python parses and checks every refusal.
+
+_AST_CLASSES = re.compile(
+    r"\b(?:"
+    + "|".join(
+        sorted(
+            name
+            for name in dir(ast)
+            if isinstance(getattr(ast, name), type)
+            and issubclass(getattr(ast, name), ast.AST)
+            and name[0].isupper()
+        )
+    )
+    + r")\b"
+)
+
+
+def _expression(rng: random.Random, depth: int) -> str:
+    """Return a random expression, built mostly from what the language refuses."""
+    if depth <= 0:
+        return rng.choice(["x", "tag", "a.b", "1", "0x1f", "'s'", "true", "this"])
+    inner = _expression(rng, depth - 1)
+    other = _expression(rng, depth - 1)
+    shapes = [
+        f"({inner})({other})",
+        f"{inner}.lower()",
+        f"{inner}.upper({other})",
+        f"{inner}[{other}]",
+        f"{inner}[1:2]",
+        f"lower({inner})({other})",
+        f"len({inner}, {other})",
+        f"to_int({inner}, base={other})",
+        f"({inner}) ** {other}",
+        f"({inner}) @ {other}",
+        f"{inner} is {other}",
+        f"{inner} not in {other}",
+        f"{inner} < {other} < 3",
+        f"lambda: {inner}",
+        f"({inner} if {other} else 0)",
+        f"[{inner} for x in {other}]",
+        f"{{{inner}: {other}}}",
+        f"({inner}, {other})",
+        f"[*{inner}]",
+        f"(y := {inner})",
+        f"(yield {inner})",
+        f"(yield from {inner})",
+        f"f'{{{inner}}}'",
+        f"t'{{{inner}}}'",
+        f"await {inner}",
+        f"{inner} + {other}",
+        f"not {inner}",
+        "1.5",
+        "b'x'",
+        "None",
+    ]
+    return rng.choice(shapes)
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_a_refusal_never_names_an_ast_class(seed: int):
+    rng = random.Random(seed)
+    refused = 0
+    for _ in range(300):
+        source = _expression(rng, rng.randint(1, 3))
+        try:
+            expr_module.parse(source)
+        except expr_module.ExprError as exc:
+            refused += 1
+            message = str(exc).removesuffix(f": {source!r}")
+            found = _AST_CLASSES.search(message)
+            assert found is None, f"{found and found.group()!r} in {message!r} (seed={seed})"
+    assert refused, "nothing was refused"

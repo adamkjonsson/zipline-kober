@@ -525,11 +525,21 @@ def _translate_call(node: ast.Call, source: str, where: Location | None) -> Expr
     """
     known = ", ".join(f"{name}()" for name in sorted(BUILTINS))
     if not isinstance(node.func, ast.Name) or node.func.id not in BUILTINS:
-        called = node.func.id if isinstance(node.func, ast.Name) else _describe(node.func)
-        msg = (
-            f"{called!r} is not one of the expression language's functions; "
-            f"there are only {known}"
-        )
+        # Named as written, `tag.lower` or `keys[0]`, never by its AST class (#57).
+        called = ast.unparse(node.func)
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in BUILTINS and not node.keywords:
+            # A Python habit: the method spelling of one of the functions (#58).
+            arguments = ", ".join(ast.unparse(arg) for arg in (func.value, *node.args))
+            msg = (
+                f"{called!r} is not one of the expression language's functions, and a "
+                f"method call is not allowed; write {func.attr}({arguments})"
+            )
+        else:
+            msg = (
+                f"{called!r} is not one of the expression language's functions; "
+                f"there are only {known}"
+            )
         raise ExprError(msg, source, where)
     if node.keywords:
         msg = f"{node.func.id}() takes positional arguments only"
@@ -627,6 +637,8 @@ _CONSTRUCT_NAMES: dict[type[ast.AST], str] = {
     ast.Starred: "unpacking",
     ast.NamedExpr: "an assignment expression",
     ast.Await: "await",
+    ast.Yield: "yield",
+    ast.YieldFrom: "yield",
     ast.JoinedStr: "an f-string",
 }
 
@@ -656,7 +668,10 @@ def _describe(node: ast.AST) -> str:
         symbol = _REFUSED_OPS.get(type(operator))
         if symbol is not None:
             return f"operator {symbol!r}"
-    return f"{type(node).__name__}"
+    # Anything the table does not name, such as a construct a later Python
+    # adds (3.14's t-strings), is quoted as written rather than named by its
+    # AST class, which an author never wrote (#57).
+    return repr(ast.unparse(node))
 
 
 def infer_type(expr: Expr, scope: Scope, source: str, where: Location | None = None) -> ExprType:

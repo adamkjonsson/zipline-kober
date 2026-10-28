@@ -35,7 +35,10 @@ Precedence and associativity are Python's, because the parser is Python's —
 calls, no loops" holds by construction: a construct is refused because it is
 absent from the whitelist, and refused **by name** (`'foo' is not one of the
 expression language's functions; there are only endswith(), len(), lower(),
-startswith(), to_int(), trim()`) rather than by an AST class.
+startswith(), to_int(), trim()`) rather than by an AST class. A callee that is
+not a bare name is quoted as written (`'keys[0]'`, `'f(x)'`), and the method
+spelling of one of the functions says how to write it instead: `tag.lower()` is
+refused with *write lower(tag)*.
 
 ### Four types, and no coercion
 

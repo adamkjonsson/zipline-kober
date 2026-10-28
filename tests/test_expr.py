@@ -334,6 +334,70 @@ def test_the_refusal_names_what_does_exist():
     assert "to_int()" in str(caught.value)
 
 
+@pytest.mark.parametrize(
+    ("source", "called"),
+    [
+        ("a.len(body) == 4", "'a.len'"),
+        ("keys[0](x)", "'keys[0]'"),
+        ("(1)(x)", "'1'"),
+        ('"s"(x)', "\"'s'\""),
+        ("(a + b)(x)", "'a + b'"),
+        ("f(x)(y)", "'f(x)'"),
+        ("lower(tag)(1)", "'lower(tag)'"),
+    ],
+)
+def test_a_refused_callee_is_named_as_written(source: str, called: str):
+    """Not by the AST class it parses to, which the author never wrote (#57)."""
+    with pytest.raises(ExprError) as caught:
+        parse(source)
+    message = str(caught.value)
+    assert f"{called} is not one of the expression language's functions" in message
+    for name in ("Attribute", "Subscript", "Constant", "BinOp", "Call"):
+        assert name not in message
+    assert "a function call" not in message
+
+
+@pytest.mark.parametrize(
+    ("source", "advice"),
+    [
+        ("tag.lower() == 'abc'", "write lower(tag)"),
+        ("this.len(body)", "write len(this, body)"),
+        ("a.b.startswith('x')", "write startswith(a.b, 'x')"),
+        ("s.to_int(16)", "write to_int(s, 16)"),
+    ],
+)
+def test_a_method_spelling_of_a_function_says_how_to_write_it(source: str, advice: str):
+    """`tag.lower()` is the likeliest way to meet the refusal, from Python (#58)."""
+    with pytest.raises(ExprError) as caught:
+        parse(source)
+    message = str(caught.value)
+    assert "a method call is not allowed" in message
+    assert advice in message
+
+
+def test_a_method_that_is_not_a_function_gets_the_list_instead():
+    with pytest.raises(ExprError) as caught:
+        parse("tag.upper()")
+    message = str(caught.value)
+    assert "'tag.upper' is not one of the expression language's functions" in message
+    assert "there are only" in message
+    assert "method" not in message
+
+
+@pytest.mark.parametrize(
+    ("source", "fragment"),
+    [
+        ("(yield x)", "yield is not allowed"),
+        ("(yield from x)", "yield is not allowed"),
+    ],
+)
+def test_a_yield_is_refused_in_words(source: str, fragment: str):
+    with pytest.raises(ExprError) as caught:
+        parse(source)
+    assert fragment in str(caught.value)
+    assert "Yield" not in str(caught.value)
+
+
 class _Values:
     def __init__(self, **values: object) -> None:
         self.values = values
