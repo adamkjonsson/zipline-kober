@@ -118,9 +118,10 @@ python -m venv .venv
     `--protocol-messages FILE` saying what to send, so **DNS can be generated
     rather than only fuzzed** — and a `raw:` section is the only way to put a
     *compressed* response into an impaired stream, since a built message writes
-    every name in full. Each element of that file is a section body
-    (`{"raw": …}`), not the `{"dns": {…}}` shape `packeteer parse` writes; the
-    wrapped form is accepted in silence and builds an empty header. 0.12.0 also
+    every name in full. Since **0.20.0** wrap a section to give it a direction,
+    `{"dns": {"raw": …}, "direction": "s2c"}`; a bare section is always sent
+    c2s, and a bare one with `direction` is refused. An HTTP message takes its
+    direction from its start line instead. 0.12.0 also
     made compressed DNS round-trip, so a fuzzed capture now carries the
     pointers it always had — count `.target` records to know.
     If it lacks a protocol, write one as a `packeteer protocol` spec (0.11.0)

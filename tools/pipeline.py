@@ -8,7 +8,7 @@ where the seam bug lived. This script is the release checklist's requirement
     .venv/bin/python tools/pipeline.py
 
 It needs two sibling checkouts with their own virtual environments, neither a
-dependency of this project: ``packeteer`` 0.18.0 or later (to fuzz and generate
+dependency of this project: ``packeteer`` 0.20.0 or later (to fuzz and generate
 traffic, through an example's tunnel module included) and
 ``python-zipline-wire`` 0.5.0 or later (``zpfwire``, to turn captures into
 ``.zpf``, and a tunnel's opened packets back into conversations).
@@ -221,9 +221,10 @@ def _generated_dns(tools: Tools, out: Path) -> None:
 
     ``raw:`` messages from ``tools/dns-messages.json``, because a response
     packeteer builds from fields writes every name in full and carries no
-    pointer at all. The file holds section bodies (``{"raw": …}``), not the
-    ``{"dns": {…}}`` shape ``packeteer parse`` writes; the wrapped form is
-    accepted in silence and builds an empty header.
+    pointer at all. Each is wrapped, ``{"dns": {"raw": …}, "direction": …}``,
+    since the wrapped form is what gives a message its direction: a bare
+    section is always sent client to server, so the response left from the
+    client until #62.
     """
     tools.packeteer_cmd(
         "stream", "--payload", "dns", "--protocol", "udp",

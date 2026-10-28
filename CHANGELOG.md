@@ -43,6 +43,7 @@ minor bump here too.
   or under loss, and now decodes all 30 (26 when segments are lost and not
   resent). The size is now `to_int(before(size, ';'), 16)`; the `size` record
   still cites the whole line, extensions and all.
+
 - **A call on anything but a bare name is refused naming what was written**,
   not a Python AST class
   ([#57](https://github.com/adamkjonsson/zipline-kober/issues/57),
@@ -87,6 +88,13 @@ minor bump here too.
   for co-development in a second venv, `.venv-dev`, and no longer say PyPI
   holds an old `zpf`: the `zpf` there is an unrelated project. The pipeline
   prints which `zpf` it ran, version and location.
+- **The `--protocol-messages` trap in *Testing* is replaced by the current
+  rule** ([#62](https://github.com/adamkjonsson/zipline-kober/issues/62)). It
+  said a wrapped `{"dns": {…}}` element is accepted in silence and builds an
+  empty header; since packeteer 0.20.0 the wrapped form is the one that gives a
+  message its direction, and a bare section is always sent client to server.
+  The pipeline's generated DNS used bare sections, so its response left from
+  the client; it is wrapped now, and the pipeline needs packeteer 0.20.0.
 - ***Testing* lists two new pipeline inputs**, `http_ext` and
   `http_ext_clean`: chunked HTTP whose size lines carry extensions (#54), lossy
   and checked exactly.

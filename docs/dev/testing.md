@@ -192,16 +192,16 @@ It is one command, and **run it before a release, or after touching
 
 It needs two sibling checkouts with their own venvs, neither a dependency of
 this project — `../packeteer` and `../python-zipline-wire`, or wherever
-`--packeteer` and `--wire` say: packeteer 0.18.0 or later, for its UDP tunnel,
-and `zpfwire` 0.5.0 or later, for a `.zpf` of packets. It builds twelve inputs
-of its own, and those of every example that describes itself in an
-`example.json` (`tests/examplekit.py`); WireGuard's five and PackBits' two make
-nineteen:
+`--packeteer` and `--wire` say: packeteer 0.20.0 or later, for its UDP tunnel
+and a wrapped message's direction, and `zpfwire` 0.5.0 or later, for a `.zpf`
+of packets. It builds twelve inputs of its own, and those of every example that
+describes itself in an `example.json` (`tests/examplekit.py`); WireGuard's five
+and PackBits' two make nineteen:
 
 | Input | What it is for |
 | --- | --- |
 | `dns_fuzz` | `packeteer fuzz --seed 1` over `dns_example.pcapng`: adversarial variants of real DNS, compression pointers and all. |
-| `dns_gen` | A generated, lossy DNS stream whose response is compressed — `raw:` bytes from `tools/dns-messages.json`, since a built message carries no pointer (see *Generated DNS* below). |
+| `dns_gen` | A generated, lossy DNS exchange whose response is compressed and goes server to client — `raw:` bytes from `tools/dns-messages.json`, since a built message carries no pointer (see *Generated DNS* below). |
 | `http_gen` | Generated chunked HTTP with trailers at `--mss 200` on a 5% lossy link: chunk boundaries across segment boundaries, and losses mid-body. |
 | `http_clean` | The same traffic with no loss, so its shape can be checked exactly. |
 | `http_ext` | 30 chunked transactions whose size lines carry chunk extensions (`7;sig=abc`, `2;a=1;b="x y"`), as `raw` messages, since packeteer's chunked generator writes none: 40-byte segments on a 5% lossy link (#54). |
@@ -357,12 +357,18 @@ supplying the bytes yourself is the only way to put a compressed response into
 an impaired stream, and a compressed response behind a lost datagram is exactly
 the case nothing else here can produce.
 
-**One trap, since it cost a run to find.** Each element of the file is a
-protocol **section body** — `{"raw": …}` — not the `{"dns": {…}}` shape that
-`packeteer parse` writes. The wrapped form is accepted in silence and builds an
-empty 12-byte header, so the pipeline runs, the output is conformant, coverage
-is complete, and every message is a bare DNS header. Assert the shape: counting
-`.target` records is the cheapest way to know a pointer was followed at all.
+**Wrap a section to give it a direction.** Since packeteer 0.20.0 an element
+is `{"dns": {"raw": …}, "direction": "s2c"}`, the shape `packeteer parse`
+writes; a bare section body, `{"raw": …}`, is always sent client to server, and
+a bare one with a `direction` beside it is refused. Before 0.20.0 the rule was
+the other way round, and the wrapped form was accepted in silence and built an
+empty header, which is why `tools/dns-messages.json` was bare and its response
+went out from the client until
+[#62](https://github.com/adamkjonsson/zipline-kober/issues/62). Either way,
+assert the shape: counting `.target` records is the cheapest way to know a
+pointer was followed at all. HTTP is the exception to the direction rule: a
+`{"http": {"raw": …}}` message takes its direction from its start line, and a
+`direction` beside it is refused.
 
 ### A trailer section is not a chunk
 

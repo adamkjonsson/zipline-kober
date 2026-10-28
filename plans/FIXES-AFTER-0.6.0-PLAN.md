@@ -1,6 +1,9 @@
 # Plan: the fixes found after 0.6.0
 
-**State: Stage 0 done (2026-10-28); Stage 1 next.** Written 2026-10-28 against `0.6.0` (released
+**State: Stages 0 to 6 done (2026-10-28); the release waits on
+[zipline#168](https://github.com/adamkjonsson/zipline/issues/168)**, whose
+one position past a FIN fails two tests and 80 pipeline checks (see *Stage 0*
+and *Where it stands*). Written 2026-10-28 against `0.6.0` (released
 2026-10-20), `zpf` 0.6.0 pinned (`>=0.6.0,<0.7`), packeteer 0.21.0, `zpfwire`
 0.5.0. The milestone is GitHub's `0.7.0`, which holds eight open issues, all of
 them found *after* `v0.6.0` was tagged. See *The version* for why it is a
@@ -208,6 +211,47 @@ extensions).
    records.
 
 Changelog: **Documentation** (`docs/dev/testing.md`).
+
+## Where it stands
+
+Every stage was checked against its bug: each fix reverted, its tests watched
+fail, the fix restored. What each found beyond its issue:
+
+- **Stage 1.** With a backend made to write a wrong `ts`, 383 differential
+  tests passed under the old `blocks()` and fail under the new one. No fixture
+  compares against stored bytes. The pipeline moved nothing.
+- **Stage 2.** `(yield x)`, `(yield from x)` and 3.14's t-strings reached the
+  same fallback (`Yield`, `YieldFrom`, `TemplateStr`); `_lookup`'s path cannot,
+  since every Python operator is allowed or in `_REFUSED_OPS`. The fallback
+  now quotes the source, and a seeded fuzz test asserts no refusal names an
+  AST class.
+- **Stage 3.** The nearest mapping's line, as #59 suggests, is still wrong for
+  a scalar short form that is not its block's first key, so the YAML loader
+  records each key's line (`_LinedDict.key_lines`), used for entries of
+  `params:` and `transforms:` only. A key on the document still reports line 1,
+  as `document.md` says; key lines would let that go too, if wanted.
+- **Stage 4.** `test_a_repeated_zero_width_field_is_a_decode_time_finding`
+  pinned the old behaviour on purpose, so the family would move together, and
+  became the refusal's test. Four tests of the runtime guard now build with
+  `check=False`. Not done: a `unit` whose every field reads nothing, repeated,
+  passes `check` and fails the same way; rarer, and it needs a fixpoint over
+  units.
+- **Stage 5.** `before()` is one function in `kober.expr`, which the compiled
+  module imports from `kober.runtime`, since `str.partition` raises on an empty
+  separator. packeteer's generator writes no extension, but a `raw` message
+  does, so the pipeline gained `http_ext` and `http_ext_clean`: 30 transactions
+  each, where 0.6.0's spec decoded **no** response and this one decodes all 30
+  (26 under unrecovered loss), and the clean one matches the reference reader
+  exactly (60 start lines, 80 chunk sizes, 30 trailer lines).
+- **Stage 6.** Against `../kober-baselines/v0.6.0`, 96 outputs differ: every
+  `http` one in its decoder's `params_digest` alone, since the spec changed;
+  the 16 of `dns_gen` (four specs, four runs), whose responses now leave from
+  the server, 18 of 18, with the same 35 messages, 1,381 fields and 36 pointers
+  followed; and the 16 new `http_ext` ones. 80 checks fail, every one the #168
+  position (10 TCP inputs × 8), and nothing else.
+
+`DESIGN.md` §3.3 still says "a closed table of three functions", stale since
+0.5.0's `startswith` and `endswith` and now by four.
 
 ## Release
 
