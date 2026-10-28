@@ -22,6 +22,19 @@ minor bump here too.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`zpf` is installed from its release tag**, not from a sibling checkout
+  ([#61](https://github.com/adamkjonsson/zipline-kober/issues/61)). An
+  editable install of the checkout records its version when it is made and
+  runs whatever is checked out afterwards, so the development venv could
+  report `zpf` 0.6.0 while running 0.7.0, and a review of a dev build proved
+  nothing. The README and *Contributing* now install
+  `git+https://github.com/adamkjonsson/python-zipline@v0.6.0`, keep a checkout
+  for co-development in a second venv, `.venv-dev`, and no longer say PyPI
+  holds an old `zpf`: the `zpf` there is an unrelated project. The pipeline
+  prints which `zpf` it ran, version and location.
+
 ## [0.6.0] - 2026-10-20
 
 **Bringing your own code.** A protocol a spec can frame but not read, because

@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "kober"
 # The single source of truth for the version; `kober.__version__`
 # reads it back out of the installed metadata.
-version = "0.6.0"
+version = "0.7.0.dev0"
 description = "Decode network protocols from a declarative specification into Zipline decode stages"
 readme = "README.md"
 license = "MIT"
@@ -40,6 +40,9 @@ classifiers = [
 # `fails_as`; `params_digest=` on `decode_stage` (0.5.1, #77); `adjacency=`
 # (0.5.0), for field-granularity output's unit sequence; and `role=` and a
 # `ts` derived from `cites` (0.3.0).
+#
+# `.venv` installs this from a release tag; a sibling checkout of an unreleased
+# `zpf` goes in `.venv-dev`, never here (docs/dev/contributing.md, #61).
 dependencies = ["zpf>=0.6.0,<0.7"]
 
 [project.optional-dependencies]

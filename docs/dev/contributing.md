@@ -2,33 +2,48 @@
 
 ## Environment
 
-Python 3.11+, and a checkout of
-[`python-zipline`](https://github.com/adamkjonsson/python-zipline) beside this
-one. One virtualenv covers everything — tests, docs, wheel builds:
+Python 3.11+. One virtualenv covers everything — tests, docs, wheel builds:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e ../python-zipline    # see below
+.venv/bin/pip install "zpf @ git+https://github.com/adamkjonsson/python-zipline@v0.6.0"    # see below
 .venv/bin/pip install -e . -r requirements.txt
 ```
 
-**Why `zpf` comes from a checkout.** This project requires `zpf>=0.6.0,<0.7`
+**Why `zpf` comes from a tag.** This project requires `zpf>=0.6.0,<0.7`
 (Zipline Payload Format 0.23) — it is built on `zpf.decode_stage` and its
 `adjacency=`, `params_digest=` and `reason_class=` keywords, on the per-record
 `role=` label, on a record timestamp derived from `cites`, and on 0.23's
-`net:` labels — and at the time of writing PyPI publishes only `0.1.0`. Once it lands there the checkout becomes a
-convenience rather than a requirement.
+`net:` labels. python-zipline does not publish to PyPI, and the `zpf` there is
+an unrelated project of the same name, so `.venv` installs a release tag.
 
 The pin covers a single `zpf` minor deliberately: that library is in `0.x`,
 where every minor is a break with no upgrade path promised, so a range spanning
 two would be a promise neither project can keep.
 
-```{note}
-An editable install captures version metadata at install time. If `zpf`'s
-version changes in the sibling checkout, reinstall it — otherwise
-`zpf.__version__` reports the old number and a pin can appear satisfied when it
-is not.
+**`.venv` holds a release, always.** Working against an unreleased `zpf` —
+reviewing a `.devN` build, or changing both projects at once — goes in a second
+venv, `.venv-dev`, with the sibling checkout installed editable:
+
+```bash
+python3 -m venv .venv-dev
+.venv-dev/bin/pip install -e ../python-zipline
+.venv-dev/bin/pip install --no-deps -e . && .venv-dev/bin/pip install -r requirements.txt
 ```
+
+`--no-deps` because the checkout is usually past the pin. Keep the two apart:
+an editable install records its version when it is made, and runs whatever is
+checked out afterwards, so `pip list` and `zpf.__version__` can name a release
+while a later commit runs. This happened: `.venv` once held the sibling
+checkout, reported `0.6.0` while running `0.7.0.dev0`, and made a review of a
+dev build come back identical to the release it was compared with
+([#61](https://github.com/adamkjonsson/zipline-kober/issues/61)). To know what
+a run used, look at `zpf.__file__`; `tools/pipeline.py` prints it.
+
+The sibling tools the slower tests and the pipeline drive, `packeteer` and
+`zpfwire`, are run from their own checkouts' venvs at whatever is checked out
+there. A failure that appears without a change here may have come from one of
+them; the pipeline's first lines say which versions ran.
 
 ## The four commands
 

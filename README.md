@@ -250,25 +250,23 @@ makes.
 
 ## Development
 
-Requires Python 3.11+ and a checkout of
-[python-zipline](https://github.com/adamkjonsson/python-zipline) beside this
-one.
+Requires Python 3.11+.
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e ../python-zipline    # see note below
+.venv/bin/pip install "zpf @ git+https://github.com/adamkjonsson/python-zipline@v0.6.0"    # see note below
 .venv/bin/pip install -e . -r requirements.txt
 ```
 
-**Why `zpf` is installed from a checkout.** This project depends on
+**Why `zpf` is installed from a tag.** This project depends on
 `zpf>=0.6.0,<0.7`, which implements Zipline Payload Format 0.23: it is built
 on `zpf.decode_stage` and its `adjacency=`, `params_digest=` and
 `reason_class=` keywords, on the per-record `role=` label, on a record
-timestamp derived from `cites`, and on 0.23's `net:` labels. `zpf` `0.6.0` is
-released and tagged, but at the time of writing
-PyPI publishes only `0.1.0`, so the dependency has to come from a local (or
-git) install. Once it reaches PyPI the checkout becomes a convenience rather
-than a requirement, and the first line above can be dropped.
+timestamp derived from `cites`, and on 0.23's `net:` labels. python-zipline
+does not publish to PyPI; the `zpf` there is an unrelated project of the same
+name, so the dependency comes from a release tag. Working against an
+unreleased `zpf` belongs in a second venv; see
+[Contributing](docs/dev/contributing.md).
 
 The pin covers a single `zpf` minor deliberately: that library is in `0.x`,
 where every minor is a break with no upgrade path promised.

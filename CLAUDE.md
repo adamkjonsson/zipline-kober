@@ -69,8 +69,11 @@ All development tasks (tests, docs, wheel builds) use a single venv created from
 
 ```bash
 python -m venv .venv
+.venv/bin/pip install "zpf @ git+https://github.com/adamkjonsson/python-zipline@v0.6.0"
 .venv/bin/pip install -e . -r requirements.txt
 ```
+
+`.venv` always holds a released `zpf`; a sibling checkout goes in `.venv-dev` (see `docs/dev/contributing.md`).
 
 - **Run tests:** `.venv/bin/pytest`
 - **Build docs:** `.venv/bin/sphinx-build -W docs docs/_build/html` — warnings are

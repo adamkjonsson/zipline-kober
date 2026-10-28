@@ -1,6 +1,6 @@
 # Plan: the fixes found after 0.6.0
 
-**State: not started.** Written 2026-10-28 against `0.6.0` (released
+**State: Stage 0 done (2026-10-28); Stage 1 next.** Written 2026-10-28 against `0.6.0` (released
 2026-10-20), `zpf` 0.6.0 pinned (`>=0.6.0,<0.7`), packeteer 0.21.0, `zpfwire`
 0.5.0. The milestone is GitHub's `0.7.0`, which holds eight open issues, all of
 them found *after* `v0.6.0` was tagged. See *The version* for why it is a
@@ -57,6 +57,28 @@ other stages are in.
 6. Bump `pyproject.toml` to `0.7.0.dev0`.
 
 Changelog: **Documentation** (the venv convention). Test-only otherwise.
+
+**Done, and what it found.** PyPI's `zpf` 0.1.0 is not an old python-zipline
+release but an unrelated, empty project of the same name, so the README's
+"PyPI publishes only `0.1.0`" was wrong; `.venv` now installs
+`git+https://github.com/adamkjonsson/python-zipline@v0.6.0`, and both install
+sections say so. The pin also refuses the checkout's 0.7.0 outright, so
+`.venv-dev` installs kober `--no-deps`.
+
+Under the real `zpf` 0.6.0 the suite gave 2,276 passed, 1 skipped, **2
+failed**: `test_wireguard_example.py`'s two HTTP-inside tests. They fail the
+same way under `zpf` 0.7.0 in `.venv-dev`, so `zpf` is not the cause. The
+sibling `zpfwire` is: it is now **0.8.0** (kober 0.6.0 was validated against
+0.5.0), and its #60 writes a bare FIN as a zero-length record at the stream's
+end, after which the pure ACKs sit **one past it**, since the FIN took a
+sequence number. `zpf.check_coverage` then measures each such stream a byte
+longer than the bytes it carries, and reports that byte as neither decoded nor
+undecoded. The pipeline shows the same on every TCP input: **64 failures, all
+this one byte**, 8 inputs × 8 runs, nothing else. Not kober's fault, and to be
+reported to python-zipline-wire. The baseline was taken anyway, with these
+tools, since later runs use the same ones: `../kober-baselines/v0.6.0`, its
+log beside it as `v0.6.0.log` (packeteer 0.21.0, `zpfwire` 0.8.0, `zpf` 0.6.0
+from `site-packages`).
 
 Not in scope: `python-zipline-wire`'s venv, which reports `zpf` 0.7.0 — worth
 a look before its own review, but it is that project's issue.

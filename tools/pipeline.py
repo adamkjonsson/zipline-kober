@@ -660,6 +660,9 @@ def pipeline(tools: Tools, work: Path, baseline: Path | None = None) -> Report:
     for sub in ("captures", "modules", "out"):
         (work / sub).mkdir(parents=True, exist_ok=True)
     print(f"{tools.version(tools.packeteer_bin)}; {tools.version(tools.zpfwire_bin)}")
+    # Both, since a path install's version is metadata recorded when it was
+    # made, and only the file says which code is running (#61).
+    print(f"zpf {zpf.__version__} from {Path(zpf.__file__).parent}")
     print(f"work directory: {work}\n", flush=True)
 
     # Each example's transforms, registered as a user's process would, and
