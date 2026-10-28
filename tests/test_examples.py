@@ -194,6 +194,54 @@ def test_http_frames_a_chunked_body():
     assert tree.find("body").value == b"x" * 0x1A, "the body is the chunks' data, joined"
 
 
+@pytest.mark.parametrize(
+    ("line", "size"),
+    [
+        (b"4", 4),
+        (b"4;name=value", 4),
+        (b'4;a=1;b="x y"', 4),
+        (b"4 ;a", 4),
+        (b"1A;ext", 0x1A),
+    ],
+    ids=["none", "one", "several", "spaced", "upper-hex"],
+)
+def test_http_reads_a_chunk_size_ahead_of_its_extensions(line: bytes, size: int):
+    """RFC 9112 §7.1.1: `chunk-size [ chunk-ext ] CRLF`, each extension led by `;` (#54).
+
+    The whole line was read as the number, so a chunk with an extension was
+    undecodable. The `size` record still cites the whole line, extensions and
+    all, as it did.
+    """
+    spec = load("http.yaml")
+    message = (
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        + line + b"\r\n" + b"d" * size + b"\r\n"
+        + b"0;last\r\n\r\n"
+    )
+    tree = Decoder(spec).decode_bytes(message)
+    assert tree.status is NodeStatus.OK, tree.render()
+    assert tree.off_end == len(message)
+    chunks = tree.find("chunks").children
+    assert [c.find("length").value for c in chunks] == [size, 0]
+    assert chunks[0].find("size").value == line.decode()
+    assert tree.find("body").value == b"d" * size
+
+
+def test_http_inflates_a_chunked_body_whose_chunks_have_extensions():
+    """The other way an extension hid a body: gzip content never reached `content`."""
+    body = gzip.compress(HTML, mtime=0)
+    half = len(body) // 2
+    message = (
+        b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n"
+        + b"%x;n=1\r\n" % half + body[:half] + b"\r\n"
+        + b"%x;n=2\r\n" % (len(body) - half) + body[half:] + b"\r\n"
+        + b"0\r\n\r\n"
+    )
+    tree = Decoder(load("http.yaml")).decode_bytes(message)
+    assert tree.status is NodeStatus.OK, tree.render()
+    assert tree.find("content").value == HTML
+
+
 def test_http_frames_a_body_by_its_content_length():
     """The case the spec could not read at all until it could ask the headers."""
     spec = load("http.yaml")

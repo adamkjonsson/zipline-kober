@@ -1596,6 +1596,27 @@ AWKWARD["prefixes"] = """
             condition: "startswith(lower(line), 'http/') or endswith(line, '')"
 """
 
+#: `before()` (#54) over a literal, a field and an empty separator, feeding
+#: `to_int` as a chunk size does, and in a field named after it, which a
+#: compiled module's local would otherwise hide the helper behind.
+AWKWARD["separators"] = """
+    name: separators
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - {name: line, type: {string: {delimiter: "\\r\\n"}}}
+          - {name: sep, type: {string: {delimiter: "\\r\\n"}}}
+          - {name: before, type: {computed: "before(line, ';')"}}
+          - {name: cut, type: {computed: "before(line, sep)"}}
+          - {name: empty, type: {computed: "before(line, '') == ''"}}
+          - {name: size, type: {computed: "to_int(before(line, ';'), 16)"}}
+          - name: rest
+            type: {bytes: {size: {remaining: true}}}
+            condition: "before(sep, line) == sep"
+"""
+
 AWKWARD["transform"] = TRANSFORM_SPEC
 AWKWARD["transform framed by length"] = TRANSFORM_SPEC
 AWKWARD["transform bomb"] = TRANSFORM_SPEC
@@ -1663,6 +1684,7 @@ AWKWARD_SEEDS: dict[str, bytes] = {
     "entry granularity": bytes([7, 0xA5, 0x12, 0x34]) + b"tail",
     "guards": bytes([1, 7, 2, 3]),
     "prefixes": b"HTTP/1.1 200 OK\r\nbody",
+    "separators": b"1a;name=value\r\n=\r\nrest",
     "transform": TRANSFORM_MESSAGES[0],
     "transform framed by length": TRANSFORM_MESSAGES[1],
     "transform bomb": TRANSFORM_ADVERSE[0],

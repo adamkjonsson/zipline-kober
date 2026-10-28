@@ -920,3 +920,42 @@ def test_a_stream_declined_after_a_lost_attempt_does_not_say_every_attempt_ran_o
         "not http: no message decoded; every attempt ran out of input or found no "
         "message boundary after a gap"
     }
+
+
+# --- chunk extensions (#54) ---------------------------------------------------
+
+
+def chunked(*sizes: str) -> bytes:
+    """Return a chunked response whose size lines are written as given, data and all."""
+    body = b"".join(
+        line.encode() + b"\r\n" + b"z" * int(line.partition(";")[0].strip(), 16) + b"\r\n"
+        for line in sizes
+    )
+    return b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + body + b"0\r\n\r\n"
+
+
+@pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD], ids=lambda e: e.value)
+def test_a_chunk_extension_in_the_first_message_keeps_the_stream(tmp_path: Path, emit: Emit):
+    """One extension in a direction's first message lost every message after it.
+
+    The size line `7;sig=…` was read whole as the number, so the first message
+    was undecodable, and 0.4.0's confirmation rule declines a stream whose
+    first message fails: three responses, none decoded. Counted by start lines,
+    because a decode that goes wrong here still cites every byte.
+    """
+    first = chunked("7;sig=abc", "3")
+    second = chunked("4")
+    third = chunked("2;a=1;b=\"x y\"", "1 ;q")
+    stream = first + second + third
+    source = tmp_path / "in.zpf"
+    runs(source, stream, [(0, len(stream))])
+    written = both(HTTP, source, tmp_path, emit)
+    assert regions(written) == []
+    if emit is Emit.FIELD:
+        assert starts(written) == [0, len(first), len(first) + len(second)]
+    else:
+        assert [b[4] for b in written if b[0] == "record"] == [
+            ((0, len(first)),),
+            ((len(first), len(first) + len(second)),),
+            ((len(first) + len(second), len(stream)),),
+        ]

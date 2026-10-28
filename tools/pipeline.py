@@ -259,6 +259,52 @@ def _clean_http(tools: Tools, out: Path) -> None:
     _generated_http(tools, out, lossy=False)
 
 
+#: Transactions in each stream of chunk extensions, cycled from three.
+EXT_REQUESTS = 30
+
+
+def _extended_messages() -> list[dict[str, dict[str, str]]]:
+    """Return three transactions whose chunk size lines carry extensions (#54).
+
+    The first response's first chunk has one, since that is the message whose
+    failure declines a direction; the third has several, spaced and quoted.
+    """
+    request = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
+    out: list[dict[str, dict[str, str]]] = []
+    for lines in (("7;sig=abc", "3"), ("4",), ('2;a=1;b="x y"', "1 ;q")):
+        body = b"".join(
+            line.encode() + b"\r\n" + b"z" * int(line.partition(";")[0], 16) + b"\r\n"
+            for line in lines
+        )
+        response = (
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + body + b"0;end\r\n\r\n"
+        )
+        out += [{"http": {"raw": request.hex()}}, {"http": {"raw": response.hex()}}]
+    return out
+
+
+def _extended_http(tools: Tools, out: Path, *, lossy: bool = True) -> None:
+    """Write chunked HTTP whose size lines carry extensions, over small segments.
+
+    packeteer's chunked generator writes no extension, and neither does any
+    capture here, so these go as ``raw`` messages.
+    """
+    messages = out.with_suffix(".messages.json")
+    messages.write_text(json.dumps(_extended_messages()))
+    loss = ["--packet-loss", "0.05"] if lossy else []
+    tools.packeteer_cmd(
+        "stream", "--payload", "http", "--protocol-messages", str(messages),
+        "--client-ip", "10.0.0.2", "--server-ip", "10.0.0.1",
+        "--requests", str(EXT_REQUESTS), "--mss", "40", *loss,
+        "--seed", "3", "--pcap", str(out),
+    )
+
+
+def _extended_http_clean(tools: Tools, out: Path) -> None:
+    """Write the chunk-extension stream with no loss at all."""
+    _extended_http(tools, out, lossy=False)
+
+
 #: Responses in each generated stream of compressed bodies (`tools/gzip_http.py`).
 GZIP_RESPONSES = 30
 
@@ -327,6 +373,8 @@ INPUTS = (
     Input("dns_gen", "dns", _generated_dns),
     Input("http_gen", "http", _generated_http, messages=2 * HTTP_REQUESTS),
     Input("http_clean", "http", _clean_http),
+    Input("http_ext", "http", _extended_http, messages=2 * EXT_REQUESTS),
+    Input("http_ext_clean", "http", _extended_http_clean),
     Input("gzip_lossy", "http", _gzip_http, messages=GZIP_RESPONSES, inflates=True),
     Input("gzip_clean", "http", _gzip_http_clean, inflates=True),
     *(

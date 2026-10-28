@@ -282,7 +282,8 @@ class Builtin:
 #: suffix: what a start line looks like, which is how a spec refuses a guess
 #: after a gap, and ``chunked`` being the *last* transfer coding — and a
 #: length: a tunnel's message that seals nothing is told from one carrying a
-#: packet by its size before either is opened (``DESIGN.md`` §3.3). The table
+#: packet by its size before either is opened (``DESIGN.md`` §3.3) — and (#54)
+#: the text before a separator: a chunk's size, ahead of any extension. The table
 #: is meant to stay that small. A *transform* (decompression, decryption) is not a
 #: candidate for it: a builtin maps a value to a value, where a transform maps
 #: bytes to bytes and feeds a sub-decode, and it needs an extension point of its
@@ -324,6 +325,12 @@ BUILTINS: Mapping[str, Builtin] = MappingProxyType(
             required=1,
             returns=ExprType.INT,
             doc="How many bytes a bytes value holds.",
+        ),
+        "before": Builtin(
+            params=(ExprType.STR, ExprType.STR),
+            required=2,
+            returns=ExprType.STR,
+            doc="Text up to the first separator, or all of it if there is none.",
         ),
     }
 )
@@ -905,8 +912,34 @@ def _eval_call(expr: Call, env: Environment) -> ExprValue:
         return _as_str(values[0], "endswith()").endswith(_as_str(values[1], "endswith()"))
     if expr.name == "len":
         return len(_as_bytes(values[0], "len()"))
+    if expr.name == "before":
+        return before(_as_str(values[0], "before()"), _as_str(values[1], "before()"))
     base = 10 if len(values) == 1 else _as_int(values[1], "to_int()")
     return to_int(_as_str(values[0], "to_int()"), base)
+
+
+def before(text: str, separator: str) -> str:
+    """Return ``text`` up to the first ``separator``, or all of it if there is none.
+
+    The one implementation, which a compiled decoder imports from
+    :mod:`kober.runtime`. Total, unlike ``str.partition``, which raises on
+    an empty separator: an empty one is found where the text begins, so what
+    comes before it is the empty string.
+
+    Args:
+        text: The text to cut.
+        separator: Where to cut it.
+
+    Returns:
+        The text before the separator's first occurrence.
+
+    Example:
+        >>> before("4;name=value", ";"), before("4", ";")
+        ('4', '4')
+
+    """
+    at = text.find(separator)
+    return text if at < 0 else text[:at]
 
 
 def to_int(text: str, base: int = 10) -> int:

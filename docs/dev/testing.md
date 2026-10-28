@@ -193,9 +193,10 @@ It is one command, and **run it before a release, or after touching
 It needs two sibling checkouts with their own venvs, neither a dependency of
 this project — `../packeteer` and `../python-zipline-wire`, or wherever
 `--packeteer` and `--wire` say: packeteer 0.18.0 or later, for its UDP tunnel,
-and `zpfwire` 0.5.0 or later, for a `.zpf` of packets. It builds ten inputs of
-its own, and those of every example that describes itself in an `example.json`
-(`tests/examplekit.py`); WireGuard's five and PackBits' two make seventeen:
+and `zpfwire` 0.5.0 or later, for a `.zpf` of packets. It builds twelve inputs
+of its own, and those of every example that describes itself in an
+`example.json` (`tests/examplekit.py`); WireGuard's five and PackBits' two make
+nineteen:
 
 | Input | What it is for |
 | --- | --- |
@@ -203,6 +204,8 @@ its own, and those of every example that describes itself in an `example.json`
 | `dns_gen` | A generated, lossy DNS stream whose response is compressed — `raw:` bytes from `tools/dns-messages.json`, since a built message carries no pointer (see *Generated DNS* below). |
 | `http_gen` | Generated chunked HTTP with trailers at `--mss 200` on a 5% lossy link: chunk boundaries across segment boundaries, and losses mid-body. |
 | `http_clean` | The same traffic with no loss, so its shape can be checked exactly. |
+| `http_ext` | 30 chunked transactions whose size lines carry chunk extensions (`7;sig=abc`, `2;a=1;b="x y"`), as `raw` messages, since packeteer's chunked generator writes none: 40-byte segments on a 5% lossy link (#54). |
+| `http_ext_clean` | The same traffic with no loss, checked exactly against the reference reader. |
 | `gzip_lossy` | 30 HTTP responses, gzip, deflate and plain, length-framed and chunked, from `tools/gzip_http.py`, cut into 200-byte segments on a 5% lossy link. Its bodies are large, so a gap lands inside one routinely (#49). packeteer's HTTP payload cannot carry them, so they go through `tools/blob.yaml`, a one-field protocol of the project's own. |
 | `gzip_clean` | The same traffic with no loss, checked exactly against the reference reader. |
 | `packet_loss`, `tcp_lossy_ts`, `tcp_reorder_ts` | Real captures kept for their loss and reordering. They are not DNS or HTTP; they are driver structure. |

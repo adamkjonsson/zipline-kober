@@ -104,6 +104,7 @@ RESERVED_MODULE = frozenset(
         "Protocol",
         "Sink",
         "Spanned",
+        "before",
         "map_entry",
         "shift_left",
         "shift_right",
@@ -133,6 +134,7 @@ RUNTIME_NAMES = frozenset(
         "Refused",
         "TransformFailed",
         "TransformError",
+        "before",
         "bind_transforms",
         "concat",
         "decode_text",
@@ -1087,7 +1089,8 @@ def _builtin(expr: Call, binding: Binding) -> str:
     ``startswith`` and ``endswith`` are method calls on a value the checker has
     already typed as text, and mean exactly what the interpreter's ``str``
     methods of the same names mean; ``len`` is Python's, over a value typed as
-    bytes.
+    bytes. ``before`` is :func:`kober.runtime.before`, the interpreter's own,
+    since the method that would do it raises on an empty separator.
     """
     arguments = [_expr(argument, binding, 0) for argument in expr.args]
     if expr.name == "lower":
@@ -1098,6 +1101,8 @@ def _builtin(expr: Call, binding: Binding) -> str:
         return f"{arguments[0]}.{expr.name}({arguments[1]})"
     if expr.name == "len":
         return f"len({arguments[0]})"
+    if expr.name == "before":
+        return f"before({arguments[0]}, {arguments[1]})"
     return f"to_int({', '.join(arguments)})"
 
 

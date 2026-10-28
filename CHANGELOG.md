@@ -22,8 +22,27 @@ minor bump here too.
 
 ## [Unreleased]
 
+### Added
+
+- **`before(s, sep)`**, the text before the first `sep`, or all of `s` when
+  there is none ([#54](https://github.com/adamkjonsson/zipline-kober/issues/54)):
+  the expression language's seventh function, in both backends. Total: an
+  empty separator is found where the text begins, so `before(s, '')` is `''`.
+  Made for `examples/http.yaml`'s chunk size, as `startswith` and `endswith`
+  were made for its start line.
+
 ### Fixed
 
+- **`examples/http.yaml` reads a chunk extension**
+  ([#54](https://github.com/adamkjonsson/zipline-kober/issues/54)). RFC 9112
+  writes a chunk's size line `chunk-size [ chunk-ext ] CRLF`, and the spec read
+  the whole line as the number, so `4;name=value` was undecodable. Worse in a
+  stream: one in a response direction's first message declined the direction,
+  and every response after it was lost. Over 30 generated transactions whose
+  chunks carry extensions, the 0.6.0 spec decoded **0** of 30 responses, clean
+  or under loss, and now decodes all 30 (26 when segments are lost and not
+  resent). The size is now `to_int(before(size, ';'), 16)`; the `size` record
+  still cites the whole line, extensions and all.
 - **A call on anything but a bare name is refused naming what was written**,
   not a Python AST class
   ([#57](https://github.com/adamkjonsson/zipline-kober/issues/57),
@@ -68,6 +87,9 @@ minor bump here too.
   for co-development in a second venv, `.venv-dev`, and no longer say PyPI
   holds an old `zpf`: the `zpf` there is an unrelated project. The pipeline
   prints which `zpf` it ran, version and location.
+- ***Testing* lists two new pipeline inputs**, `http_ext` and
+  `http_ext_clean`: chunked HTTP whose size lines carry extensions (#54), lossy
+  and checked exactly.
 
 ## [0.6.0] - 2026-10-20
 

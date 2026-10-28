@@ -295,6 +295,7 @@ def test_what_unparse_writes_parses_back_to_the_same_tree(source: str):
         "startswith(s, 'HTTP/')",
         "endswith(trim(lower(s)), 'chunked')",
         "not startswith(s, 'x') and endswith(s, 'y')",
+        "to_int(before(s, ';'), 16)",
     ],
 )
 def test_a_call_round_trips(source: str):
@@ -317,6 +318,7 @@ def test_a_call_is_an_atom_and_needs_no_brackets():
         ("lower(a, b)", "takes 1 argument(s), got 2"),
         ("startswith(a)", "takes 2 argument(s), got 1"),
         ("endswith(a, b, c)", "takes 2 argument(s), got 3"),
+        ("before(a)", "takes 2 argument(s), got 1"),
         ("to_int(a, base=16)", "positional arguments only"),
     ],
 )
@@ -433,6 +435,14 @@ class _Values:
         ("endswith(s, 'HTTP/1.1')", "HTTP/1.1 200 OK", False),
         ("endswith(trim(lower(s)), 'chunked')", "gzip, Chunked ", True),
         ("endswith(s, '')", "", True),
+        ("before(s, ';')", "4;name=value", "4"),
+        ("before(s, ';')", "4", "4"),
+        ("before(s, ';')", "4;a=1;b=2", "4"),
+        ("before(s, ';')", ";x", ""),
+        ("before(s, ';')", "", ""),
+        ("before(s, '')", "anything", ""),
+        ("before(s, '\\r\\n')", "a\r\nb", "a"),
+        ("to_int(before(s, ';'), 16)", "1A ;ext", 0x1A),
     ],
 )
 def test_calls_evaluate(source: str, text: str, expected: object):
@@ -478,6 +488,7 @@ def test_to_int_refuses_a_digit_its_base_does_not_have():
         ("trim(s)", ExprType.STR),
         ("startswith(s, 'x')", ExprType.BOOL),
         ("endswith(s, s)", ExprType.BOOL),
+        ("before(s, s)", ExprType.STR),
     ],
 )
 def test_a_call_has_the_type_its_table_row_says(source: str, expected: ExprType):
@@ -493,6 +504,8 @@ def test_a_call_has_the_type_its_table_row_says(source: str, expected: ExprType)
         ("to_int(s, s)", {"s": ExprType.STR}, "argument 2 of to_int()"),
         ("startswith(n, 'x')", {"n": ExprType.INT}, "argument 1 of startswith()"),
         ("endswith(s, n)", {"s": ExprType.STR, "n": ExprType.INT}, "argument 2 of endswith()"),
+        ("before(n, ';')", {"n": ExprType.INT}, "argument 1 of before()"),
+        ("before(s, n)", {"s": ExprType.STR, "n": ExprType.INT}, "argument 2 of before()"),
     ],
 )
 def test_a_call_checks_its_argument_types(source: str, scope: dict, fragment: str):

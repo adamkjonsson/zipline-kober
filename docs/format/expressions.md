@@ -34,8 +34,8 @@ Precedence and associativity are Python's, because the parser is Python's —
 `ast.parse` in expression mode, with a whitelist of node types. That is why "no
 calls, no loops" holds by construction: a construct is refused because it is
 absent from the whitelist, and refused **by name** (`'foo' is not one of the
-expression language's functions; there are only endswith(), len(), lower(),
-startswith(), to_int(), trim()`) rather than by an AST class. A callee that is
+expression language's functions; there are only before(), endswith(), len(),
+lower(), startswith(), to_int(), trim()`) rather than by an AST class. A callee that is
 not a bare name is quoted as written (`'keys[0]'`, `'f(x)'`), and the method
 spelling of one of the functions says how to write it instead: `tag.lower()` is
 refused with *write lower(tag)*.
@@ -124,7 +124,7 @@ back.
 
 ## Functions
 
-The language has exactly six, and they are the whole of what it can call:
+The language has exactly seven, and they are the whole of what it can call:
 
 | Call | Result | Meaning |
 | --- | --- | --- |
@@ -135,10 +135,11 @@ The language has exactly six, and they are the whole of what it can call:
 | `startswith(s, prefix)` | bool | Whether `s` begins with `prefix`, case and all. |
 | `endswith(s, suffix)` | bool | Whether `s` ends with `suffix`, case and all. |
 | `len(b)` | int | How many bytes a bytes value holds. |
+| `before(s, sep)` | str | `s` up to the first `sep`, or all of `s` if there is none. |
 
 ```yaml
 size: {expr: "to_int(length_header)"}          # Content-Length: 1234
-size: {expr: "to_int(chunk_size, 16)"}         # a chunked-encoding chunk header
+size: {expr: "to_int(before(size_line, ';'), 16)"}   # a chunk size, ahead of any extension
 condition: "trim(lower(transfer_encoding)) == 'chunked'"
 confirm: "startswith(start_line, 'HTTP/') or endswith(start_line, ' HTTP/1.1')"
 ```
@@ -152,7 +153,11 @@ after a gap, and that `chunked` is the *last* transfer coding in a list such
 as `gzip, chunked`. Both compare exactly; for a case-insensitive test, lower
 the text first. A length came from WireGuard: a keepalive is a message
 sealing nothing, told from a packet by its size, `len(sealed) == 16`, before it
-is opened. Those needs are the table, and it is meant to stay that size.
+is opened. And the text before a separator came from a chunk extension: a
+chunk's size line is `4;name=value` as often as `4`, and the size is what comes
+before the `;`, or the whole line when there is none. An empty separator is
+found where the text begins, so `before(s, '')` is `''`. Those needs are the
+table, and it is meant to stay that size.
 
 **`to_int` is stricter than most languages' equivalent.** Surrounding
 whitespace is allowed, because an HTTP field value carries optional whitespace
