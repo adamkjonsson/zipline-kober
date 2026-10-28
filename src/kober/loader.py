@@ -1280,10 +1280,11 @@ def _transform_decls(document: object, at: _At, owner: str) -> dict[str, Transfo
     A declaration with nothing to say is written ``{}`` or left empty, which is
     how a spec says it uses an extended-tier name.
     """
+    at = at.within(document)
     mapping = _require_mapping(document, at)
     decls: dict[str, TransformDecl] = {}
     for name, value in mapping.items():
-        site = at.child(name)
+        site = at.child(name).within(value)
         body = _require_mapping({} if value is None else value, site)
         _reject_unknown(body, _TRANSFORM_DECL_KEYS, site)
         params_doc = _require_mapping(body.get("params", {}), site.child("params"))
@@ -1309,10 +1310,11 @@ def _doc_params(document: object, at: _At, owner: str) -> list[Param]:
     rather than bound in order. ``key: bytes`` is the short form, and
     ``key: {type: bytes, secret: true}`` the long one.
     """
+    at = at.within(document)
     mapping = _require_mapping(document, at)
     params: list[Param] = []
     for name, value in mapping.items():
-        site = at.child(name)
+        site = at.child(name).within(value)
         site.record(f"{owner}.params.{name}")
         if isinstance(value, str):
             params.append(Param(name=name, type=_member(ExprType, value, site)))
