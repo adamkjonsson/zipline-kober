@@ -26,24 +26,31 @@ classifiers = [
     "Topic :: System :: Networking :: Monitoring",
     "Typing :: Typed",
 ]
-# Pinned to one `zpf` minor on purpose: while that library is in 0.x every
-# minor is a break with no upgrade path promised, so a range spanning two of
-# them would be a promise neither project can keep.
+# python-zipline, imported as `zpf`, by its release tag and never by name
+# (#64). It is not on PyPI, and neither name is safe there: `zpf` belongs to an
+# unrelated project, and `python-zipline` is unclaimed, so a declaration by
+# name and range would be resolved against PyPI and install whoever claims it.
+# A direct reference is never looked up on an index. What it costs is a range:
+# a python-zipline patch reaches kober through a kober release, and kober and
+# zpfwire must name the same tag to share an environment. zpfwire declares it
+# the same way, for the same reason (python-zipline-wire#67). A range again
+# once python-zipline is published under its own name.
 #
-# 0.6.0 implements Zipline Payload Format v0.23, whose `net:` content-type
-# scheme is what a decoded packet is labelled (`net:ip`), and what a
-# sessionization stage such as zpfwire's recognises a packet by. A 0.5.x build
-# cannot read a file written at 0.23 at all, and 0.6.0 refuses one written at
-# 0.21, so the floor is that minor's first release. The earlier floors' reasons
-# still hold, and every one is in 0.6.0: `reason_class=` on
-# `DecodeStage.undecoded` (0.5.2, python-zipline#79), for a transform's
-# `fails_as`; `params_digest=` on `decode_stage` (0.5.1, #77); `adjacency=`
-# (0.5.0), for field-granularity output's unit sequence; and `role=` and a
+# One minor at a time, as before: while python-zipline is in 0.x every minor is
+# a separate format, so the tag is the minor's. 0.8.0 implements Zipline
+# Payload Format v0.24, which zpfwire 0.9.0 writes, and which settles what a
+# closed TCP stream's extent is (zipline#168): before it, a decode stage over
+# one failed its own coverage check by the FIN's position. It also adds the
+# `copy` flag, which kober reads to skip a capture-point copy of a datagram. The
+# earlier floors' reasons all hold in it: `net:` labels (0.23), `reason_class=`
+# (0.5.2), `params_digest=` (0.5.1), `adjacency=` (0.5.0), and `role=` and a
 # `ts` derived from `cites` (0.3.0).
 #
-# `.venv` installs this from a release tag; a sibling checkout of an unreleased
-# `zpf` goes in `.venv-dev`, never here (docs/dev/contributing.md, #61).
-dependencies = ["zpf>=0.6.0,<0.7"]
+# `.venv` installs this; a sibling checkout of an unreleased python-zipline
+# goes in `.venv-dev`, never here (docs/dev/contributing.md, #61).
+dependencies = [
+    "python-zipline @ git+https://github.com/adamkjonsson/python-zipline.git@v0.8.0",
+]
 
 [project.optional-dependencies]
 # YAML is the authoring format for specs, and comments are the reason: a
@@ -57,8 +64,13 @@ yaml = ["PyYAML>=6.0"]
 kober = "kober.cli:main"
 
 [project.urls]
-Specification = "https://github.com/adamkjonsson/zipline/blob/v0.23/docs/zipline-payload-format.md"
+Specification = "https://github.com/adamkjonsson/zipline/blob/v0.24/docs/zipline-payload-format.md"
 Changelog = "https://github.com/adamkjonsson/zipline-kober/blob/main/CHANGELOG.md"
+
+# The dependency above is a direct reference, on purpose (see its comment);
+# hatchling refuses one unless told this.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kober"]

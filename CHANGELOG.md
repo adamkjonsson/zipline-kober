@@ -31,7 +31,44 @@ minor bump here too.
   Made for `examples/http.yaml`'s chunk size, as `startswith` and `endswith`
   were made for its start line.
 
+### Changed
+
+- **Breaking: kober is built on python-zipline 0.8.0, and writes Zipline
+  Payload Format 0.24** ([#64](https://github.com/adamkjonsson/zipline-kober/issues/64)).
+  Every `0.x` minor of the format is a separate one: `zpf` 0.6 and 0.7 refuse
+  what kober now writes, and kober refuses a file stamped 0.23, so a pipeline
+  moves with it, `zpfwire` 0.9.0 included. `zpf` 0.7 is skipped; kober never
+  shipped on it.
+- **Breaking: the dependency is `python-zipline`, by its release tag**
+  (`python-zipline @ git+https://github.com/adamkjonsson/python-zipline.git@v0.8.0`),
+  where it was `zpf>=0.6.0,<0.7`. The library renamed its distribution, since
+  `zpf` on PyPI is someone else's, and the import is still `zpf`. It is
+  declared by tag because neither name is safe to resolve on PyPI. So
+  `pip install -e .` now installs it, in one step; in an environment that held
+  `zpf`, run `pip uninstall zpf` first, or its metadata stays behind.
+- **Breaking: a datagram flagged `copy` is not decoded.** Format 0.24 flags one
+  the capture saw twice and the sender sent once, byte-identical to the one
+  before it. Decoding it counted a message twice with nothing to say so; its
+  bytes are `skipped` now, commented `capture-point copy of the previous
+  datagram`. A fuzzed DNS capture in the pipeline holds 40.
+- **Bytes kober writes move, as python-zipline's do.** A decoded unit drawn
+  from several input records carries `ts_first`, when it started (python-zipline
+  0.7.0), on 5,106 records of the pipeline's four HTTP inputs. And a stage over
+  a closed TCP stream whose final ACK was stored declares that input's extent
+  one larger, as 0.24 defines it.
+
 ### Fixed
+
+- **kober's output over a closed TCP connection passes `check_coverage`**
+  ([zipline#168](https://github.com/adamkjonsson/zipline/issues/168)). Over a
+  conversion by `zpfwire` 0.8 or later, every such stream failed by one byte,
+  the position of the FIN: the stage declared the stream one short, and the
+  checker found that position uncovered. Format 0.24 says a FIN's position
+  holds no byte and is owed nothing, and python-zipline 0.8.0 measures and
+  checks it so. Neither kober's code nor its spec changed for it; two tests and
+  80 pipeline checks that failed now pass. A stream whose tail was lost and whose
+  final ACK was stored now ends in a `gap`, where the loss had vanished from its
+  measure.
 
 - **`examples/http.yaml` reads a chunk extension**
   ([#54](https://github.com/adamkjonsson/zipline-kober/issues/54)). RFC 9112
@@ -83,11 +120,12 @@ minor bump here too.
   editable install of the checkout records its version when it is made and
   runs whatever is checked out afterwards, so the development venv could
   report `zpf` 0.6.0 while running 0.7.0, and a review of a dev build proved
-  nothing. The README and *Contributing* now install
-  `git+https://github.com/adamkjonsson/python-zipline@v0.6.0`, keep a checkout
-  for co-development in a second venv, `.venv-dev`, and no longer say PyPI
-  holds an old `zpf`: the `zpf` there is an unrelated project. The pipeline
-  prints which `zpf` it ran, version and location.
+  nothing. The development venv now holds a release, installed from its tag,
+  which since #64 is the dependency `pyproject.toml` itself declares. A
+  checkout for co-development goes in a second venv, `.venv-dev`. The README
+  and *Contributing* say so, and no longer say PyPI holds an old `zpf`: the
+  `zpf` there is an unrelated project. The pipeline prints which `zpf` it ran,
+  version and location.
 - **The `--protocol-messages` trap in *Testing* is replaced by the current
   rule** ([#62](https://github.com/adamkjonsson/zipline-kober/issues/62)). It
   said a wrapped `{"dns": {…}}` element is accepted in silence and builds an

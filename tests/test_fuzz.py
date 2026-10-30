@@ -1304,6 +1304,7 @@ class _Datagram:
     off_start: int
     off_end: int
     ts: int
+    copy: bool = False
 
 
 @dataclass
@@ -1360,6 +1361,11 @@ def _toy_stream(rng: random.Random, messages: tuple[bytes, ...] = TOY_MESSAGES) 
         else:
             items.append(_Datagram(data, offset, offset + len(data), 1000 + index))
         offset += len(data)
+        if not oriented and rng.random() < 0.3:
+            # A capture-point copy (#64): byte-identical to the datagram before
+            # it, as spec 0.24 requires of one, and never decoded.
+            items.append(_Datagram(data, offset, offset + len(data), 1000 + index, copy=True))
+            offset += len(data)
     return _Stream(oriented, items)
 
 
@@ -1405,6 +1411,8 @@ def _reference(step: Any, writer: Any, stream: _Stream, verdicts: list[str]) -> 
             writer.ts = item.ts
             run_of(item.data, item.off_start, after_gap=after_gap)
             after_gap = False
+        elif item.copy:
+            writer.note(item.off_start, item.off_end, skipped, stage.COPY_COMMENT)
         else:
             writer.ts = item.ts
             cursor = Cursor(item.data, item.off_start)

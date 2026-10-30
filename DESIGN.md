@@ -230,6 +230,10 @@ when this doesn't match":
   `reason="undecodable"`, commented `no message boundary found after a gap`,
   retried where it stopped if a guard refused it and otherwise to the end of
   the run (§3.1, *After a gap*)
+- a datagram flagged `copy` (spec 0.24: the capture saw it twice, the sender
+  sent it once, and it is byte-identical to the one before it) → never decoded,
+  `reason="skipped"`, commented `capture-point copy of the previous datagram`,
+  or the declined stream's comment if its stream is declined
 
 **What the guarantee is not: leaves do not tile the input.** Until `Pointer`
 (§3.2) existed, every leaf covered a distinct range and the leaves together
@@ -1372,7 +1376,9 @@ decoder that wrote it — independent of `content_type`, so a field record carri
 `SessionWriter.record()`, which this project does not call. The pin became
 `zpf>=0.3.0,<0.4` — it was `>=0.5.0,<0.6` from kober 0.3.0, two minors that
 changed nothing this tree calls except to add `adjacency=`, and is
-`>=0.6.0,<0.7` (spec 0.23) since kober 0.6.0, for `net:` — and §4.1's single
+`>=0.6.0,<0.7` (spec 0.23) from kober 0.6.0, for `net:`, and is python-zipline
+0.8.0 by its tag (spec 0.24) since kober 0.7.0, for where a closed TCP stream
+ends and the `copy` flag — and §4.1's single
 emit site made the switch the one-line change it was kept that way to be.
 
 ### 9.2 Smaller findings

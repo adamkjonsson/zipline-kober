@@ -101,6 +101,15 @@ CUT_COMMENT = "rest of a message cut by a gap"
 #: was made there, and it could not be told from the middle of a message.
 LOST_COMMENT = "no message boundary found after a gap"
 
+#: The comment on a datagram flagged ``copy``: one the capture saw twice and the
+#: sender sent once (spec 0.24, zipline#169). ``skipped``: it is byte-identical
+#: to the datagram before it, so decoding it would say nothing new and count a
+#: message twice, with no way for a reader of the output to tell (#64).
+COPY_COMMENT = "capture-point copy of the previous datagram"
+
+#: What a held copy is, in the writer's list of what it holds back.
+_COPY = "copy"
+
 #: The verdict for a message that decoded whole except for a transform that
 #: failed (the transform plan's *Decided* 1). Its framing held, so the run goes
 #: on after it; but a transform is often a protocol's only real check of
@@ -380,9 +389,11 @@ class _Writer:
         #: The first failed transform's detail while unconfirmed: a stream that
         #: ends unconfirmed after one is declined saying so.
         self.transform_failure: str | None = None
-        #: While unconfirmed: each run as ``(start, end, writes)``, and each gap
-        #: as ``(start, end, None)``, in stream order.
-        self._held: list[tuple[int, int, list[tuple[object, ...]] | None]] = []
+        #: While unconfirmed: each run as ``(start, end, writes)``, each gap as
+        #: ``(start, end, None)``, and each capture-point copy as ``(start, end,
+        #: _COPY)``, in stream order. A copy is never tried, so it is neither a
+        #: run's write nor an attempt.
+        self._held: list[tuple[int, int, list[tuple[object, ...]] | str | None]] = []
         self._pending: tuple[int, int, str, str | None] | None = None
         self._seam: zpf.Seam | None = None
 
@@ -404,6 +415,15 @@ class _Writer:
         """Mark a run or datagram of a declined stream, never tried."""
         self._undecoded(off_start, off_end, NodeStatus.SKIPPED.value, self.declined)
 
+    def copy(self, off_start: int, off_end: int) -> None:
+        """Pass over a capture-point copy of a datagram, never tried (#64)."""
+        if self.declined is not None:
+            self.skip(off_start, off_end)
+        elif self.confirmed:
+            self._undecoded(off_start, off_end, NodeStatus.SKIPPED.value, COPY_COMMENT)
+        else:
+            self._held.append((off_start, off_end, _COPY))
+
     def confirm(self) -> None:
         """Write everything held, as it was: a whole message has decoded."""
         if self.confirmed:
@@ -412,6 +432,9 @@ class _Writer:
         for off_start, off_end, writes in self._held:
             if writes is None:
                 self._undecoded(off_start, off_end, GAP_REASON)
+                continue
+            if writes == _COPY:
+                self._undecoded(off_start, off_end, NodeStatus.SKIPPED.value, COPY_COMMENT)
                 continue
             for write in writes:
                 if write[0] == "record":
@@ -430,8 +453,12 @@ class _Writer:
         """Decide the stream is not in this protocol: name what was tried, keep nothing."""
         self.declined = comment
         for off_start, off_end, writes in self._held:
-            reason = GAP_REASON if writes is None else NodeStatus.UNDECODABLE.value
-            self._undecoded(off_start, off_end, reason, None if writes is None else comment)
+            if writes is None:
+                self._undecoded(off_start, off_end, GAP_REASON)
+            elif writes == _COPY:
+                self.skip(off_start, off_end)
+            else:
+                self._undecoded(off_start, off_end, NodeStatus.UNDECODABLE.value, comment)
         self._held.clear()
 
     def transform_failed(self, detail: str) -> None:
@@ -442,7 +469,7 @@ class _Writer:
     def finish(self) -> None:
         """End the stream: decline it if nothing ever decoded, then write what is left."""
         if not self.confirmed and self.declined is None:
-            if any(writes is not None for _, _, writes in self._held):
+            if any(isinstance(writes, list) for _, _, writes in self._held):
                 if self.transform_failure is not None:
                     # Every message that decoded had a transform fail. With a
                     # wrong key that is every message, and nothing here can tell
@@ -767,9 +794,14 @@ def _drive_datagrams(step: _Step, writer: _Writer, stream: object) -> None:
     """Decode a packet-oriented stream: one message per datagram.
 
     Each datagram is self-contained, so there is no framing to find and no gap
-    to straddle — the reason chained stages are the simple case.
+    to straddle — the reason chained stages are the simple case. A
+    capture-point copy is passed over, as reassembly passes over a resent
+    segment on a stream (:data:`COPY_COMMENT`).
     """
     for datagram in stream.datagrams():
+        if datagram.copy:
+            writer.copy(datagram.off_start, datagram.off_end)
+            continue
         if writer.declined is not None:
             writer.skip(datagram.off_start, datagram.off_end)
             continue

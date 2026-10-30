@@ -6,20 +6,31 @@ Python 3.11+. One virtualenv covers everything — tests, docs, wheel builds:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install "zpf @ git+https://github.com/adamkjonsson/python-zipline@v0.6.0"    # see below
 .venv/bin/pip install -e . -r requirements.txt
 ```
 
-**Why `zpf` comes from a tag.** This project requires `zpf>=0.6.0,<0.7`
-(Zipline Payload Format 0.23) — it is built on `zpf.decode_stage` and its
-`adjacency=`, `params_digest=` and `reason_class=` keywords, on the per-record
-`role=` label, on a record timestamp derived from `cites`, and on 0.23's
-`net:` labels. python-zipline does not publish to PyPI, and the `zpf` there is
-an unrelated project of the same name, so `.venv` installs a release tag.
+That installs python-zipline from the tag `pyproject.toml` names. In a venv
+that held `zpf` 0.7 or older, `pip uninstall zpf` first: since 0.8.0 the
+library's distribution is `python-zipline` (the import is still `zpf`), and
+the old distribution's metadata stays behind otherwise, which an editable
+checkout trips over at import (`No package metadata was found for
+python-zipline`).
 
-The pin covers a single `zpf` minor deliberately: that library is in `0.x`,
-where every minor is a break with no upgrade path promised, so a range spanning
-two would be a promise neither project can keep.
+**Why python-zipline is declared by its tag.** This project requires
+python-zipline 0.8.0 (Zipline Payload Format 0.24) — it is built on
+`zpf.decode_stage` and its `adjacency=`, `params_digest=` and `reason_class=`
+keywords, on the per-record `role=` label, on a record timestamp derived from
+`cites`, on `net:` labels, and on 0.24's `copy` flag and its rule for where a
+closed TCP stream ends. python-zipline is not on PyPI, and a dependency
+declared by name and range would be resolved there: `zpf` belongs to an
+unrelated project, and `python-zipline` is unclaimed, so anyone who uploads a
+version in the range would be installed. A direct reference to the tag is
+never looked up on an index. What it costs is a range: a python-zipline patch
+release reaches kober through a kober release, and kober and `zpfwire`, which
+declares it the same way, must name the same tag to share an environment.
+
+The tag is one minor's deliberately: python-zipline is in `0.x`, where every
+minor is a separate format with no upgrade path promised.
 
 **`.venv` holds a release, always.** Working against an unreleased `zpf` —
 reviewing a `.devN` build, or changing both projects at once — goes in a second

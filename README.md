@@ -254,22 +254,28 @@ Requires Python 3.11+.
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install "zpf @ git+https://github.com/adamkjonsson/python-zipline@v0.6.0"    # see note below
 .venv/bin/pip install -e . -r requirements.txt
 ```
 
-**Why `zpf` is installed from a tag.** This project depends on
-`zpf>=0.6.0,<0.7`, which implements Zipline Payload Format 0.23: it is built
-on `zpf.decode_stage` and its `adjacency=`, `params_digest=` and
-`reason_class=` keywords, on the per-record `role=` label, on a record
-timestamp derived from `cites`, and on 0.23's `net:` labels. python-zipline
-does not publish to PyPI; the `zpf` there is an unrelated project of the same
-name, so the dependency comes from a release tag. Working against an
-unreleased `zpf` belongs in a second venv; see
-[Contributing](docs/dev/contributing.md).
+In an environment that held `zpf` 0.7 or older, `pip uninstall zpf` first:
+the library's distribution is now named `python-zipline`, and the old one's
+metadata would otherwise stay behind.
 
-The pin covers a single `zpf` minor deliberately: that library is in `0.x`,
-where every minor is a break with no upgrade path promised.
+**Why python-zipline is declared by its tag.** This project depends on
+python-zipline 0.8.0, imported as `zpf`, which implements Zipline Payload
+Format 0.24: it is built on `zpf.decode_stage` and its `adjacency=`,
+`params_digest=` and `reason_class=` keywords, on the per-record `role=`
+label, on a record timestamp derived from `cites`, on `net:` labels, and on
+0.24's `copy` flag and its rule for where a closed TCP stream ends.
+python-zipline is not on PyPI, and neither of its names is safe to look up
+there: `zpf` belongs to an unrelated project, and `python-zipline` is
+unclaimed. So `pyproject.toml` names the release tag, `python-zipline @
+git+https://github.com/adamkjonsson/python-zipline.git@v0.8.0`, which is never
+resolved against an index. Working against an unreleased python-zipline
+belongs in a second venv; see [Contributing](docs/dev/contributing.md).
+
+The tag is one minor's deliberately: python-zipline is in `0.x`, where every
+minor is a separate format with no upgrade path promised.
 
 ```bash
 .venv/bin/pytest                                  # run tests

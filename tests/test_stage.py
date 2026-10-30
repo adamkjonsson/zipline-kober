@@ -16,7 +16,7 @@ from kober.decoder import Decoder
 from kober.errors import SpecError
 from kober.pygen import render_spec
 from kober.spec import Emit, Spec
-from kober.stage import run_compiled
+from kober.stage import COPY_COMMENT, run_compiled
 
 # Four-byte messages: a u16 length-ish tag and a u16 body, so several fit in
 # one run and a boundary can be put anywhere.
@@ -150,14 +150,19 @@ def test_a_message_does_not_span_a_gap(tmp_path: Path):
     assert spans == [(0, 4), (8, 12)]
 
 
-def datagrams(path: Path, payloads: list[bytes]) -> None:
-    """Write a packet-oriented transport file: no seq_start, so no byte stream."""
+def datagrams(path: Path, payloads: list[bytes], copies: frozenset[int] = frozenset()) -> None:
+    """Write a packet-oriented transport file: no seq_start, so no byte stream.
+
+    The datagrams at the indices in ``copies`` are flagged ``copy``, which spec
+    0.24 allows only on one byte-identical to the datagram before it.
+    """
     with zpf.create(path, tick_hz=1_000_000) as writer:
         writer.add_source("capture", uri="x.pcap")
         with writer.begin_session(proto="udp", key="a <-> b") as session:
             client = session.participant("10.0.0.1:5353")
             for index, payload in enumerate(payloads):
-                session.record(client, ts=1000 + index, payload=payload)
+                flags = zpf.RecordFlags.COPY if index in copies else 0
+                session.record(client, ts=1000 + index, payload=payload, flags=flags)
             session.end(reason="close")
 
 
@@ -959,3 +964,69 @@ def test_a_chunk_extension_in_the_first_message_keeps_the_stream(tmp_path: Path,
             ((len(first), len(first) + len(second)),),
             ((len(first) + len(second), len(stream)),),
         ]
+
+
+# --- capture-point copies (#64) -----------------------------------------------
+#
+# Spec 0.24 flags a datagram the capture saw twice and the sender sent once
+# `copy`, byte-identical to the one before it. Decoding it would count a message
+# twice with nothing in the output to say so; it is passed over instead.
+
+SHORT = bytes([1, 0x42])
+
+
+@pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD], ids=lambda e: e.value)
+def test_a_copy_is_skipped_not_decoded(tmp_path: Path, emit: Emit):
+    source = tmp_path / "in.zpf"
+    other = bytes([1, 0x42, 9])
+    datagrams(source, [GOOD, GOOD, other, other, other], copies=frozenset({1, 3}))
+    written = both(TOY, source, tmp_path, emit)
+    records = [b for b in written if b[0] == "record"]
+    if emit is Emit.MESSAGE:
+        assert [b[4] for b in records] == [((0, 3),), ((6, 9),), ((12, 15),)]
+    else:
+        assert {b[4][0][0] for b in records} == {0, 1, 2, 6, 7, 8, 12, 13, 14}
+    assert regions(written) == [
+        (3, 6, "skipped", COPY_COMMENT),
+        (9, 12, "skipped", COPY_COMMENT),
+    ]
+
+
+def test_a_copy_held_before_confirmation_is_written_when_the_stream_confirms(tmp_path: Path):
+    """A copy of a datagram that ran out is held with it, and kept its own range."""
+    source = tmp_path / "in.zpf"
+    datagrams(source, [SHORT, SHORT, GOOD], copies=frozenset({1}))
+    written = both(TOY, source, tmp_path, Emit.MESSAGE)
+    assert [b[4] for b in written if b[0] == "record"] == [((4, 7),)]
+    assert regions(written) == [(0, 2, "truncated", None), (2, 4, "skipped", COPY_COMMENT)]
+
+
+def test_a_copy_held_before_a_decline_is_still_accounted_for(tmp_path: Path):
+    """Found by the fuzz suite: a held copy's bytes vanished when the stream declined."""
+    source = tmp_path / "in.zpf"
+    datagrams(source, [SHORT, SHORT, FOREIGN, FOREIGN], copies=frozenset({1, 3}))
+    written = both(TOY, source, tmp_path, Emit.MESSAGE)
+    assert [b for b in written if b[0] == "record"] == []
+    comment = NOT_TOY.format(6)
+    assert regions(written) == [
+        (0, 2, "undecodable", comment),
+        (2, 4, "skipped", comment),
+        (4, 7, "undecodable", comment),
+        (7, 10, "skipped", comment),
+    ]
+
+
+@pytest.mark.parametrize("emit", [Emit.MESSAGE, Emit.FIELD], ids=lambda e: e.value)
+def test_a_stream_that_ends_in_a_lost_tail_ends_in_a_gap(tmp_path: Path, emit: Emit):
+    """Since spec 0.24 a pure ACK stored after a lost tail is the tail's evidence (#64).
+
+    The extent counts sequence numbers, so the ACK reaches past the last byte
+    that arrived, `chunks()` ends on a `Gap`, and the hole is marked `gap`
+    rather than vanishing from the stream's measure.
+    """
+    source = tmp_path / "in.zpf"
+    write_transport(source, [(1000, GOOD, 1001), (2000, GOOD, 1004), (3000, b"", 1012)])
+    written = both(TOY, source, tmp_path, emit)
+    if emit is Emit.MESSAGE:
+        assert [b[4] for b in written if b[0] == "record"] == [((0, 3),), ((3, 6),)]
+    assert regions(written) == [(6, 11, "gap", None)]

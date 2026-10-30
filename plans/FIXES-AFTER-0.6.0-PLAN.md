@@ -1,7 +1,6 @@
 # Plan: the fixes found after 0.6.0
 
-**State: Stages 0 to 6 done (2026-10-28); Stage 7, the port to
-python-zipline 0.8.0, next.** [zipline#168](https://github.com/adamkjonsson/zipline/issues/168),
+**State: Stages 0 to 7 done (Stage 7 on 2026-10-30); the release next.** [zipline#168](https://github.com/adamkjonsson/zipline/issues/168),
 whose one position past a FIN failed two tests and 80 pipeline checks, was
 settled by spec 0.24 and fixed only in python-zipline 0.8.0 (2026-10-30), so
 the port joined this milestone (#64; see *Stage 7*). Written 2026-10-28 against `0.6.0` (released
@@ -328,6 +327,35 @@ Steps:
    design's verified claims; any claim it no longer verifies is a finding.
    The pipeline against `../kober-baselines/plan_0_7_0-zpf080`: only
    `dns_fuzz` should move, by its copies.
+
+**Done, and what it found.**
+
+- **hatchling refuses a direct reference** in `dependencies` unless
+  `[tool.hatch.metadata] allow-direct-references = true`, so that is set, with
+  a comment saying why. `pip install -e . -r requirements.txt` now installs
+  python-zipline from the tag in one step; `.venv` reports `(0, 24)` from
+  `site-packages`, from the tag's commit `f93be81`.
+- **The fuzz suite found a bug in the first version of the copy rule.** A copy
+  arriving before the stream confirmed, after a datagram that ran out, was
+  noted into the *previous* datagram's held entry. A decline then marks only
+  that entry's own range, so the copy's bytes vanished from the output. A held
+  copy is now an entry of its own, never counted as an attempt: `skipped` with
+  the copy comment when the stream confirms, and with the decline's comment
+  when it declines. Three example tests through real files and both backends
+  pin it, one per path; with the rule disabled 8 tests fail.
+- **A stream ending in a lost tail** ends in a `gap` now, pinned at both
+  granularities.
+- `pressure_test.py`: every question still answered yes on 0.8.0.
+- **Suite**: 2,360 passed, 1 skipped, sibling-driven tests included.
+  **Pipeline** against the port's baseline: every check held, and 8 outputs
+  moved, all `dns_fuzz`'s: DNS 319 messages → 279, the 40 copies' 3,380 bytes
+  `skipped` with the copy comment; `http` over the same input marks the same
+  bytes `skipped` inside its declined streams, where it had tried them.
+- Docs: install is one step in README, *Contributing* and `CLAUDE.md`, with
+  the `pip uninstall zpf` note; why the tag, in README, *Contributing* and the
+  `pyproject.toml` comment; the copy rule in `DESIGN.md`'s list of regions and
+  a new *What a spec meets twice* in the concepts page; the pin's history in
+  `DESIGN.md`; the `Specification` URL at v0.24.
 
 ## Release
 

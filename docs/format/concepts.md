@@ -331,6 +331,17 @@ It is also what lets kober retry after a refusal: a spec with a guard
 resynchronises after a gap, and one without only by luck.
 ```
 
+## What a spec meets twice
+
+A capture can see one datagram twice: a mirror port, or a host captured on
+both its interfaces. Since format 0.24 such a datagram is flagged `copy`, and
+it is byte-identical to the one before it. kober never decodes one: it would
+add nothing, and it would count a message the sender sent once, with nothing
+in the output to tell the reader so. Its bytes are `skipped`, with the comment
+`capture-point copy of the previous datagram`, or with a declined stream's
+comment. On a byte stream the same thing happens earlier: reassembly drops a
+segment that repeats one already accepted, before the spec sees it.
+
 ## A second offset space
 
 A [`transform`](types.md#transform) turns bytes already decoded into new ones:
