@@ -1,9 +1,10 @@
 # Plan: the fixes found after 0.6.0
 
-**State: Stages 0 to 6 done (2026-10-28); the release waits on
-[zipline#168](https://github.com/adamkjonsson/zipline/issues/168)**, whose
-one position past a FIN fails two tests and 80 pipeline checks (see *Stage 0*
-and *Where it stands*). Written 2026-10-28 against `0.6.0` (released
+**State: Stages 0 to 6 done (2026-10-28); Stage 7, the port to
+python-zipline 0.8.0, next.** [zipline#168](https://github.com/adamkjonsson/zipline/issues/168),
+whose one position past a FIN failed two tests and 80 pipeline checks, was
+settled by spec 0.24 and fixed only in python-zipline 0.8.0 (2026-10-30), so
+the port joined this milestone (#64; see *Stage 7*). Written 2026-10-28 against `0.6.0` (released
 2026-10-20), `zpf` 0.6.0 pinned (`>=0.6.0,<0.7`), packeteer 0.21.0, `zpfwire`
 0.5.0. The milestone is GitHub's `0.7.0`, which holds eight open issues, all of
 them found *after* `v0.6.0` was tagged. See *The version* for why it is a
@@ -18,6 +19,7 @@ minor.
 | [#51](https://github.com/adamkjonsson/zipline-kober/issues/51) | bug | `check` accepts a repeated `computed`, `select` or `pointer` | 4 |
 | [#54](https://github.com/adamkjonsson/zipline-kober/issues/54) | bug + feature | `http.yaml` cannot read a chunk extension; needs a `before()` builtin | 5 |
 | [#62](https://github.com/adamkjonsson/zipline-kober/issues/62) | docs + tools | the `--protocol-messages` trap is stale; the pipeline's DNS responses go c2s | 6 |
+| [#64](https://github.com/adamkjonsson/zipline-kober/issues/64) | port | move the pin to python-zipline 0.8.0 (spec 0.24, new distribution name) | 7 |
 
 ## Why this order
 
@@ -253,22 +255,98 @@ fail, the fix restored. What each found beyond its issue:
 `DESIGN.md` §3.3 still says "a closed table of three functions", stale since
 0.5.0's `startswith` and `endswith` and now by four.
 
+## Stage 7 — the port to python-zipline 0.8.0 (#64)
+
+Added 2026-10-30. python-zipline 0.8.0 implements spec 0.24, which settled
+#168 by reading 1: an extent counts sequence numbers, and a FIN's position is
+owed no coverage. No 0.6.x or 0.7.x carries it. `zpfwire` 0.9.0 is already
+built on 0.8.0, so against today's siblings kober on `zpf` 0.6.0 fails six
+sibling-driven tests with *unsupported version_minor 24*: a 0.7.0 on the old
+pin could not read the current tools' output. So the port is part of this
+release, not a later 0.8.0.
+
+**Measured before starting**, in a throwaway venv on the `v0.8.0` tag with
+this branch's code unchanged: the suite passes, 2,354 and 1 skipped, the
+sibling-driven tests and #168's two included; the pipeline holds every check
+(419). Against `../kober-baselines/v0.6.0`, every moved output is explained:
+the `http` spec digest (Stage 5), `dns_gen`'s directions (Stage 6), `ts_first`
+on 5,106 records of the four HTTP inputs (`zpf` 0.7.0, #87, which kober never
+shipped on), and `zpfwire`'s version in the sessionized tunnel files. The
+Session End extent one larger after a stored final ACK is #168's fix, and
+`blocks()` does not compare it. That run is the port's baseline:
+`../kober-baselines/plan_0_7_0-zpf080` (log beside it), since `zpf` 0.8
+cannot read the `v0.6.0` one.
+
+**Decided (2026-10-30):**
+
+- **The dependency is the release tag**, `python-zipline @
+  git+https://github.com/adamkjonsson/python-zipline.git@v0.8.0`, as
+  `zpfwire` declares it. Never resolved on an index: `python-zipline` is
+  unclaimed on PyPI, so a range by name would install whoever claims it, the
+  dependency confusion python-zipline renamed itself to escape (#102). Cost:
+  a python-zipline patch reaches kober users only through a kober release,
+  and kober and `zpfwire` must name the same tag to share an environment. A
+  range again once python-zipline is published under its name.
+- **A datagram flagged `copy` is not decoded.** Spec 0.24 makes a copy
+  byte-identical to its participant's preceding record, so decoding one tells
+  nothing new and counts a message the sender sent once, with no way for a
+  reader to see it; on a stream, reassembly already drops a duplicate. The
+  driver reads `datagrams(copies=False)` and marks each copy's bytes `skipped`
+  with a comment saying it is a capture-point copy. `dns_fuzz` holds 40.
+
+Steps:
+
+1. **The pin.** `pyproject.toml`'s dependency as above, and its comment
+   rewritten for the new floor (spec 0.24, the FIN rule, `copy`) and the form.
+   `requirements.txt` does not repeat it.
+2. **The venvs.** `pip uninstall zpf` in `.venv` and `.venv-dev` before
+   installing; `.venv-dev` is broken until then, since `zpf` 0.8 reads its own
+   version from `python-zipline`'s metadata. Confirm `zpf.SPEC_VERSION ==
+   (0, 24)` and `zpf.__file__` under `site-packages` in `.venv`.
+3. **Copies.** `_drive_datagrams` reads `datagrams(copies=False)`, and each
+   copy's range is written `skipped` with its comment, in both backends (the
+   driver is shared; check the compiled path anyway). Tests: a datagram file
+   with a copy, decoded by both, asserting one message and the copy's bytes
+   `skipped` with the comment; a copy before confirmation, so a declined
+   stream still accounts for it; and a fuzz case, so "no byte both cited and
+   undecoded" covers copies. Revert, watch fail, restore.
+4. **A stream that ends in a gap.** `chunks()` can now end on a trailing
+   `Gap` (a pure ACK after a lost tail). The pipeline passes with it; pin it
+   with a test of the driver over such a stream, both backends.
+5. **Docs.** The install lines in README, *Contributing* and `CLAUDE.md`, now
+   one step (`pip install -e . -r requirements.txt` installs the tag). The
+   pin's paragraph in README and *Contributing* (spec 0.24, the new name, why
+   a tag). Any page naming spec 0.23 or `zpf` 0.6.
+6. **Changelog.** **Changed**, **Breaking**: output is spec 0.24, which
+   `zpf` 0.6 and 0.7 refuse, and the dependency is `python-zipline` by tag,
+   so an environment needs `pip uninstall zpf` first; a Session End declares
+   one more after a stored final ACK; `ts_first` is written on a unit drawn
+   from several records; a `copy` datagram is `skipped`, not decoded.
+   **Fixed**: kober's output passes `check_coverage` over a closed TCP
+   connection (zipline#168).
+7. **Checks.** `pressure_test.py` rerun, since it is the source of the
+   design's verified claims; any claim it no longer verifies is a finding.
+   The pipeline against `../kober-baselines/plan_0_7_0-zpf080`: only
+   `dns_fuzz` should move, by its copies.
+
 ## Release
 
 1. Full suite, `ruff check`, `sphinx-build -W`, and the deeper pipeline with
-   `--baseline ../kober-baselines/v0.6.0`. Every moved output is explained by a
-   stage above.
+   `--baseline ../kober-baselines/plan_0_7_0-zpf080`. Every moved output is
+   explained by a stage above.
 2. Take the new baseline into `../kober-baselines/v0.7.0`.
-3. The release steps in `CLAUDE.md`; close the eight issues and the
+3. The release steps in `CLAUDE.md`; close the nine issues and the
    milestone.
 
 ## The version
 
 **`0.7.0`.** The milestone was first named `0.6.0`, which was already tagged,
 and was renamed on 2026-10-28. `before()` (#54) is new language, which SemVer
-puts in a minor; everything else is a fix, test-only, or docs, and nothing is
-breaking. Stage 0 bumps `pyproject.toml` to `0.7.0.dev0`.
+puts in a minor. Stage 0 bumps `pyproject.toml` to `0.7.0.dev0`.
 
-The `zpf` pin stays `>=0.6.0,<0.7` for this milestone. The port to `zpf` 0.7,
-now released, is a separate minor, `0.8.0`, since moving the pin is always a
-minor here.
+Stage 7 moves the pin, from `zpf` 0.6 to python-zipline 0.8.0, which is
+always a minor here, and is breaking: kober's output becomes spec 0.24. A
+minor is what this release already is, so the port is in it. `zpf` 0.7 is
+skipped; kober never shipped on it. (Until 2026-10-30 this section said the
+pin would stay at 0.6 and the port be a separate 0.8.0; #168 being fixed only
+in python-zipline 0.8.0, and `zpfwire` 0.9.0 moving to it, changed that.)
