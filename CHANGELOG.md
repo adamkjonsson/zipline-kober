@@ -129,10 +129,15 @@ minor bump here too.
 - **The `--protocol-messages` trap in *Testing* is replaced by the current
   rule** ([#62](https://github.com/adamkjonsson/zipline-kober/issues/62)). It
   said a wrapped `{"dns": {…}}` element is accepted in silence and builds an
-  empty header; since packeteer 0.20.0 the wrapped form is the one that gives a
-  message its direction, and a bare section is always sent client to server.
+  empty header; since packeteer 0.18.0 the wrapped form is the one that gives a
+  message its direction, a bare section is always sent client to server, and
+  since 0.20.0 a `direction` beside a bare one is refused rather than ignored.
   The pipeline's generated DNS used bare sections, so its response left from
-  the client; it is wrapped now, and the pipeline needs packeteer 0.20.0.
+  the client; it is wrapped now.
+- **The sibling tools' stated minimums follow the format.** kober 0.7.0 reads
+  format 0.24, so the pipeline, *Testing* and both examples' READMEs ask for
+  `zpfwire` 0.9.0 or later, the first that writes it; the WireGuard README no
+  longer says kober brings `zpf` 0.6.
 - ***Testing* lists two new pipeline inputs**, `http_ext` and
   `http_ext_clean`: chunked HTTP whose size lines carry extensions (#54), lossy
   and checked exactly.

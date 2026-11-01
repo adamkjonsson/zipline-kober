@@ -8,10 +8,11 @@ where the seam bug lived. This script is the release checklist's requirement
     .venv/bin/python tools/pipeline.py
 
 It needs two sibling checkouts with their own virtual environments, neither a
-dependency of this project: ``packeteer`` 0.20.0 or later (to fuzz and generate
+dependency of this project: ``packeteer`` 0.18.0 or later (to fuzz and generate
 traffic, through an example's tunnel module included) and
-``python-zipline-wire`` 0.5.0 or later (``zpfwire``, to turn captures into
-``.zpf``, and a tunnel's opened packets back into conversations).
+``python-zipline-wire`` 0.9.0 or later (``zpfwire``, to turn captures into
+``.zpf`` in format 0.24, the one kober reads, and a tunnel's opened packets
+back into conversations).
 
 An example that brings its own code (``examples/<name>/``) joins the pipeline
 by describing itself in an ``example.json`` beside its spec

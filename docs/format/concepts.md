@@ -235,6 +235,7 @@ read cleanly before the failure. Its bytes are named instead:
 | --- | --- | --- |
 | Every run or datagram tried before the decision | `undecodable` | It was tried, and it failed. |
 | Every one after it | `skipped` | It was declined on purpose, never tried. |
+| A datagram flagged `copy`, wherever it falls | `skipped` | It is never tried (*What a spec meets twice*). |
 | A hole in the capture | `gap` | As everywhere. |
 
 Every `undecodable` and `skipped` region of a declined stream carries a comment

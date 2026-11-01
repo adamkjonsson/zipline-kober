@@ -117,10 +117,11 @@ That installs python-zipline (imported as `zpf`) from the release tag `pyproject
     `--protocol-messages FILE` saying what to send, so **DNS can be generated
     rather than only fuzzed** — and a `raw:` section is the only way to put a
     *compressed* response into an impaired stream, since a built message writes
-    every name in full. Since **0.20.0** wrap a section to give it a direction,
+    every name in full. Since **0.18.0** wrap a section to give it a direction,
     `{"dns": {"raw": …}, "direction": "s2c"}`; a bare section is always sent
-    c2s, and a bare one with `direction` is refused. An HTTP message takes its
-    direction from its start line instead. 0.12.0 also
+    c2s, and since 0.20.0 a bare one with `direction` is refused (it was
+    ignored before). An HTTP message takes its direction from its start line
+    instead. 0.12.0 also
     made compressed DNS round-trip, so a fuzzed capture now carries the
     pointers it always had — count `.target` records to know.
     If it lacks a protocol, write one as a `packeteer protocol` spec (0.11.0)

@@ -309,9 +309,9 @@ one comparison. Two things it has to allow for:
 
 ## 8. Go inside
 
-What a tunnel carries is traffic of its own. `zpfwire` 0.5.0 turns the
-decrypted packets back into the conversations they were, and any spec decodes
-those:
+What a tunnel carries is traffic of its own. `zpfwire` (0.9.0 or later) turns
+the decrypted packets back into the conversations they were, and any spec
+decodes those:
 
 ```console
 zpfwire convert packets.zpf -o inner.zpf

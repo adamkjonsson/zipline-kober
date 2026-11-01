@@ -1,5 +1,7 @@
 # Phase plan: a WireGuard tunnel, as the worked example of bringing your own code
 
+> **Closed: shipped in `v0.6.0` (2026-10-20).** Marked at the 0.7.0 release; the state below is as it was last written, and `CHANGELOG.md` says what shipped.
+
 **State: Stages 0 to 6 done (2026-10-16); acceptance 1 waits on the `zpf` 0.6 port; Stage 7 (the example as a template) is next.** `0.6.0.dev0`, with the
 pipeline baseline taken on the unchanged `0.5.0` code in
 `../kober-baselines/v0.5.0`, outside the repository. Map parameters and
