@@ -22,6 +22,20 @@ minor bump here too.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-01
+
+**What the pipeline found after 0.6.0, and the format that settled it.** Nine
+issues, all found after the 0.6.0 tag and most of them by the tools around
+kober rather than by its own suite. `check` now refuses a repetition that could
+never move on. `examples/http.yaml` reads a chunk extension, through a new
+function, `before()`. Refusals and line numbers say what the author wrote
+and where. The one fault kober could not fix itself, a closed TCP stream that
+failed its own coverage check by the FIN's position, was raised as
+zipline#168 and settled by format 0.24. **Breaking:** python-zipline 0.8.0
+and Zipline Payload Format 0.24 are required, declared by release tag under
+the library's new distribution name; run `pip uninstall zpf` in an existing
+environment, and regenerate files from kober 0.6; see *Changed*.
+
 ### Added
 
 - **`before(s, sep)`**, the text before the first `sep`, or all of `s` when
@@ -2486,7 +2500,8 @@ installed from a checkout (see the README).
   parses `comment` back. Whether to follow `zpf` 0.3 (#58, #59) is recorded as
   an open question rather than settled.
 
-[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.3.0...v0.4.0

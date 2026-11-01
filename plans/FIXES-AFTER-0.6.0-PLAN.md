@@ -1,6 +1,6 @@
 # Plan: the fixes found after 0.6.0
 
-**State: Stages 0 to 7 done (Stage 7 on 2026-10-30); the release next.** [zipline#168](https://github.com/adamkjonsson/zipline/issues/168),
+**State: done (2026-11-01).** Stages 0 to 7 landed on `plan_0_7_0`, and the release is prepared there: the changelog dated, `.dev0` dropped, the pipeline baseline taken into `../kober-baselines/v0.7.0`. The tag and the closing of the issues follow the merge. [zipline#168](https://github.com/adamkjonsson/zipline/issues/168),
 whose one position past a FIN failed two tests and 80 pipeline checks, was
 settled by spec 0.24 and fixed only in python-zipline 0.8.0 (2026-10-30), so
 the port joined this milestone (#64; see *Stage 7*). Written 2026-10-28 against `0.6.0` (released
