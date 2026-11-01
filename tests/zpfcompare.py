@@ -30,7 +30,9 @@ def blocks(path: Path) -> list[tuple[object, ...]]:
     that have written different files. So is its ``reason_class``, which a reason
     of a spec's own, a transform's ``fails_as``, must state. Each decoder's descriptor is included
     with its ``params_digest``, since the two must say the same configuration
-    produced the file. Read from the raw block stream rather
+    produced the file. A record's ``timestamp`` and ``ts_first`` are included
+    because each is derived, per unit, from what the record cites, and each
+    implementation derives them on its own (#60). Read from the raw block stream rather
     than the session views, because the order the two implementations write in
     is part of what is being compared.
 
@@ -51,7 +53,17 @@ def blocks(path: Path) -> list[tuple[object, ...]]:
                 out.append(("participant", block.participant_id, zpf.Adjacency(block.adjacency)))
             elif isinstance(block, Record):
                 spans = tuple((s.off_start, s.off_end) for s in block.spans)
-                out.append(("record", block.content_type, block.role, block.payload, spans))
+                out.append(
+                    (
+                        "record",
+                        block.content_type,
+                        block.role,
+                        block.payload,
+                        spans,
+                        block.timestamp,
+                        block.ts_first,
+                    )
+                )
             elif isinstance(block, Undecoded):
                 out.append(
                     (

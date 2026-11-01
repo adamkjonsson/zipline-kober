@@ -22,6 +22,140 @@ minor bump here too.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-01
+
+**What the pipeline found after 0.6.0, and the format that settled it.** Nine
+issues, all found after the 0.6.0 tag and most of them by the tools around
+kober rather than by its own suite. `check` now refuses a repetition that could
+never move on. `examples/http.yaml` reads a chunk extension, through a new
+function, `before()`. Refusals and line numbers say what the author wrote
+and where. The one fault kober could not fix itself, a closed TCP stream that
+failed its own coverage check by the FIN's position, was raised as
+zipline#168 and settled by format 0.24. **Breaking:** python-zipline 0.8.0
+and Zipline Payload Format 0.24 are required, declared by release tag under
+the library's new distribution name; run `pip uninstall zpf` in an existing
+environment, and regenerate files from kober 0.6; see *Changed*.
+
+### Added
+
+- **`before(s, sep)`**, the text before the first `sep`, or all of `s` when
+  there is none ([#54](https://github.com/adamkjonsson/zipline-kober/issues/54)):
+  the expression language's seventh function, in both backends. Total: an
+  empty separator is found where the text begins, so `before(s, '')` is `''`.
+  Made for `examples/http.yaml`'s chunk size, as `startswith` and `endswith`
+  were made for its start line.
+
+### Changed
+
+- **Breaking: kober is built on python-zipline 0.8.0, and writes Zipline
+  Payload Format 0.24** ([#64](https://github.com/adamkjonsson/zipline-kober/issues/64)).
+  Every `0.x` minor of the format is a separate one: `zpf` 0.6 and 0.7 refuse
+  what kober now writes, and kober refuses a file stamped 0.23, so a pipeline
+  moves with it, `zpfwire` 0.9.0 included. `zpf` 0.7 is skipped; kober never
+  shipped on it.
+- **Breaking: the dependency is `python-zipline`, by its release tag**
+  (`python-zipline @ git+https://github.com/adamkjonsson/python-zipline.git@v0.8.0`),
+  where it was `zpf>=0.6.0,<0.7`. The library renamed its distribution, since
+  `zpf` on PyPI is someone else's, and the import is still `zpf`. It is
+  declared by tag because neither name is safe to resolve on PyPI. So
+  `pip install -e .` now installs it, in one step; in an environment that held
+  `zpf`, run `pip uninstall zpf` first, or its metadata stays behind.
+- **Breaking: a datagram flagged `copy` is not decoded.** Format 0.24 flags one
+  the capture saw twice and the sender sent once, byte-identical to the one
+  before it. Decoding it counted a message twice with nothing to say so; its
+  bytes are `skipped` now, commented `capture-point copy of the previous
+  datagram`. A fuzzed DNS capture in the pipeline holds 40.
+- **Bytes kober writes move, as python-zipline's do.** A decoded unit drawn
+  from several input records carries `ts_first`, when it started (python-zipline
+  0.7.0), on 5,106 records of the pipeline's four HTTP inputs. And a stage over
+  a closed TCP stream whose final ACK was stored declares that input's extent
+  one larger, as 0.24 defines it.
+
+### Fixed
+
+- **kober's output over a closed TCP connection passes `check_coverage`**
+  ([zipline#168](https://github.com/adamkjonsson/zipline/issues/168)). Over a
+  conversion by `zpfwire` 0.8 or later, every such stream failed by one byte,
+  the position of the FIN: the stage declared the stream one short, and the
+  checker found that position uncovered. Format 0.24 says a FIN's position
+  holds no byte and is owed nothing, and python-zipline 0.8.0 measures and
+  checks it so. Neither kober's code nor its spec changed for it; two tests and
+  80 pipeline checks that failed now pass. A stream whose tail was lost and whose
+  final ACK was stored now ends in a `gap`, where the loss had vanished from its
+  measure.
+
+- **`examples/http.yaml` reads a chunk extension**
+  ([#54](https://github.com/adamkjonsson/zipline-kober/issues/54)). RFC 9112
+  writes a chunk's size line `chunk-size [ chunk-ext ] CRLF`, and the spec read
+  the whole line as the number, so `4;name=value` was undecodable. Worse in a
+  stream: one in a response direction's first message declined the direction,
+  and every response after it was lost. Over 30 generated transactions whose
+  chunks carry extensions, the 0.6.0 spec decoded **0** of 30 responses, clean
+  or under loss, and now decodes all 30 (26 when segments are lost and not
+  resent). The size is now `to_int(before(size, ';'), 16)`; the `size` record
+  still cites the whole line, extensions and all.
+
+- **A call on anything but a bare name is refused naming what was written**,
+  not a Python AST class
+  ([#57](https://github.com/adamkjonsson/zipline-kober/issues/57),
+  [#58](https://github.com/adamkjonsson/zipline-kober/issues/58)).
+  `a.len(body)` was refused as *'Attribute' is not one of the expression
+  language's functions*, `keys[0](x)` as `'Subscript'` (a regression in
+  0.6.0), and `lower(tag)(1)` as `'a function call'`, which read as though
+  every call were refused. The callee is now quoted as written: `'a.len'`,
+  `'keys[0]'`, `'lower(tag)'`. The method spelling of one of the functions,
+  the likeliest way to meet this from Python, says how to write it:
+  `tag.lower()` is refused with *a method call is not allowed; write
+  lower(tag)*. `(yield x)` and Python 3.14's t-strings, which were refused as
+  `Yield` and `TemplateStr`, are named in words or quoted too. packeteer
+  0.19.0 names the callee the same way.
+- **A mistake inside `params:` or `transforms:` is reported at its own line**
+  ([#59](https://github.com/adamkjonsson/zipline-kober/issues/59)), by the
+  loader and by `check`, errors and warnings alike. Every one said line 1, the
+  document's, wherever it was: a map keyed by `bool`, a parameter named like a
+  field, an unknown key or a misspelt `fails_as` on a declaration, a
+  declaration never used. Each is now at the line its parameter or
+  declaration is named on, the scalar short form `mode: int` included, and a
+  `fails_as` at its own. A spec from JSON still reports the path alone.
+- **`check` refuses a repeated `computed`, `select` or `pointer`**
+  ([#51](https://github.com/adamkjonsson/zipline-kober/issues/51)), and a
+  repeated `switch` none of whose cases reads anything. Each reads nothing
+  where it stands, so the decoder stopped every such repetition at its second
+  element, `undecodable` whatever the input, while `check` passed the spec.
+  They are refused now as `transform` and `concat` already were, under every
+  repetition kind, a `count` of 0 included. Not a break: every spec newly
+  refused failed on every message with at least one element. The decoder's
+  guard stays, for a spec run with `check=False`.
+
+### Documentation
+
+- **`zpf` is installed from its release tag**, not from a sibling checkout
+  ([#61](https://github.com/adamkjonsson/zipline-kober/issues/61)). An
+  editable install of the checkout records its version when it is made and
+  runs whatever is checked out afterwards, so the development venv could
+  report `zpf` 0.6.0 while running 0.7.0, and a review of a dev build proved
+  nothing. The development venv now holds a release, installed from its tag,
+  which since #64 is the dependency `pyproject.toml` itself declares. A
+  checkout for co-development goes in a second venv, `.venv-dev`. The README
+  and *Contributing* say so, and no longer say PyPI holds an old `zpf`: the
+  `zpf` there is an unrelated project. The pipeline prints which `zpf` it ran,
+  version and location.
+- **The `--protocol-messages` trap in *Testing* is replaced by the current
+  rule** ([#62](https://github.com/adamkjonsson/zipline-kober/issues/62)). It
+  said a wrapped `{"dns": {…}}` element is accepted in silence and builds an
+  empty header; since packeteer 0.18.0 the wrapped form is the one that gives a
+  message its direction, a bare section is always sent client to server, and
+  since 0.20.0 a `direction` beside a bare one is refused rather than ignored.
+  The pipeline's generated DNS used bare sections, so its response left from
+  the client; it is wrapped now.
+- **The sibling tools' stated minimums follow the format.** kober 0.7.0 reads
+  format 0.24, so the pipeline, *Testing* and both examples' READMEs ask for
+  `zpfwire` 0.9.0 or later, the first that writes it; the WireGuard README no
+  longer says kober brings `zpf` 0.6.
+- ***Testing* lists two new pipeline inputs**, `http_ext` and
+  `http_ext_clean`: chunked HTTP whose size lines carry extensions (#54), lossy
+  and checked exactly.
+
 ## [0.6.0] - 2026-10-20
 
 **Bringing your own code.** A protocol a spec can frame but not read, because
@@ -2366,7 +2500,8 @@ installed from a checkout (see the README).
   parses `comment` back. Whether to follow `zpf` 0.3 (#58, #59) is recorded as
   an open question rather than settled.
 
-[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/adamkjonsson/zipline-kober/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/adamkjonsson/zipline-kober/compare/v0.3.0...v0.4.0

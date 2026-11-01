@@ -43,9 +43,9 @@ deferred, with no date.
 ## What you need
 
 kober with its YAML extra, since the spec is YAML (`pip install 'kober[yaml]'`,
-which brings `zpf` 0.6), and
-[`zpfwire`](https://github.com/adamkjonsson/python-zipline-wire) 0.5.0 or
-later to turn a capture into a `.zpf`. To generate traffic,
+which brings python-zipline 0.8, imported as `zpf`), and
+[`zpfwire`](https://github.com/adamkjonsson/python-zipline-wire) 0.9.0 or
+later to turn a capture into a `.zpf`, since kober reads format 0.24. To generate traffic,
 [packeteer](https://github.com/adamkjonsson/packeteer) 0.18.0 or later. The
 example's own code needs nothing beyond the standard library.
 
@@ -218,7 +218,7 @@ see. So it reaches kober, and the tag check names it `decrypt-failed`.
 
 ## The traffic inside
 
-`packets.zpf` holds packets, one per transport message. `zpfwire` 0.5.0 or
+`packets.zpf` holds packets, one per transport message. `zpfwire` 0.9.0 or
 later turns them back into the conversations they carried, UDP split into
 flows and TCP reassembled as it would be from a capture, and kober decodes
 those with any spec:

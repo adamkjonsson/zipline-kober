@@ -688,6 +688,12 @@ the ordinary one and `repeat:` is what an unusual case reaches for.
 - {name: answers, unit: rr, count: ancount}
 ```
 
+**A field that reads nothing where it stands cannot repeat**: a `computed`, a
+`select`, a `pointer`, a `concat`, a `transform`, or a `switch` none of whose
+cases reads anything. Each element would end where it began, so a repetition
+of one could never move on, and `check` refuses it whatever the kind, a
+`count` of 0 included.
+
 An `until` expression sees the field it repeats, and there it means **the
 element just decoded** rather than the list. A [`select`](#select)'s `where`
 and `value` bind the same way. Those are the only places a repeated field may

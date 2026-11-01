@@ -295,6 +295,7 @@ def test_what_unparse_writes_parses_back_to_the_same_tree(source: str):
         "startswith(s, 'HTTP/')",
         "endswith(trim(lower(s)), 'chunked')",
         "not startswith(s, 'x') and endswith(s, 'y')",
+        "to_int(before(s, ';'), 16)",
     ],
 )
 def test_a_call_round_trips(source: str):
@@ -317,6 +318,7 @@ def test_a_call_is_an_atom_and_needs_no_brackets():
         ("lower(a, b)", "takes 1 argument(s), got 2"),
         ("startswith(a)", "takes 2 argument(s), got 1"),
         ("endswith(a, b, c)", "takes 2 argument(s), got 3"),
+        ("before(a)", "takes 2 argument(s), got 1"),
         ("to_int(a, base=16)", "positional arguments only"),
     ],
 )
@@ -332,6 +334,70 @@ def test_the_refusal_names_what_does_exist():
         parse("upper(x)")
     assert "lower()" in str(caught.value)
     assert "to_int()" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("source", "called"),
+    [
+        ("a.len(body) == 4", "'a.len'"),
+        ("keys[0](x)", "'keys[0]'"),
+        ("(1)(x)", "'1'"),
+        ('"s"(x)', "\"'s'\""),
+        ("(a + b)(x)", "'a + b'"),
+        ("f(x)(y)", "'f(x)'"),
+        ("lower(tag)(1)", "'lower(tag)'"),
+    ],
+)
+def test_a_refused_callee_is_named_as_written(source: str, called: str):
+    """Not by the AST class it parses to, which the author never wrote (#57)."""
+    with pytest.raises(ExprError) as caught:
+        parse(source)
+    message = str(caught.value)
+    assert f"{called} is not one of the expression language's functions" in message
+    for name in ("Attribute", "Subscript", "Constant", "BinOp", "Call"):
+        assert name not in message
+    assert "a function call" not in message
+
+
+@pytest.mark.parametrize(
+    ("source", "advice"),
+    [
+        ("tag.lower() == 'abc'", "write lower(tag)"),
+        ("this.len(body)", "write len(this, body)"),
+        ("a.b.startswith('x')", "write startswith(a.b, 'x')"),
+        ("s.to_int(16)", "write to_int(s, 16)"),
+    ],
+)
+def test_a_method_spelling_of_a_function_says_how_to_write_it(source: str, advice: str):
+    """`tag.lower()` is the likeliest way to meet the refusal, from Python (#58)."""
+    with pytest.raises(ExprError) as caught:
+        parse(source)
+    message = str(caught.value)
+    assert "a method call is not allowed" in message
+    assert advice in message
+
+
+def test_a_method_that_is_not_a_function_gets_the_list_instead():
+    with pytest.raises(ExprError) as caught:
+        parse("tag.upper()")
+    message = str(caught.value)
+    assert "'tag.upper' is not one of the expression language's functions" in message
+    assert "there are only" in message
+    assert "method" not in message
+
+
+@pytest.mark.parametrize(
+    ("source", "fragment"),
+    [
+        ("(yield x)", "yield is not allowed"),
+        ("(yield from x)", "yield is not allowed"),
+    ],
+)
+def test_a_yield_is_refused_in_words(source: str, fragment: str):
+    with pytest.raises(ExprError) as caught:
+        parse(source)
+    assert fragment in str(caught.value)
+    assert "Yield" not in str(caught.value)
 
 
 class _Values:
@@ -369,6 +435,14 @@ class _Values:
         ("endswith(s, 'HTTP/1.1')", "HTTP/1.1 200 OK", False),
         ("endswith(trim(lower(s)), 'chunked')", "gzip, Chunked ", True),
         ("endswith(s, '')", "", True),
+        ("before(s, ';')", "4;name=value", "4"),
+        ("before(s, ';')", "4", "4"),
+        ("before(s, ';')", "4;a=1;b=2", "4"),
+        ("before(s, ';')", ";x", ""),
+        ("before(s, ';')", "", ""),
+        ("before(s, '')", "anything", ""),
+        ("before(s, '\\r\\n')", "a\r\nb", "a"),
+        ("to_int(before(s, ';'), 16)", "1A ;ext", 0x1A),
     ],
 )
 def test_calls_evaluate(source: str, text: str, expected: object):
@@ -414,6 +488,7 @@ def test_to_int_refuses_a_digit_its_base_does_not_have():
         ("trim(s)", ExprType.STR),
         ("startswith(s, 'x')", ExprType.BOOL),
         ("endswith(s, s)", ExprType.BOOL),
+        ("before(s, s)", ExprType.STR),
     ],
 )
 def test_a_call_has_the_type_its_table_row_says(source: str, expected: ExprType):
@@ -429,6 +504,8 @@ def test_a_call_has_the_type_its_table_row_says(source: str, expected: ExprType)
         ("to_int(s, s)", {"s": ExprType.STR}, "argument 2 of to_int()"),
         ("startswith(n, 'x')", {"n": ExprType.INT}, "argument 1 of startswith()"),
         ("endswith(s, n)", {"s": ExprType.STR, "n": ExprType.INT}, "argument 2 of endswith()"),
+        ("before(n, ';')", {"n": ExprType.INT}, "argument 1 of before()"),
+        ("before(s, n)", {"s": ExprType.STR, "n": ExprType.INT}, "argument 2 of before()"),
     ],
 )
 def test_a_call_checks_its_argument_types(source: str, scope: dict, fragment: str):

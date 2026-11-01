@@ -10,8 +10,9 @@ where the seam bug lived. This script is the release checklist's requirement
 It needs two sibling checkouts with their own virtual environments, neither a
 dependency of this project: ``packeteer`` 0.18.0 or later (to fuzz and generate
 traffic, through an example's tunnel module included) and
-``python-zipline-wire`` 0.5.0 or later (``zpfwire``, to turn captures into
-``.zpf``, and a tunnel's opened packets back into conversations).
+``python-zipline-wire`` 0.9.0 or later (``zpfwire``, to turn captures into
+``.zpf`` in format 0.24, the one kober reads, and a tunnel's opened packets
+back into conversations).
 
 An example that brings its own code (``examples/<name>/``) joins the pipeline
 by describing itself in an ``example.json`` beside its spec
@@ -221,9 +222,10 @@ def _generated_dns(tools: Tools, out: Path) -> None:
 
     ``raw:`` messages from ``tools/dns-messages.json``, because a response
     packeteer builds from fields writes every name in full and carries no
-    pointer at all. The file holds section bodies (``{"raw": …}``), not the
-    ``{"dns": {…}}`` shape ``packeteer parse`` writes; the wrapped form is
-    accepted in silence and builds an empty header.
+    pointer at all. Each is wrapped, ``{"dns": {"raw": …}, "direction": …}``,
+    since the wrapped form is what gives a message its direction: a bare
+    section is always sent client to server, so the response left from the
+    client until #62.
     """
     tools.packeteer_cmd(
         "stream", "--payload", "dns", "--protocol", "udp",
@@ -257,6 +259,52 @@ def _generated_http(tools: Tools, out: Path, *, lossy: bool = True) -> None:
 def _clean_http(tools: Tools, out: Path) -> None:
     """Write the generated HTTP stream with no loss at all."""
     _generated_http(tools, out, lossy=False)
+
+
+#: Transactions in each stream of chunk extensions, cycled from three.
+EXT_REQUESTS = 30
+
+
+def _extended_messages() -> list[dict[str, dict[str, str]]]:
+    """Return three transactions whose chunk size lines carry extensions (#54).
+
+    The first response's first chunk has one, since that is the message whose
+    failure declines a direction; the third has several, spaced and quoted.
+    """
+    request = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
+    out: list[dict[str, dict[str, str]]] = []
+    for lines in (("7;sig=abc", "3"), ("4",), ('2;a=1;b="x y"', "1 ;q")):
+        body = b"".join(
+            line.encode() + b"\r\n" + b"z" * int(line.partition(";")[0], 16) + b"\r\n"
+            for line in lines
+        )
+        response = (
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + body + b"0;end\r\n\r\n"
+        )
+        out += [{"http": {"raw": request.hex()}}, {"http": {"raw": response.hex()}}]
+    return out
+
+
+def _extended_http(tools: Tools, out: Path, *, lossy: bool = True) -> None:
+    """Write chunked HTTP whose size lines carry extensions, over small segments.
+
+    packeteer's chunked generator writes no extension, and neither does any
+    capture here, so these go as ``raw`` messages.
+    """
+    messages = out.with_suffix(".messages.json")
+    messages.write_text(json.dumps(_extended_messages()))
+    loss = ["--packet-loss", "0.05"] if lossy else []
+    tools.packeteer_cmd(
+        "stream", "--payload", "http", "--protocol-messages", str(messages),
+        "--client-ip", "10.0.0.2", "--server-ip", "10.0.0.1",
+        "--requests", str(EXT_REQUESTS), "--mss", "40", *loss,
+        "--seed", "3", "--pcap", str(out),
+    )
+
+
+def _extended_http_clean(tools: Tools, out: Path) -> None:
+    """Write the chunk-extension stream with no loss at all."""
+    _extended_http(tools, out, lossy=False)
 
 
 #: Responses in each generated stream of compressed bodies (`tools/gzip_http.py`).
@@ -327,6 +375,8 @@ INPUTS = (
     Input("dns_gen", "dns", _generated_dns),
     Input("http_gen", "http", _generated_http, messages=2 * HTTP_REQUESTS),
     Input("http_clean", "http", _clean_http),
+    Input("http_ext", "http", _extended_http, messages=2 * EXT_REQUESTS),
+    Input("http_ext_clean", "http", _extended_http_clean),
     Input("gzip_lossy", "http", _gzip_http, messages=GZIP_RESPONSES, inflates=True),
     Input("gzip_clean", "http", _gzip_http_clean, inflates=True),
     *(
@@ -660,6 +710,9 @@ def pipeline(tools: Tools, work: Path, baseline: Path | None = None) -> Report:
     for sub in ("captures", "modules", "out"):
         (work / sub).mkdir(parents=True, exist_ok=True)
     print(f"{tools.version(tools.packeteer_bin)}; {tools.version(tools.zpfwire_bin)}")
+    # Both, since a path install's version is metadata recorded when it was
+    # made, and only the file says which code is running (#61).
+    print(f"zpf {zpf.__version__} from {Path(zpf.__file__).parent}")
     print(f"work directory: {work}\n", flush=True)
 
     # Each example's transforms, registered as a user's process would, and

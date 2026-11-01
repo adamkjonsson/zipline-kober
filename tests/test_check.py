@@ -24,11 +24,13 @@ from kober.spec import (
     Param,
     Pointer,
     Remaining,
+    Repeat,
     Select,
     Spec,
     StringType,
     Switch,
     Terminated,
+    ToEnd,
     Unit,
     UnitRef,
     Until,
@@ -948,14 +950,20 @@ def test_the_element_binding_does_not_leak_to_other_expressions():
     ],
     ids=["computed", "pointer", "select"],
 )
-def test_a_repeated_zero_width_field_is_a_decode_time_finding(kind: FieldType):
-    """All three consume nothing, and the checker lets all three through.
+@pytest.mark.parametrize(
+    "repeat",
+    [Count(parse("2")), Count(parse("0")), Count(parse("n")), Until(parse("true")), ToEnd()],
+    ids=["count-2", "count-0", "count-expr", "until", "to-end"],
+)
+def test_a_repeated_zero_width_field_is_refused(kind: FieldType, repeat: Repeat):
+    """All three consume nothing, so a repetition of any of them can never move on (#51).
 
-    A repetition of any of them cannot terminate, and the decoder's own guard
-    is what says so — *"consumed no input; the repetition cannot terminate"*.
-    Pinned as one test over all three rather than asserted for `select` alone,
-    so that whoever decides to catch this statically moves the family together
-    instead of leaving `select` inconsistent with its two siblings.
+    The decoder's guard stopped every such decode at the second element with
+    *"consumed no input; the repetition cannot terminate"*, whatever the input,
+    while ``check`` let all three through. Refused now as ``transform`` and
+    ``concat`` already were, for every repetition kind: a ``count`` of 0 too,
+    since a repetition that can only be empty is not one. Kept as one test over
+    the family, as it was when it pinned the opposite, so the three move together.
     """
     spec = build(
         [
@@ -964,10 +972,56 @@ def test_a_repeated_zero_width_field_is_a_decode_time_finding(kind: FieldType):
                 fields=[
                     Field(name="n", type=IntType(bits=8)),
                     Field(name="items", type=UnitRef(unit="item"), repeat=Count(parse("n"))),
-                    Field(name="picked", type=kind, repeat=Until(parse("true"))),
+                    Field(name="picked", type=kind, repeat=repeat),
                 ],
             ),
             Unit(name="item", fields=[Field(name="tag", type=IntType(bits=8))]),
+        ]
+    )
+    assert "cannot repeat: it reads nothing where it stands" in only_error(spec)
+
+
+def test_a_repeated_switch_that_never_reads_is_refused():
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="n", type=IntType(bits=8)),
+                    Field(
+                        name="picked",
+                        type=Switch(
+                            dispatch=parse("n"),
+                            cases={1: Computed(parse("1")), 2: Computed(parse("2"))},
+                            default=Computed(parse("0")),
+                        ),
+                        repeat=Count(parse("2")),
+                    ),
+                ],
+            ),
+        ]
+    )
+    assert "a switch none of whose cases reads anything cannot repeat" in only_error(spec)
+
+
+def test_a_repeated_switch_with_a_case_that_reads_is_accepted():
+    """One case reads, so a repetition can move on; whether it does is the input's business."""
+    spec = build(
+        [
+            Unit(
+                name="message",
+                fields=[
+                    Field(name="n", type=IntType(bits=8)),
+                    Field(
+                        name="picked",
+                        type=Switch(
+                            dispatch=parse("n"),
+                            cases={1: Computed(parse("1")), 2: IntType(bits=8)},
+                        ),
+                        repeat=Count(parse("2")),
+                    ),
+                ],
+            ),
         ]
     )
     assert errors(spec) == []

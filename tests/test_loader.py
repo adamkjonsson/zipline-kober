@@ -1011,6 +1011,92 @@ def test_an_unnamed_construct_falls_back_to_the_one_above_it():
     assert spec.sources.locate("dns.message.confirm").path == "dns.message.confirm"
 
 
+# --- inside params: and transforms: (#59) ------------------------------------
+#
+# Each entry is reported at the line its key is on. Before, every one of these
+# said line 1, the document's: the entries were located from the document,
+# and a scalar short form (`mode: int`) has no mapping to carry a line at all.
+
+def _with(block: str) -> str:
+    """Return a spec whose `block` starts on line 4, and whose line 6 is the mistake."""
+    return (
+        "name: t\nversion: '1'\nentry: m\n"
+        + block
+        + "units:\n  m:\n    fields:\n      - {name: kind, bits: 8}\n"
+        + "      - {name: x, bits: 8, condition: 'kind == 1'}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("block", "fragment"),
+    [
+        (
+            "params:\n  mode: int\n  keys: {type: {map: [bool, bytes]}}\n",
+            "spec.params.keys.type.map[0]: a map is keyed by",
+        ),
+        (
+            "params:\n  mode: int\n  keys:\n    type:\n      map: [bool, bytes]\n",
+            "spec.params.keys.type.map[0]: a map is keyed by",
+        ),
+        ("params:\n  mode: int\n  keys: integer\n", "spec.params.keys:"),
+        ("params:\n  mode: int\n  keys: {type: int, secret: 1}\n", "spec.params.keys.secret"),
+        (
+            "transforms:\n  xz: {}\n  xz2: {fails_az: unpack-failed}\n",
+            "spec.transforms.xz2: unknown key(s) 'fails_az'",
+        ),
+        (
+            "transforms:\n  xz: {}\n  pb: {params: {n: integer}}\n",
+            "spec.transforms.pb.params.n",
+        ),
+    ],
+)
+def test_a_fault_in_params_or_transforms_carries_its_own_line(block: str, fragment: str):
+    text = _with(block)
+    with pytest.raises(SpecError) as caught:
+        from_yaml(text, source="t.yaml")
+    assert fragment in str(caught.value)
+    assert caught.value.loc is not None
+    line = caught.value.loc.line
+    assert line is not None
+    assert line > 4, f"reported at line {line}, the block's or the document's"
+    assert text.splitlines()[line - 1].strip().startswith(
+        ("keys", "xz2", "pb", "map", "type")
+    ), f"line {line} is {text.splitlines()[line - 1]!r}"
+
+
+@pytest.mark.parametrize(
+    ("block", "path", "line"),
+    [
+        ("params:\n  mode: int\n  kind: int\n", "t.params.kind", 6),
+        ("params:\n  mode: int\n  kind:\n    type: int\n", "t.params.kind", 6),
+        ("transforms:\n  xz: {}\n  xz2: {fails_as: Bad_Reason}\n", "t.transforms.xz2.fails_as", 6),
+        (
+            "transforms:\n  xz: {}\n  xz2:\n    params: {n: int}\n    fails_as: Bad_Reason\n",
+            "t.transforms.xz2.fails_as",
+            8,
+        ),
+        ("transforms:\n  pb: {}\n  pb2: {params: {n: int}}\n", "t.transforms.pb2", 6),
+    ],
+)
+def test_a_finding_in_params_or_transforms_carries_its_own_line(
+    block: str, path: str, line: int
+):
+    """The checker's findings, error or warning, look the same lines up."""
+    findings = [f for f in check(from_yaml(_with(block), source="t.yaml")) if f.where.path == path]
+    assert findings, f"nothing reported at {path}"
+    assert {f.where.line for f in findings} == {line}
+
+
+def test_json_params_degrade_to_the_path_alone():
+    document = dict(MINIMAL)
+    document["params"] = {"mode": "int", "keys": {"type": {"map": ["bool", "bytes"]}}}
+    with pytest.raises(SpecError) as caught:
+        from_json(json.dumps(document), source="t.json")
+    assert caught.value.loc is not None
+    assert caught.value.loc.line is None
+    assert str(caught.value).startswith("spec.params.keys.type.map[0]")
+
+
 # --- the repeat kind lifts into the field ----------------------------------
 #
 # The same rule as the type kind, applied to the construct beside it. Every

@@ -24,7 +24,7 @@ Its tests are [`tests/test_packbits_example.py`](../../tests/test_packbits_examp
 ## What you need
 
 kober with its YAML extra (`pip install 'kober[yaml]'`),
-[`zpfwire`](https://github.com/adamkjonsson/python-zipline-wire) 0.5.0 or
+[`zpfwire`](https://github.com/adamkjonsson/python-zipline-wire) 0.9.0 or
 later, and, to generate traffic,
 [packeteer](https://github.com/adamkjonsson/packeteer) 0.18.0 or later.
 
@@ -90,7 +90,7 @@ drop it.
 
 ## The traffic inside
 
-As for WireGuard, `zpfwire` 0.5.0 turns the packets back into the conversation
+As for WireGuard, `zpfwire` (0.9.0 or later) turns the packets back into the conversation
 they carried, and any spec decodes it:
 
 ```console

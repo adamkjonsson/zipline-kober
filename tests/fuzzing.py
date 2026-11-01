@@ -93,6 +93,15 @@ HTTP_DEFLATED_CHUNKED = (
     + b"\r\n0\r\n\r\n"
 )
 
+#: A chunked body whose size lines carry extensions (#54), which no capture and
+#: no generator here writes, so only this seed reaches `before()` with a `;`.
+HTTP_CHUNK_EXTENDED = (
+    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+    b"5;sig=abc\r\nhello\r\n"
+    b'3 ;a=1;b="x y"\r\nabc\r\n'
+    b"0;last\r\n\r\n"
+)
+
 #: Every framing arm the shipped example chooses between, so a sweep covers the
 #: choice and not only one side of it, and both ways it inflates a body.
 HTTP_FRAMINGS: tuple[bytes, ...] = (
@@ -101,6 +110,7 @@ HTTP_FRAMINGS: tuple[bytes, ...] = (
     HTTP_COUNTED,
     HTTP_GZIPPED,
     HTTP_DEFLATED_CHUNKED,
+    HTTP_CHUNK_EXTENDED,
 )
 
 #: A real DNS response, from `python-zipline-wire`'s ``dns_example.pcapng``.

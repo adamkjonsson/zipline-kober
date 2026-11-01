@@ -33,7 +33,7 @@ itself came from the second kind, and none of them needed a clever test.
 | `examplekit.py` | Not tests: what every bring-your-own-code example's tests need, described once by an `Example` read from the example's `example.json` — loading its modules by path, its key log read as `--param` reads it, the oracle that checks a decode against what its tunnel module sealed, the whole chain, fuzz invariants, and `kober run`. No pytest import, so `tools/pipeline.py` can use it too. |
 | `test_examplekit.py` | Every `example.json`: the files it names exist, its failure and key parameter are its spec's, and a key the kit does not know is refused. |
 | `test_packbits_example.py` | `examples/packbits/`, the second example, written from the first's template: its codec against TN1023's worked example and TIFF 6.0's rules, its tunnel module, its spec over datagrams built here, the whole chain, fuzzing, and `kober run` with no `--param`. Most of it is the kit's. |
-| `test_wireguard_example.py` | `examples/wireguard/`: its cipher against RFC 8439's and RFC 7748's own vectors (and `cryptography`, where installed), its handshake, its spec, its tunnel module, its key-log converter (from either endpoint's half of Wireshark's key log, it must derive exactly the keys that were sealed with, and a pre-shared key it lacks must leave a handshake unopened), a tunnel decoded by both drivers, and `kober run` with a key log. Some tests reach outside and skip without it: Wireshark opening what the example seals (needs `tshark`), and the whole chain through packeteer, `zpfwire`, the tunnel, `zpfwire` again and `dns.yaml` or `http.yaml` (needs the sibling checkouts, `zpfwire` 0.5.0 for the inner hop). |
+| `test_wireguard_example.py` | `examples/wireguard/`: its cipher against RFC 8439's and RFC 7748's own vectors (and `cryptography`, where installed), its handshake, its spec, its tunnel module, its key-log converter (from either endpoint's half of Wireshark's key log, it must derive exactly the keys that were sealed with, and a pre-shared key it lacks must leave a handshake unopened), a tunnel decoded by both drivers, and `kober run` with a key log. Some tests reach outside and skip without it: Wireshark opening what the example seals (needs `tshark`), and the whole chain through packeteer, `zpfwire`, the tunnel, `zpfwire` again and `dns.yaml` or `http.yaml` (needs the sibling checkouts, `zpfwire` 0.9.0 or later). |
 | `test_cli.py` | All five verbs, driving `main()` directly. |
 | `test_examples.py` | The shipped `examples/` specs — they must check clean, carry documentation, and still decode. |
 | `test_packeteer.py` | packeteer's shipped specs, vendored under `tests/packeteer/` at a stated version: they load, decode, and have every key kober has no meaning for declined by name. |
@@ -192,17 +192,20 @@ It is one command, and **run it before a release, or after touching
 
 It needs two sibling checkouts with their own venvs, neither a dependency of
 this project — `../packeteer` and `../python-zipline-wire`, or wherever
-`--packeteer` and `--wire` say: packeteer 0.18.0 or later, for its UDP tunnel,
-and `zpfwire` 0.5.0 or later, for a `.zpf` of packets. It builds ten inputs of
-its own, and those of every example that describes itself in an `example.json`
-(`tests/examplekit.py`); WireGuard's five and PackBits' two make seventeen:
+`--packeteer` and `--wire` say: packeteer 0.18.0 or later, for its UDP tunnel
+and a wrapped message's direction, and `zpfwire` 0.9.0 or later, which writes
+format 0.24, the one kober reads. It builds twelve inputs of its own, and those of every example that
+describes itself in an `example.json` (`tests/examplekit.py`); WireGuard's five
+and PackBits' two make nineteen:
 
 | Input | What it is for |
 | --- | --- |
 | `dns_fuzz` | `packeteer fuzz --seed 1` over `dns_example.pcapng`: adversarial variants of real DNS, compression pointers and all. |
-| `dns_gen` | A generated, lossy DNS stream whose response is compressed — `raw:` bytes from `tools/dns-messages.json`, since a built message carries no pointer (see *Generated DNS* below). |
+| `dns_gen` | A generated, lossy DNS exchange whose response is compressed and goes server to client — `raw:` bytes from `tools/dns-messages.json`, since a built message carries no pointer (see *Generated DNS* below). |
 | `http_gen` | Generated chunked HTTP with trailers at `--mss 200` on a 5% lossy link: chunk boundaries across segment boundaries, and losses mid-body. |
 | `http_clean` | The same traffic with no loss, so its shape can be checked exactly. |
+| `http_ext` | 30 chunked transactions whose size lines carry chunk extensions (`7;sig=abc`, `2;a=1;b="x y"`), as `raw` messages, since packeteer's chunked generator writes none: 40-byte segments on a 5% lossy link (#54). |
+| `http_ext_clean` | The same traffic with no loss, checked exactly against the reference reader. |
 | `gzip_lossy` | 30 HTTP responses, gzip, deflate and plain, length-framed and chunked, from `tools/gzip_http.py`, cut into 200-byte segments on a 5% lossy link. Its bodies are large, so a gap lands inside one routinely (#49). packeteer's HTTP payload cannot carry them, so they go through `tools/blob.yaml`, a one-field protocol of the project's own. |
 | `gzip_clean` | The same traffic with no loss, checked exactly against the reference reader. |
 | `packet_loss`, `tcp_lossy_ts`, `tcp_reorder_ts` | Real captures kept for their loss and reordering. They are not DNS or HTTP; they are driver structure. |
@@ -354,12 +357,19 @@ supplying the bytes yourself is the only way to put a compressed response into
 an impaired stream, and a compressed response behind a lost datagram is exactly
 the case nothing else here can produce.
 
-**One trap, since it cost a run to find.** Each element of the file is a
-protocol **section body** — `{"raw": …}` — not the `{"dns": {…}}` shape that
-`packeteer parse` writes. The wrapped form is accepted in silence and builds an
-empty 12-byte header, so the pipeline runs, the output is conformant, coverage
-is complete, and every message is a bare DNS header. Assert the shape: counting
-`.target` records is the cheapest way to know a pointer was followed at all.
+**Wrap a section to give it a direction.** Since packeteer 0.18.0 an element
+may be `{"dns": {"raw": …}, "direction": "s2c"}`, the shape `packeteer parse`
+writes, and that is how a reply leaves from the server; a bare section body,
+`{"raw": …}`, is always sent client to server. Until 0.20.0 a `direction`
+beside a bare section was ignored in silence, and since then it is refused.
+Before 0.18.0 the wrapped form was the one to avoid, accepted in silence and
+built as an empty header, which is why `tools/dns-messages.json` was bare and
+its response went out from the client until
+[#62](https://github.com/adamkjonsson/zipline-kober/issues/62). Either way,
+assert the shape: counting `.target` records is the cheapest way to know a
+pointer was followed at all. HTTP is the exception to the direction rule: a
+`{"http": {"raw": …}}` message takes its direction from its start line, and a
+`direction` beside it is refused.
 
 ### A trailer section is not a chunk
 

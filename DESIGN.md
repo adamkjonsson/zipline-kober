@@ -165,6 +165,22 @@ packet, which a sessionization stage takes as a packet. `net:` is closed, so
 the format never checks a payload against its label, so the transform that
 writes one has to make it true.
 
+Revision 14, for `0.7.0`
+([`plans/FIXES-AFTER-0.6.0-PLAN.md`](plans/FIXES-AFTER-0.6.0-PLAN.md)), is
+fixes found after 0.6.0, and a port. `check` refuses a repetition of any field
+that reads nothing where it stands (§3.2), which the decoder could only ever
+stop at its second element. The expression language gains a seventh function,
+`before` (§3.3), so the HTTP spec reads a chunk's size ahead of its
+extensions. A refused call names its callee as written, and a mistake in a
+document parameter or a transform declaration is reported at its own line.
+The port is to python-zipline 0.8.0 and spec 0.24, declared by its release
+tag. 0.24 settles where a closed TCP stream ends (zipline#168, raised from
+this project's pipeline): its extent counts sequence numbers, and a FIN's
+position is owed no coverage, so kober's output over such a stream passes the
+coverage check with no change here. It also flags a capture-point copy of a
+datagram, which the driver passes over rather than decoding twice (§5's list
+of regions).
+
 Claims below marked **[verified]** were executed, not reasoned about: against
 `zpf` 0.16 by the script in §10, and against real captures as recorded in §13.
 
@@ -230,6 +246,10 @@ when this doesn't match":
   `reason="undecodable"`, commented `no message boundary found after a gap`,
   retried where it stopped if a guard refused it and otherwise to the end of
   the run (§3.1, *After a gap*)
+- a datagram flagged `copy` (spec 0.24: the capture saw it twice, the sender
+  sent it once, and it is byte-identical to the one before it) → never decoded,
+  `reason="skipped"`, commented `capture-point copy of the previous datagram`,
+  or the declined stream's comment if its stream is declined
 
 **What the guarantee is not: leaves do not tile the input.** Until `Pointer`
 (§3.2) existed, every leaf covered a distinct range and the leaves together
@@ -908,7 +928,7 @@ file.
 ### 3.3 Expressions
 
 Small, total, side-effect free: arithmetic, comparison, boolean ops, field
-references, literals, and **calls to a closed table of three functions**. No
+references, literals, and **calls to a closed table of seven functions**. No
 loops, and nothing an author can add to. Authored as strings
 (`size: "header.length * 4"`), parsed to an AST at load time so `check` can
 type them and scope them against the spec before any data exists.
@@ -936,6 +956,16 @@ are the table:
 | `to_int(s)`, `to_int(s, base)` | int |
 | `lower(s)` | str |
 | `trim(s)` | str |
+| `startswith(s, prefix)`, `endswith(s, suffix)` | bool |
+| `len(b)` | int |
+| `before(s, sep)` | str |
+
+The first three are what HTTP's framing asked for. The rest came later, each
+from a use the table did not have in view: a prefix and a suffix for what a
+start line looks like and for `chunked` being the last coding (#50), a
+length for a tunnel's keepalive (revision 13), and the text before a
+separator for a chunk's size ahead of its extensions (#54). The format
+reference holds the full table.
 
 `to_int` is deliberately stricter than a typical library conversion: leading
 and trailing whitespace is allowed, because an HTTP field value carries
@@ -1372,7 +1402,9 @@ decoder that wrote it — independent of `content_type`, so a field record carri
 `SessionWriter.record()`, which this project does not call. The pin became
 `zpf>=0.3.0,<0.4` — it was `>=0.5.0,<0.6` from kober 0.3.0, two minors that
 changed nothing this tree calls except to add `adjacency=`, and is
-`>=0.6.0,<0.7` (spec 0.23) since kober 0.6.0, for `net:` — and §4.1's single
+`>=0.6.0,<0.7` (spec 0.23) from kober 0.6.0, for `net:`, and is python-zipline
+0.8.0 by its tag (spec 0.24) since kober 0.7.0, for where a closed TCP stream
+ends and the `copy` flag — and §4.1's single
 emit site made the switch the one-line change it was kept that way to be.
 
 ### 9.2 Smaller findings

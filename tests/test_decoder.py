@@ -371,9 +371,12 @@ def test_negative_repeat_count_is_undecodable():
 
 
 def test_a_repetition_that_consumes_nothing_cannot_spin():
-    """A zero-width element under to_end would otherwise loop forever."""
+    """A zero-width element under to_end would otherwise loop forever.
+
+    ``check`` refuses the spec (#51); the guard is for one run with ``check=False``.
+    """
     fields = '      - {name: xs, type: {computed: "1"}, repeat: {to_end: true}}'
-    tree = decode(fields, b"\x01\x02")
+    tree = Decoder(build(fields), check=False).decode_bytes(b"\x01\x02")
     assert tree.status is NodeStatus.UNDECODABLE
     assert "cannot terminate" in tree.detail
 

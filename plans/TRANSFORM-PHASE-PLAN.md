@@ -1,5 +1,7 @@
 # Phase plan: transforms — decompression and decryption
 
+> **Closed: shipped in `v0.5.0` (2026-09-28).** Marked at the 0.7.0 release; the state below is as it was last written, and `CHANGELOG.md` says what shipped.
+
 **State: Stage 1 done; its three decisions made (2026-09-26).** Stage 0 landed (`0.5.0.dev0`,
 a pipeline baseline). The Stage 1 spike ran on 2026-09-24 and is recorded in
 *What the Stage 1 spike found*, below. Where it proved a leaning wrong, the

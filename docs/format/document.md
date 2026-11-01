@@ -416,7 +416,10 @@ sensor 1.0: 0 error(s), 5 warning(s)
 A key on the document is reported at the document, so the two top-level ones
 say line 1 rather than the line each is written on: a mapping knows where it
 began and not where each of its keys is. The field-level ones are exact,
-because a field *is* a mapping.
+because a field *is* a mapping. So is anything inside `params:` or
+`transforms:`: each parameter and each declaration is reported at the line its
+name is written on, the short form `mode: int` included. Only a key on the
+document itself says line 1.
 
 A warning rather than an error because **ignoring any of them changes no
 decode** — the spec describes the same messages either way, which is the whole

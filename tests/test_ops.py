@@ -459,7 +459,9 @@ def test_a_select_names_no_unit():
 # --- what a repetition needs to know, which is not what a unit needs --------
 
 
-def repeat_plan(*, condition: str | None = None, element: str = "{unit: item}") -> Plan:
+def repeat_plan(
+    *, condition: str | None = None, element: str = "{unit: item}", check: bool = True
+) -> Plan:
     """Build a plan whose `items` repeats `element`, optionally conditionally."""
     guard = f', condition: "{condition}"' if condition else ""
     return Plan.from_spec(
@@ -478,7 +480,8 @@ units:
     fields:
       - {{name: tag, type: {{int: {{bits: 8}}}}}}
 """
-        )
+        ),
+        check=check,
     )
 
 
@@ -508,8 +511,13 @@ def test_an_unconditional_repeat_answers_both_the_same_way():
 
 @pytest.mark.parametrize("condition", [None, "flag == 1"], ids=["plain", "conditional"])
 def test_an_element_that_reads_nothing_never_provably_advances(condition: str | None):
-    """A `computed` reads nothing, so a repeat of one needs the guard either way."""
-    item = items_of(repeat_plan(condition=condition, element='{computed: "flag"}'))
+    """A `computed` reads nothing, so a repeat of one needs the guard either way.
+
+    ``check`` refuses the spec (#51); the guard is for one planned with ``check=False``.
+    """
+    item = items_of(
+        repeat_plan(condition=condition, element='{computed: "flag"}', check=False)
+    )
     assert item.element_consumes is False
     assert item.consumes is False
 

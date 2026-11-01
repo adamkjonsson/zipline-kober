@@ -1596,6 +1596,27 @@ AWKWARD["prefixes"] = """
             condition: "startswith(lower(line), 'http/') or endswith(line, '')"
 """
 
+#: `before()` (#54) over a literal, a field and an empty separator, feeding
+#: `to_int` as a chunk size does, and in a field named after it, which a
+#: compiled module's local would otherwise hide the helper behind.
+AWKWARD["separators"] = """
+    name: separators
+    version: "1"
+    entry: m
+    units:
+      m:
+        fields:
+          - {name: line, type: {string: {delimiter: "\\r\\n"}}}
+          - {name: sep, type: {string: {delimiter: "\\r\\n"}}}
+          - {name: before, type: {computed: "before(line, ';')"}}
+          - {name: cut, type: {computed: "before(line, sep)"}}
+          - {name: empty, type: {computed: "before(line, '') == ''"}}
+          - {name: size, type: {computed: "to_int(before(line, ';'), 16)"}}
+          - name: rest
+            type: {bytes: {size: {remaining: true}}}
+            condition: "before(sep, line) == sep"
+"""
+
 AWKWARD["transform"] = TRANSFORM_SPEC
 AWKWARD["transform framed by length"] = TRANSFORM_SPEC
 AWKWARD["transform bomb"] = TRANSFORM_SPEC
@@ -1663,6 +1684,7 @@ AWKWARD_SEEDS: dict[str, bytes] = {
     "entry granularity": bytes([7, 0xA5, 0x12, 0x34]) + b"tail",
     "guards": bytes([1, 7, 2, 3]),
     "prefixes": b"HTTP/1.1 200 OK\r\nbody",
+    "separators": b"1a;name=value\r\n=\r\nrest",
     "transform": TRANSFORM_MESSAGES[0],
     "transform framed by length": TRANSFORM_MESSAGES[1],
     "transform bomb": TRANSFORM_ADVERSE[0],
@@ -1966,9 +1988,12 @@ def test_the_shapes_the_backend_refuses_say_so(fragment: str, source: str):
     differential could not catch — it would never see the spec.
     """
     spec = inline(source)
-    assert Decoder(spec) is not None
+    # A repeated pointer is refused by `check` since #51; the compiler's own
+    # refusal is what a spec run with check=False meets.
+    unchecked = fragment == "repeated pointer"
+    assert Decoder(spec, check=not unchecked) is not None
     with pytest.raises(CompileError, match=fragment):
-        compiled(spec)
+        compiled(spec, check=not unchecked)
 
 
 # --- select ----------------------------------------------------------------
@@ -2213,7 +2238,9 @@ def test_a_conditional_repeat_of_a_consuming_element_needs_no_progress_guard():
     reading_nothing = CONDITIONAL_REPEAT.replace(
         '{unit: item}', '{computed: "flag"}'
     ).replace('repeat: {to_end: true}', 'repeat: {count: "flag"}')
-    assert "the repetition cannot terminate" in render(Plan.from_spec(inline(reading_nothing)))
+    # `check` refuses that shape (#51), so it is only reachable unchecked.
+    plan = Plan.from_spec(inline(reading_nothing), check=False)
+    assert "the repetition cannot terminate" in render(plan)
 
 
 @pytest.mark.parametrize(

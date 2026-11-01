@@ -57,7 +57,7 @@ from kober.errors import (
     TruncatedRead,
     Undecodable,
 )
-from kober.expr import map_entry, shift_left, shift_right, to_int
+from kober.expr import before, map_entry, shift_left, shift_right, to_int
 from kober.spec import Endian
 
 if TYPE_CHECKING:
@@ -81,6 +81,7 @@ __all__ = [
     "TransformFailed",
     "TruncatedRead",
     "Undecodable",
+    "before",
     "bind_transforms",
     "cited",
     "concat",

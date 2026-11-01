@@ -251,10 +251,20 @@ units:
     fields:
       - name: size
         string: {delimiter: "\r\n"}
-        doc: The size in hexadecimal, as text — this is what `to_int` is for.
+        doc: >
+          The size line, as text: the size in hexadecimal, and any chunk
+          extensions after it (`4;name=value`), which are kept here as written.
       - name: length
-        computed: "to_int(size, 16)"
-        doc: The same number, converted once and named.
+        computed: "to_int(before(size, ';'), 16)"
+        doc: >
+          The size, converted once and named.
+
+          RFC 9112 §7.1.1 writes the line `chunk-size [ chunk-ext ] CRLF`,
+          each extension led by `;`, with optional whitespace before it. So
+          the size is the text before the first `;`, or the whole line when
+          there is none, and `to_int` strips the whitespace. Reading the whole
+          line as the number made one extension undecodable, and in a
+          response direction's first message, that declined the stream.
       - name: data
         bytes: {size: {expr: "length"}}
         doc: The chunk's share of the body, which `body` joins.
